@@ -22,6 +22,12 @@
  *	of a record or a resource) and room for answers are used where they
  *	are, once checked. A NULL pointer is handed on as NULL: the layer
  *	answers for it as it does for the kernel.
+ *
+ *	The kernel reaches the process's pages only with the way to them
+ *	open (PAN): the copies are made with knl_ua_get and knl_ua_put, and
+ *	a call of the layer that uses the process's memory where it is runs
+ *	inside UACCESS, after every pointer it is handed has been made sure
+ *	of.
  */
 
 #include <sys/machine.h>
@@ -70,7 +76,7 @@ LOCAL ER str_in( CONST UB *src, UB *dst, INT max, BOOL cut )
 		  && !user_ok(src + i, 1, FALSE) ) {
 			return E_MACV;
 		}
-		dst[i] = src[i];
+		dst[i] = UACCESS(src[i]);
 		if ( dst[i] == 0 ) {
 			return E_OK;
 		}
@@ -92,7 +98,7 @@ LOCAL ER uuid_in( CONST TS_UUID *u, TS_UUID *k, CONST TS_UUID **pp )
 	if ( !user_ok(u, sizeof(*u), FALSE) ) {
 		return E_MACV;
 	}
-	*k = *u;
+	knl_ua_get(k, u, sizeof(*k));
 	*pp = k;
 	return E_OK;
 }
@@ -114,7 +120,7 @@ LOCAL ER buf_in( CONST void *src, SZ size, SZ max, void **p_copy )
 	if ( *p_copy == NULL ) {
 		return E_NOMEM;
 	}
-	knl_memcpy(*p_copy, src, size);
+	knl_ua_get(*p_copy, src, size);
 	return E_OK;
 }
 
@@ -160,7 +166,7 @@ LOCAL ER cre_in( CONST T_OBCRE *u, CRECOPY **pp )
 		return E_NOMEM;
 	}
 	k->json = k->arg = k->icon = NULL;
-	k->c = *u;
+	knl_ua_get(&k->c, u, sizeof(k->c));
 	if ( k->c.name != NULL ) {
 		er = str_in(k->c.name, k->name, sizeof(k->name), TRUE);
 		k->c.name = k->name;
@@ -171,7 +177,7 @@ LOCAL ER cre_in( CONST T_OBCRE *u, CRECOPY **pp )
 	}
 	if ( er >= E_OK && k->c.prt != NULL ) {
 		if ( user_ok(k->c.prt, sizeof(T_OBPRT), FALSE) ) {
-			k->prt = *k->c.prt;
+			knl_ua_get(&k->prt, k->c.prt, sizeof(k->prt));
 			k->c.prt = &k->prt;
 		} else {
 			er = E_MACV;
@@ -216,7 +222,7 @@ LOCAL ER svc_cre_obj( CONST T_OBCRE *pk_cre, TS_UUID *p_uuid )
 	if ( !out_ok(p_uuid, sizeof(*p_uuid)) ) return E_MACV;
 	er = cre_in(pk_cre, &k);
 	if ( er < E_OK ) return er;
-	er = ob_cre_obj(( k != NULL ) ? &k->c : NULL, p_uuid);
+	er = UACCESS(ob_cre_obj(( k != NULL ) ? &k->c : NULL, p_uuid));
 	cre_free(k);
 	return er;
 }
@@ -238,7 +244,7 @@ LOCAL ER svc_ref_obj( CONST TS_UUID *uuid, T_OBREF *pk_ref )
 
 	if ( er < E_OK ) return er;
 	if ( !out_ok(pk_ref, sizeof(*pk_ref)) ) return E_MACV;
-	return ob_ref_obj(u, pk_ref);
+	return UACCESS(ob_ref_obj(u, pk_ref));
 }
 
 LOCAL ER svc_ref_vol( CONST TS_UUID *uuid, T_OBVOL *pk_vol )
@@ -249,7 +255,16 @@ LOCAL ER svc_ref_vol( CONST TS_UUID *uuid, T_OBVOL *pk_vol )
 
 	if ( er < E_OK ) return er;
 	if ( !out_ok(pk_vol, sizeof(*pk_vol)) ) return E_MACV;
-	return ob_ref_vol(u, pk_vol);
+	return UACCESS(ob_ref_vol(u, pk_vol));
+}
+
+LOCAL ER svc_wip_vol( CONST TS_UUID *uuid )
+{
+	CONST TS_UUID	*u;
+	TS_UUID		k;
+	ER		er = uuid_in(uuid, &k, &u);
+
+	return ( er < E_OK ) ? er : ob_wip_vol(u);
 }
 
 LOCAL ER svc_lst_obj( UINT type, UINT sub, CONST TS_UUID *from, TS_UUID *buf, INT n, INT *p_cnt )
@@ -261,7 +276,7 @@ LOCAL ER svc_lst_obj( UINT type, UINT sub, CONST TS_UUID *from, TS_UUID *buf, IN
 	if ( er < E_OK ) return er;
 	if ( n < 0 ) return E_PAR;
 	if ( !out_ok(buf, (SZ)n * (SZ)sizeof(TS_UUID)) || !out_ok(p_cnt, sizeof(*p_cnt)) ) return E_MACV;
-	return ob_lst_obj(type, sub, u, buf, n, p_cnt);
+	return UACCESS(ob_lst_obj(type, sub, u, buf, n, p_cnt));
 }
 
 LOCAL ER svc_lnk_obj( CONST TS_UUID *uuid )
@@ -293,7 +308,7 @@ LOCAL ER svc_cpy_obj( CONST TS_UUID *uuid, CONST T_OBCRE *pk_cre, TS_UUID *p_uui
 	if ( !out_ok(p_uuid, sizeof(*p_uuid)) ) return E_MACV;
 	er = cre_in(pk_cre, &k);
 	if ( er < E_OK ) return er;
-	er = ob_cpy_obj(u, ( k != NULL ) ? &k->c : NULL, p_uuid);
+	er = UACCESS(ob_cpy_obj(u, ( k != NULL ) ? &k->c : NULL, p_uuid));
 	cre_free(k);
 	return er;
 }
@@ -304,33 +319,33 @@ LOCAL ER svc_rea_rec( ID key, INT recno, D off, void *buf, SZ size, SZ *p_asize 
 {
 	if ( size < 0 ) return E_PAR;
 	if ( !out_ok(buf, size) || !out_ok(p_asize, sizeof(*p_asize)) ) return E_MACV;
-	return ob_rea_rec(key, recno, off, buf, size, p_asize);
+	return UACCESS(ob_rea_rec(key, recno, off, buf, size, p_asize));
 }
 
 LOCAL ER svc_wri_rec( ID key, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize )
 {
 	if ( size < 0 ) return E_PAR;
 	if ( !in_ok(buf, size) || !out_ok(p_asize, sizeof(*p_asize)) ) return E_MACV;
-	return ob_wri_rec(key, recno, off, buf, size, p_asize);
+	return UACCESS(ob_wri_rec(key, recno, off, buf, size, p_asize));
 }
 
 LOCAL ER svc_apd_rec( ID key, UINT rt, UINT sub, INT *p_recno )
 {
 	if ( !out_ok(p_recno, sizeof(*p_recno)) ) return E_MACV;
-	return ob_apd_rec(key, rt, sub, p_recno);
+	return UACCESS(ob_apd_rec(key, rt, sub, p_recno));
 }
 
 LOCAL ER svc_lst_rec( ID key, T_OBREC *buf, INT n, INT *p_cnt )
 {
 	if ( n < 0 ) return E_PAR;
 	if ( !out_ok(buf, (SZ)n * (SZ)sizeof(T_OBREC)) || !out_ok(p_cnt, sizeof(*p_cnt)) ) return E_MACV;
-	return ob_lst_rec(key, buf, n, p_cnt);
+	return UACCESS(ob_lst_rec(key, buf, n, p_cnt));
 }
 
 LOCAL ER svc_sch_rec( ID key, INT from, UINT rt, UINT sub, UINT mask, INT *p_recno )
 {
 	if ( !out_ok(p_recno, sizeof(*p_recno)) ) return E_MACV;
-	return ob_sch_rec(key, from, rt, sub, mask, p_recno);
+	return UACCESS(ob_sch_rec(key, from, rt, sub, mask, p_recno));
 }
 
 LOCAL ER svc_map_rec( ID key, INT recno, ID target, T_OBMAP *pk_map )
@@ -342,10 +357,10 @@ LOCAL ER svc_map_rec( ID key, INT recno, ID target, T_OBMAP *pk_map )
 		return ob_map_rec(key, recno, target, NULL);
 	}
 	if ( !user_ok(pk_map, sizeof(*pk_map), TRUE) ) return E_MACV;
-	m = *pk_map;
+	knl_ua_get(&m, pk_map, sizeof(m));
 	er = ob_map_rec(key, recno, target, &m);
 	if ( er >= E_OK && user_ok(pk_map, sizeof(*pk_map), TRUE) ) {
-		*pk_map = m;			/* the address it was given */
+		knl_ua_put(pk_map, &m, sizeof(m));	/* the address it was given */
 	}
 	return er;
 }
@@ -356,7 +371,7 @@ LOCAL ER svc_get_atr( ID key, UB *json, SZ size, SZ *p_asize )
 {
 	if ( size < 0 ) return E_PAR;
 	if ( !out_ok(json, size) || !out_ok(p_asize, sizeof(*p_asize)) ) return E_MACV;
-	return ob_get_atr(key, json, size, p_asize);
+	return UACCESS(ob_get_atr(key, json, size, p_asize));
 }
 
 LOCAL ER svc_set_atr( ID key, CONST UB *json, SZ size )
@@ -374,7 +389,7 @@ LOCAL ER svc_get_ico( ID key, UB *buf, SZ size, SZ *p_asize )
 {
 	if ( size < 0 ) return E_PAR;
 	if ( !out_ok(buf, size) || !out_ok(p_asize, sizeof(*p_asize)) ) return E_MACV;
-	return ob_get_ico(key, buf, size, p_asize);
+	return UACCESS(ob_get_ico(key, buf, size, p_asize));
 }
 
 LOCAL ER svc_set_ico( ID key, CONST UB *buf, SZ size )
@@ -408,7 +423,7 @@ LOCAL ER svc_rea_res( ID key, CONST UB *name, D off, void *buf, SZ size, SZ *p_a
 	if ( er < E_OK ) return er;
 	if ( size < 0 ) return E_PAR;
 	if ( !out_ok(buf, size) || !out_ok(p_asize, sizeof(*p_asize)) ) return E_MACV;
-	return ob_rea_res(key, n, off, buf, size, p_asize);
+	return UACCESS(ob_rea_res(key, n, off, buf, size, p_asize));
 }
 
 LOCAL ER svc_wri_res( ID key, CONST UB *name, CONST void *buf, SZ size )
@@ -420,7 +435,7 @@ LOCAL ER svc_wri_res( ID key, CONST UB *name, CONST void *buf, SZ size )
 	if ( er < E_OK ) return er;
 	if ( size < 0 ) return E_PAR;
 	if ( !in_ok(buf, size) ) return E_MACV;
-	return ob_wri_res(key, n, buf, size);
+	return UACCESS(ob_wri_res(key, n, buf, size));
 }
 
 LOCAL ER svc_del_res( ID key, CONST UB *name )
@@ -436,7 +451,7 @@ LOCAL ER svc_lst_res( ID key, UB *buf, SZ size, INT *p_cnt )
 {
 	if ( size < 0 ) return E_PAR;
 	if ( !out_ok(buf, size) || !out_ok(p_cnt, sizeof(*p_cnt)) ) return E_MACV;
-	return ob_lst_res(key, buf, size, p_cnt);
+	return UACCESS(ob_lst_res(key, buf, size, p_cnt));
 }
 
 /* ---------------------------------------------------------------- protection, names, users */
@@ -449,7 +464,7 @@ LOCAL ER svc_get_prt( CONST TS_UUID *uuid, T_OBPRT *pk_prt )
 
 	if ( er < E_OK ) return er;
 	if ( !out_ok(pk_prt, sizeof(*pk_prt)) ) return E_MACV;
-	return ob_get_prt(u, pk_prt);
+	return UACCESS(ob_get_prt(u, pk_prt));
 }
 
 /* A protection of the process's, copied into memory of the kernel's (NULL for NULL) */
@@ -466,7 +481,7 @@ LOCAL ER prt_in( CONST T_OBPRT *p, T_OBPRT **pp )
 	if ( *pp == NULL ) {
 		return E_NOMEM;
 	}
-	**pp = *p;
+	knl_ua_get(*pp, p, sizeof(**pp));
 	return E_OK;
 }
 
@@ -490,13 +505,14 @@ LOCAL ER svc_fnd_nam( CONST UB *name, TS_UUID *p_uuid )
 	UB	k[OB_NAME_MAX];
 	ER	er;
 
+	if ( !out_ok(p_uuid, sizeof(*p_uuid)) ) return E_MACV;
 	if ( name == NULL ) {
-		return ob_fnd_nam(NULL, p_uuid);
+		return UACCESS(ob_fnd_nam(NULL, p_uuid));
 	}
 	er = str_in(name, k, sizeof(k), FALSE);
 	if ( er < E_OK ) return er;
 	if ( !out_ok(p_uuid, sizeof(*p_uuid)) ) return E_MACV;
-	return ob_fnd_nam(k, p_uuid);
+	return UACCESS(ob_fnd_nam(k, p_uuid));
 }
 
 /* A name of a link in a box: an object name or a file name */
@@ -527,7 +543,7 @@ LOCAL ER svc_fnd_lnk( CONST TS_UUID *box, CONST UB *name, TS_UUID *p_uuid )
 
 	if ( er < E_OK ) return er;
 	if ( !out_ok(p_uuid, sizeof(*p_uuid)) ) return E_MACV;
-	return ob_fnd_lnk(b, nm, p_uuid);
+	return UACCESS(ob_fnd_lnk(b, nm, p_uuid));
 }
 
 LOCAL ER svc_lst_lnk( CONST TS_UUID *box, CONST UB *name, TS_UUID *buf, INT n, INT *p_cnt )
@@ -541,13 +557,13 @@ LOCAL ER svc_lst_lnk( CONST TS_UUID *box, CONST UB *name, TS_UUID *buf, INT n, I
 	if ( er < E_OK ) return er;
 	if ( n < 0 ) return E_PAR;
 	if ( !out_ok(buf, (SZ)n * (SZ)sizeof(TS_UUID)) || !out_ok(p_cnt, sizeof(*p_cnt)) ) return E_MACV;
-	return ob_lst_lnk(b, nm, buf, n, p_cnt);
+	return UACCESS(ob_lst_lnk(b, nm, buf, n, p_cnt));
 }
 
 LOCAL ER svc_get_crd( T_OBCRD *pk_crd )
 {
 	if ( !out_ok(pk_crd, sizeof(*pk_crd)) ) return E_MACV;
-	return ob_get_crd(pk_crd);
+	return UACCESS(ob_get_crd(pk_crd));
 }
 
 LOCAL ER svc_login( CONST TS_UUID *user, CONST UB *password )
@@ -627,7 +643,7 @@ LOCAL ER svc_get_dom( CONST char *vol, T_OBPRT *pk_prt )
 
 	if ( er < E_OK ) return er;
 	if ( !out_ok(pk_prt, sizeof(*pk_prt)) ) return E_MACV;
-	return ob_get_dom(p, pk_prt);
+	return UACCESS(ob_get_dom(p, pk_prt));
 }
 
 LOCAL ER svc_set_dom( CONST char *vol, CONST T_OBPRT *pk_prt )
@@ -673,7 +689,7 @@ LOCAL ID svc_ntf_evt( ID key, INT recno, CONST T_OBNTF *pk_ntf, ID port )
 		return ob_ntf_evt(key, recno, NULL, port);
 	}
 	if ( !user_ok(pk_ntf, sizeof(*pk_ntf), FALSE) ) return E_MACV;
-	n = *pk_ntf;
+	knl_ua_get(&n, pk_ntf, sizeof(n));
 	return ob_ntf_evt(key, recno, &n, port);
 }
 
@@ -723,4 +739,6 @@ EXPORT const FP knl_ob_svc_tbl[TSN_OB_MAX + 1] = {
 	[TSN_NUMBER(TSN_OB_REF_VOL)]	= F(svc_ref_vol),
 	[TSN_NUMBER(TSN_OB_FND_LNK)]	= F(svc_fnd_lnk),
 	[TSN_NUMBER(TSN_OB_LST_LNK)]	= F(svc_lst_lnk),
+	[TSN_NUMBER(TSN_OB_END_ADM)]	= F(ob_end_adm),
+	[TSN_NUMBER(TSN_OB_WIP_VOL)]	= F(svc_wip_vol),
 };

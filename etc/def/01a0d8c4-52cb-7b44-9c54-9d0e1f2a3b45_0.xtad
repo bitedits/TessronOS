@@ -42,7 +42,7 @@
 <text x="16" y="66">出力ファイル名：</text>
 <box num="11" rect="136,44,424,74" max="120" jp="true"/>
 <text x="16" y="102">変換方法：</text>
-<select num="12" rect="136,84,424,234" value="1"><name>自動（元の形式・文章・フォルダ）</name><name>文章（Shift_JIS）</name><name>文章（UTF-8）</name><name>xmlTAD（無変換）</name><name>TADjs の組</name></select>
+<select num="12" rect="136,84,424,234" value="1"><name>自動（元の形式・文章・フォルダ）</name><name>文章（Shift_JIS）</name><name>文章（UTF-8）</name><name>xmlTAD（無変換）</name><name>TADjs の組</name><name>画像（PNG）</name></select>
 <switch num="13" rect="136,242,424,266">図形の配置も書き出す</switch>
 <text num="2" x="16" y="296"> </text>
 <button num="101" rect="228,318,320,344" answer="cancel">取消</button>

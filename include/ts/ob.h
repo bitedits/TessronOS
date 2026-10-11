@@ -54,6 +54,8 @@ extern "C" {
 #define OB_S_DISPLAY	8		/* device: a screen */
 #define OB_S_GPIO	9		/* device: a bank of general purpose pins */
 #define OB_S_USB	10		/* device: a device on a USB bus, hubs included */
+#define OB_S_CAMERA	11		/* device: a camera (include/ts/cam.h) */
+#define OB_S_VIDEODEC	12		/* device: a video decoder (include/ts/hevc.h) */
 #define OB_S_QUEUE	1		/* channel: a queue of messages */
 #define OB_S_SOCKET	2		/* channel: a socket of the network */
 #define OB_S_WINDOW	1		/* window: drawn in freely */
@@ -113,7 +115,22 @@ extern "C" {
 					   in the order of the data numbers, gain in and out,
 					   main, treble, bass, PCM, beep, mic, line, CD,
 					   music, aux 1, aux 2 */
-#define OB_SND_NREC	24
+#define OB_SND_OUTS	24		/* SDOut[]: "auto" and the outputs there are */
+#define OB_SND_OUTSEL	25		/* SDOutSel: the output chosen and the one playing;
+					   read only here: an output is chosen through
+					   the system object's record 8 (OB_SYS_SOUND) */
+#define OB_SND_MIX	26		/* SDMix: the whole's volume and the programs' */
+#define OB_SND_MIXSET	27		/* SDMixSet written: a volume or a mute set */
+#define OB_SND_NREC	28
+
+/* A camera's records (include/ts/cam.h): record 1 its frames, the rest its attributes */
+#define OB_CAM_FRAME	1		/* data number 0: T_CAMFRAME and the frame */
+#define OB_CAM_INFO	2		/* T_CAMINFO */
+#define OB_CAM_MODES	3		/* T_CAMMODE[] */
+#define OB_CAM_MODE	4		/* T_CAMSETMODE: written, the mode is picked */
+#define OB_CAM_STREAM	5		/* W: CAM_START or CAM_STOP */
+#define OB_CAM_STAT	6		/* T_CAMSTAT */
+#define OB_CAM_NREC	7
 
 /*
  * The records of the system object (ob_uuid_system, design 18.7): each
@@ -274,12 +291,19 @@ typedef struct {
  * says so too). Written with a T_OBDRANS, it is answered: the one who
  * dropped is told whether it was taken, on the message line; a drop
  * refused takes its grants back.
+ *
+ * Letters carried out of a text and let go over a window are a drop as
+ * well, with no links (n is 0) and the letters, one line of UTF-8, in
+ * text. Only a window someone has asked OB_E_TEXT of (beside OB_E_DROP)
+ * takes them; (x, y) is then the corner of the outline that was
+ * carried, as the letters go in where it stood.
  */
 #define OB_WR_DROP	4		/* a plain window: the latest drop */
 #define OB_WR_BARS	5		/* a plain window: its scroll bars, T_OBWBARS */
 #define OB_DROP_MAX	16		/* links in one drop */
 #define OB_DROP_NAME	64		/* bytes of a link's name, UTF-8 */
 #define OB_DROP_MSG	128		/* bytes of what an answer says */
+#define OB_DROP_TEXT	1024		/* bytes of the letters of a drop, with their terminator */
 #define OB_DROP_OPS	( OB_OP_R | OB_OP_WRITE | OB_OP_RECORD | OB_OP_ATRWR | OB_OP_LINK )
 
 typedef struct {
@@ -302,6 +326,7 @@ typedef struct {
 	TS_UUID	fromobj;		/* the object that window shows (the record the
 					   links are in); 0 none said */
 	T_OBDROPV v[OB_DROP_MAX];
+	UB	text[OB_DROP_TEXT];	/* letters dropped (n 0); "" for links */
 } T_OBDROP;
 
 #define OB_DR_ACCEPT	1
@@ -441,6 +466,20 @@ typedef struct {
 #define OB_UUID_DISPLAY_INIT	{ { 0x01, 0xa0, 0xd6, 0x80, 0x3a, 0xa9, 0x7d, 0x84, \
 				    0x93, 0x6e, 0x21, 0xfa, 0x0c, 0x57, 0xb8, 0x4d } }
 
+/*
+ * The users there are before anyone logs in (design 18.10). 利用者 is
+ * the ordinary user a program started from the desktop acts as when no
+ * one has logged in; 利用者 the group is every ordinary user's. 管理者
+ * is the account whose password lets a program act as an administrator
+ * for a while (ob_end_adm), a user of the administrators' group.
+ */
+#define OB_USER_PERSON_INIT	{ { 0x01, 0xa0, 0xd6, 0x80, 0x3a, 0xaa, 0x7a, 0x61, \
+				    0x8d, 0x2c, 0x5e, 0x91, 0x07, 0xb3, 0x4f, 0x6a } }
+#define OB_GROUP_USERS_INIT	{ { 0x01, 0xa0, 0xd6, 0x80, 0x3a, 0xab, 0x7c, 0x05, \
+				    0x9e, 0x47, 0x13, 0xd8, 0x6a, 0x2f, 0xc1, 0x58 } }
+#define OB_USER_ADMIN_INIT	{ { 0x01, 0xa0, 0xd6, 0x80, 0x3a, 0xac, 0x75, 0x3e, \
+				    0xa2, 0x91, 0x6f, 0x0b, 0xd4, 0x58, 0x2e, 0x97 } }
+
 IMPORT CONST TS_UUID	ob_user_system;		/* the system, and init */
 IMPORT CONST TS_UUID	ob_group_admin;		/* administrators */
 IMPORT CONST TS_UUID	ob_uuid_clock;		/* the clock device */
@@ -451,6 +490,9 @@ IMPORT CONST TS_UUID	ob_uuid_domain;		/* a volume's protection domain, on each v
 IMPORT CONST TS_UUID	ob_uuid_random;		/* the random source, 乱数 */
 IMPORT CONST TS_UUID	ob_uuid_input;		/* the input the keyboards and pointers feed, 入力 */
 IMPORT CONST TS_UUID	ob_uuid_display;	/* the screen, 画面 */
+IMPORT CONST TS_UUID	ob_user_person;		/* the ordinary user, 利用者 */
+IMPORT CONST TS_UUID	ob_group_users;		/* the ordinary users' group, 利用者 */
+IMPORT CONST TS_UUID	ob_user_admin;		/* the administrator's account, 管理者 */
 
 /* ---------------------------------------------------------------- creation */
 
@@ -498,7 +540,12 @@ typedef struct {
 #define OB_E_DROP	0x2000		/* links were dropped on a window (OB_WR_DROP) */
 #define OB_E_WHEEL	0x4000		/* a wheel turned over a window: code HID_WHEEL_*, dz */
 #define OB_E_SCROLL	0x8000		/* a scroll bar was worked: code OB_BAR_*, x, y OB_SCR_* */
-#define OB_E_ALL	0xFFFF
+/*
+ * Asked with OB_E_DROP: letters dropped on the window are taken too
+ * (OB_WR_DROP). Never told by itself: a drop of letters is OB_E_DROP.
+ */
+#define OB_E_TEXT	0x10000
+#define OB_E_ALL	0x1FFFF
 
 #define OB_E_INPUT	( OB_E_PRESS | OB_E_RELEASE | OB_E_MOVE | OB_E_KEY \
 			| OB_E_ENTER | OB_E_LEAVE | OB_E_REDRAW | OB_E_CLOSE | OB_E_DROP \
@@ -506,6 +553,22 @@ typedef struct {
 
 /* A request: which events, the number the caller knows them by */
 #define OB_N_ONCE	0x0001		/* sent once, then the request goes */
+#define OB_N_KEYUP	0x0002		/* with OB_E_KEY: a key let go is told too, OB_KEY_UP in mods */
+#define OB_N_KEYSEEN	0x0004		/* with OB_E_KEY, on a window that never has the keys
+					   (WM_ATTR_NOFOCUS): every key, OB_KEY_SEEN in mods */
+
+/*
+ * In a notice's mods beside the shifts (HID_MOD_*): OB_E_KEY for a key
+ * let go, told only to a request with OB_N_KEYUP. A program that judges
+ * what is held -- keys pressed together -- asks for it; others hear
+ * only the presses.
+ *
+ * OB_KEY_SEEN: a key pressed (or, with OB_KEY_UP, let go) on the
+ * keyboard, whichever window it went to, told to a screen keyboard that
+ * lights the keys held; only a request with OB_N_KEYSEEN hears it.
+ */
+#define OB_KEY_UP	0x00010000
+#define OB_KEY_SEEN	0x00020000
 typedef struct {
 	UINT	events;			/* OB_E_* */
 	UINT	id;			/* carried in every notice */
@@ -657,6 +720,16 @@ IMPORT ER  ob_login( CONST TS_UUID *user, CONST UB *password );
 IMPORT ER  ob_set_pwd( CONST TS_UUID *user, CONST UB *password );
 
 /*
+ * The administrator's rights a process was given for one operation --
+ * by the desktop, once the person typed the administrator's password
+ * (DT_RQ_ADMIN of ts/dtreq.h) -- given back: the process acts again as
+ * it did before. They go by themselves after OB_ADM_MS, and they are
+ * never passed on to a child. E_OK also when there were none.
+ */
+#define OB_ADM_MS	120000
+IMPORT ER  ob_end_adm( void );
+
+/*
  * Several changes to objects on the volume 'on' is on, made real
  * together: a record written and the counts it changes. E_NOSPT on a
  * volume that keeps no log (the FAT store), where each change is made
@@ -681,6 +754,15 @@ typedef struct {
 
 IMPORT ER  ob_ref_vol( CONST TS_UUID *near, T_OBVOL *pk_vol );
 
+/*
+ * The journal of the volume an object is on written over with zeroes,
+ * once all it holds is in place: what was written before leaves no copy
+ * there (a record written again to put a secret out of it). Asking of
+ * an object needs the right to write its records. E_OK at once on a
+ * volume with no journal, E_NOSPT on an object on no volume.
+ */
+IMPORT ER  ob_wip_vol( CONST TS_UUID *near );
+
 /* Volumes of the file manager: a TSFS store (ts_opn_vol's path and flags) */
 IMPORT ER  ob_att_vol( CONST char *path, UINT flags );
 IMPORT ER  ob_det_vol( CONST char *path );
@@ -700,7 +782,119 @@ IMPORT ER  ob_set_dom( CONST char *vol, CONST T_OBPRT *pk_prt );
 /* ---------------------------------------------------------------- the kernel's */
 
 IMPORT ER   knl_ob_init( void );
-IMPORT void knl_ob_prc_start( ID pid, ID ppid );	/* a process was made */
+
+/*
+ * The volumes attached (ob_att_vol, and the system's at the start): the
+ * path each was attached with, cut to 'stride' bytes, one after another
+ * in buf, the first volume first. Answers how many there are, at most max.
+ */
+IMPORT INT  knl_obfile_vols( UB *buf, INT stride, INT max );
+
+/*
+ * A volume attached, by its path (design 7.6): whether it is the native
+ * store, its own UUID, its label, its top object (the object a disk is
+ * shown by, zero while it has none), and how many objects of it are
+ * open. 'system' is the first volume, where the system's objects are.
+ */
+#define OB_VOL_LABEL	64
+typedef struct {
+	BOOL	native;
+	BOOL	system;
+	BOOL	rdonly;
+	TS_UUID	vuuid;
+	TS_UUID	top;
+	UB	label[OB_VOL_LABEL];
+	INT	open;
+} T_OBFVREF;
+
+IMPORT ER   knl_obfile_vol_ref( CONST char *path, T_OBFVREF *pk );
+
+/*
+ * The top object of a native volume set: an object on it, held once so
+ * that it is never garbage; NULL takes it away.
+ */
+IMPORT ER   knl_obfile_set_top( CONST char *path, CONST TS_UUID *uuid );
+
+/* The path the volume an object is on was attached with (E_NOEXS: on none attached) */
+IMPORT ER   knl_obfile_path_of( CONST TS_UUID *uuid, UB *buf, INT max );
+
+/*
+ * A number that changes whenever a volume is attached, detached or
+ * goes with its medium, for one that shows the volumes to look again.
+ */
+IMPORT UW   knl_obfile_serial( void );
+
+/* Entries of the volume table made so far, and how many are volumes attached now */
+IMPORT INT  knl_obfile_slots( INT *p_used );
+
+/*
+ * Volumes by their own UUIDs (design 8.3): the name of one attached
+ * since the start, attached now or not; the UUID of the volume an object
+ * is on; whether one is attached now; and this machine's UUID, as the
+ * outer part of a link's id names it (its system volume's).
+ */
+IMPORT ER   knl_obfile_vol_name( CONST TS_UUID *vuuid, UB *buf, INT max );
+IMPORT ER   knl_obfile_vuuid_of( CONST TS_UUID *uuid, TS_UUID *p_vuuid );
+IMPORT BOOL knl_obfile_vuuid_on( CONST TS_UUID *vuuid );
+IMPORT ER   knl_obfile_machine( TS_UUID *p_uuid );
+
+/*
+ * The volume (TSFS's number) an object is on, E_NOEXS when on none
+ * attached; the one attached with a path; the first, the system's
+ */
+IMPORT ID   knl_obfile_vol_of( CONST TS_UUID *uuid );
+IMPORT ID   knl_obfile_vol_path( CONST char *path );
+IMPORT ID   knl_obfile_first_vol( void );
+
+/*
+ * The devices: a number that changes whenever one or a medium came or
+ * went, and the names of the disks and partitions there are now
+ * (OB_DV_NAME bytes each, at most max).
+ */
+IMPORT UW   knl_obdev_serial( void );
+IMPORT INT  knl_obdev_disks( UB *buf, INT max );
+
+/*
+ * The volumes of objects to be attached again at the next start (design
+ * 11.26), kept in the device box: their UUIDs and their top objects, at
+ * most max; and one put in (keep) or taken out.
+ */
+IMPORT INT  knl_obdev_vols_get( TS_UUID *vuuid, TS_UUID *top, INT max );
+IMPORT ER   knl_obdev_vols_put( CONST TS_UUID *vuuid, CONST TS_UUID *top, BOOL keep );
+
+/* The native volumes attached now: TSFS's numbers and their own UUIDs, at most max */
+IMPORT INT  knl_obfile_natives( ID *ids, TS_UUID *vu, INT max );
+
+/*
+ * Links between volumes (design 8.3). A volume keeps a record of the
+ * links objects of other volumes make to its objects -- which volume,
+ * which object, how many -- in an object of its own the superblock names
+ * (T_TSFSBLK_SB.xref_uuid), whose xmlTAD record links to each such object
+ * once for each of them, so that they are counted, never garbage, and
+ * reached for the check. knl_obxref_move moves the record by one link;
+ * knl_obxref_drain takes what the link tables of the native volumes made
+ * and gave up (ts_obj_xq_take) into the records; knl_obxref_sync makes
+ * the records of a volume just attached and of the others agree with the
+ * link tables of the volumes there now, which is how a link made or
+ * given up while the other volume was away is put right.
+ * knl_obxref_list gives a volume's record: the volume and the object
+ * linking, the object linked to, how many.
+ */
+typedef struct {
+	TS_UUID	from_vol;
+	TS_UUID	from_obj;
+	TS_UUID	target;
+	INT	count;
+} T_OBXREF;
+
+IMPORT void knl_obxref_init( void );
+IMPORT ER   knl_obxref_move( CONST TS_UUID *hvol, CONST TS_UUID *host, CONST TS_UUID *target, INT d );
+IMPORT void knl_obxref_drain( void );
+IMPORT ER   knl_obxref_sync( ID vol );
+IMPORT INT  knl_obxref_list( ID vol, T_OBXREF *buf, INT max );
+/* Whether an object is on the volume attached with this path */
+IMPORT BOOL knl_obfile_on( CONST TS_UUID *uuid, CONST char *path );
+IMPORT void knl_ob_prc_start( ID pid, ID ppid, BOOL person );	/* a process was made */
 IMPORT void knl_ob_prc_end( ID pid );		/* it is going: its keys close */
 IMPORT void knl_ob_prc_gone( ID pid );		/* it is gone: its credentials go */
 IMPORT UINT knl_ob_permit( CONST T_OBCRD *crd, CONST T_OBPRT *prt, INT recno );
@@ -708,6 +902,49 @@ IMPORT UINT knl_ob_permit( CONST T_OBCRD *crd, CONST T_OBPRT *prt, INT recno );
 /* Who wrote the message last read from a channel (0 the kernel), and whether a process is an administrator */
 IMPORT ID   knl_obchan_last_from( CONST TS_UUID *uuid );
 IMPORT BOOL knl_ob_pid_admin( ID pid );
+
+/*
+ * The person at the machine (design 18.10). knl_ob_session: the user
+ * logged in at the desktop, whom the programs it starts act for from
+ * then on, the administrators' group left out (NULL: no one, 利用者);
+ * knl_ob_session_crd what they act as now. knl_ob_admin_check: whether
+ * password is the administrator's -- the logged-in user's when that one
+ * is of the administrators' group, else 管理者's -- E_OK, E_OACV when
+ * not, E_NOEXS when no password has been set for the account yet;
+ * password NULL asks only that (E_OK: one has been set).
+ * knl_ob_admin_set: the first password of 管理者, set only while it has
+ * none. knl_ob_adm_give: process pid an administrator for ms (0:
+ * OB_ADM_MS), until ob_end_adm; knl_ob_adm_held whether it is one so.
+ * knl_ob_trusted: whether a program the kernel starts is one the system
+ * trusts with its own rights (knl_ob_crd_system).
+ */
+IMPORT CONST T_OBCRD knl_ob_crd_person;
+IMPORT ER   knl_ob_session( CONST T_OBCRD *crd );
+IMPORT CONST T_OBCRD *knl_ob_session_crd( void );
+IMPORT ER   knl_ob_admin_check( CONST UB *password );
+IMPORT ER   knl_ob_admin_set( CONST UB *password );
+IMPORT ER   knl_ob_adm_give( ID pid, UINT ms );
+IMPORT BOOL knl_ob_adm_held( ID pid );
+IMPORT BOOL knl_ob_trusted( CONST TS_UUID *prog );
+
+/*
+ * A call of a process refused for want of a right (E_OACV): told on the
+ * console as "!OACV! pid=N "program" at obj=UUID type=T.S "name"
+ * want=0x.. may=0x.." when built with make UITEST=1 or OACVLOG=1, and
+ * nothing otherwise. 'at' says what was refused (open, record, key,
+ * object, run, protection, svc, ...); u may be NULL, when the line has
+ * no obj, type and name, and for a call of the table of rights want is
+ * the function code and may the right.
+ */
+IMPORT void knl_ob_deny_note( CONST char *at, CONST TS_UUID *u, UINT want, UINT may );
+
+/*
+ * The calling task of the kernel makes objects for the person at the
+ * machine (on) or as the system (off): a real object it makes with no
+ * protection given is the person's (knl_ob_session_crd) -- what the
+ * desktop's tasks make as the person works.
+ */
+IMPORT void knl_ob_make_for_person( BOOL on );
 
 /*
  * Something happened on an object: the notices asked for it are sent.

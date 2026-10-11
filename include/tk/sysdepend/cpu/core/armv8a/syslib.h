@@ -50,6 +50,23 @@ IMPORT void SpinUnlock( T_SPLOCK *lock );
 IMPORT void ISpinLock( T_SPLOCK *lock, UINT *intsts );
 IMPORT BOOL ISpinTryLock( T_SPLOCK *lock, UINT *intsts );
 IMPORT void ISpinUnlock( T_SPLOCK *lock, UINT *intsts );
+
+/*
+ * What each processor holds, and what a waiter that waits too long
+ * calls (spinlock.c, the lockup report of design 8.10)
+ */
+typedef struct {
+	T_SPLOCK * volatile lock;	/* NULL: the entry is free */
+	UD	pc;			/* where it was taken */
+	UD	since;			/* the system counter then */
+} T_SPHELD;
+
+#define SPIN_HELD_PRC	8
+#define SPIN_HELD_N	4
+
+IMPORT T_SPHELD	knl_spin_held[SPIN_HELD_PRC][SPIN_HELD_N];
+IMPORT UD	knl_spin_stall_cycles;
+IMPORT void	(*knl_spin_stall_hook)( T_SPLOCK *lock, UBINT pc, UD waited );
 IMPORT UW atomic_inc( UW *addr );
 IMPORT UW atomic_dec( UW *addr );
 IMPORT UW atomic_add( UW *addr, UW val );

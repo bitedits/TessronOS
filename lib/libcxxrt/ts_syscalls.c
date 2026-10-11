@@ -24,6 +24,7 @@
 
 #include <config.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <tk/typedef.h>
 #include <tk/errno.h>
 #include <tk/syscall.h>
@@ -100,6 +101,17 @@ extern int	ts_rnd_is( int fd );
 extern long	ts_rnd_read( int fd, void *buf, size_t n );
 extern long	ts_rnd_write( int fd, const void *buf, size_t n );
 extern int	ts_rnd_close( int fd );
+
+/* ts_mman.c: the memory objects of memfd_create */
+extern int	ts_memfd_is( int fd );
+extern int	ts_memfd_close( int fd );
+extern int	ts_memfd_truncate( int fd, size_t len );
+extern int	ts_memfd_fstat( int fd, struct stat *st );
+extern int	ts_memfd_fcntl( int fd, int cmd, int arg );
+
+/* the GPU's descriptors (lib/libgl/gl_drm.c), when OpenGL ES is linked in */
+extern int	ts_gpu_fd_close( int fd ) __attribute__((weak));
+extern int	ts_gpu_fd_fcntl( int fd, int cmd, int arg ) __attribute__((weak));
 #define TRON_EPOCH	473385600LL	/* 1985-01-01 as seconds since 1970-01-01 */
 
 /* ---------------------------------------------------------------- memory */
@@ -266,6 +278,12 @@ int _close( int fd )
 	if ( ts_rnd_is(fd) ) {
 		return ts_rnd_close(fd);
 	}
+	if ( ts_memfd_is(fd) ) {
+		return ts_memfd_close(fd);
+	}
+	if ( ts_gpu_fd_close != NULL && ts_gpu_fd_close(fd) >= 0 ) {
+		return 0;
+	}
 	er = fs_close(fd - FD_BASE);
 	if ( er < 0 ) {
 		errno = fs_errno(er);
@@ -308,6 +326,9 @@ int _fstat( int fd, struct stat *st )
 	FS_STAT	f;
 	ER	er;
 
+	if ( ts_memfd_is(fd) ) {
+		return ts_memfd_fstat(fd, st);
+	}
 	if ( fd < FD_BASE || fd >= SOCK_BASE || ts_rnd_is(fd) ) {
 		memset(st, 0, sizeof(*st));
 		st->st_mode = ( fd >= SOCK_BASE ) ? S_IFSOCK : S_IFCHR;
@@ -354,11 +375,37 @@ int _fcntl( int fd, int cmd, int arg )
 	if ( fd >= SOCK_BASE ) {
 		return ts_sock_fcntl(fd, cmd, arg);
 	}
+	if ( ts_memfd_is(fd) ) {
+		return ts_memfd_fcntl(fd, cmd, arg);
+	}
+	if ( ts_gpu_fd_fcntl != NULL ) {
+		int r = ts_gpu_fd_fcntl(fd, cmd, arg);
+
+		if ( r >= 0 || errno != EBADF ) {
+			return r;
+		}
+	}
 	switch ( cmd ) {
 	case F_GETFL:	return O_RDWR;
 	case F_GETFD:	return 0;
 	default:	return 0;
 	}
+}
+
+/*
+ * fcntl itself: newlib's, built without HAVE_FCNTL, answers ENOSYS for
+ * every request and never reaches _fcntl. Every request here takes an
+ * int or nothing as its third argument.
+ */
+int fcntl( int fd, int cmd, ... )
+{
+	va_list	ap;
+	int	arg;
+
+	va_start(ap, cmd);
+	arg = va_arg(ap, int);
+	va_end(ap);
+	return _fcntl(fd, cmd, arg);
 }
 
 ssize_t readv( int fd, const struct iovec *iov, int n )
@@ -436,7 +483,11 @@ long sysconf( int name )
 	switch ( name ) {
 	case _SC_PAGESIZE:		return 4096;
 	case _SC_NPROCESSORS_CONF:
-	case _SC_NPROCESSORS_ONLN:	return 2;
+	case _SC_NPROCESSORS_ONLN: {
+		T_TSCPU	c;
+
+		return ( ts_ref_cpu(&c) >= E_OK && c.ncpu > 0 ) ? c.ncpu : 1;
+	}
 	case _SC_CLK_TCK:		return 100;
 	case _SC_OPEN_MAX:		return 16;
 	case _SC_PHYS_PAGES:		return 256 * 1024;
@@ -513,6 +564,9 @@ int ftruncate( int fd, off_t len )
 {
 	ER	er;
 
+	if ( ts_memfd_is(fd) ) {
+		return ts_memfd_truncate(fd, (size_t)len);
+	}
 	if ( fd < FD_BASE || fd >= SOCK_BASE ) {
 		errno = EBADF;
 		return -1;

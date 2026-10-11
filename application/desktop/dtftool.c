@@ -1004,7 +1004,7 @@ EXPORT void df_tool_release( void )
 	df_drawing = NULL;
 	make_shape(d);
 	dt_draw(d);
-	wm_composite();
+	wm_update();
 }
 
 LOCAL BOOL ts_active( DTWIN *d );
@@ -1037,7 +1037,7 @@ EXPORT BOOL df_tool_key( DTWIN *d, UINT code )
 		df_drawing = NULL;
 		df_npt = 0;
 		dt_draw(d);
-		wm_composite();
+		wm_update();
 		return TRUE;
 	}
 
@@ -2024,7 +2024,7 @@ LOCAL INT pop_run( POPUP *p, INT under )
 	}
 	wm_raise(pop_wid);
 	pop_draw(p);
-	wm_composite();
+	wm_update();
 	while ( !done ) {
 		if ( wm_read_event(&ev, 2000) < E_OK ) {
 			continue;
@@ -2048,7 +2048,7 @@ LOCAL INT pop_run( POPUP *p, INT under )
 				}
 				pop_draw(p);
 				panel_draw();
-				wm_composite();
+				wm_update();
 			}
 			break;
 		case HID_EV_KEY_DOWN:
@@ -2061,7 +2061,7 @@ LOCAL INT pop_run( POPUP *p, INT under )
 			}
 			if ( pop_key(p, ev.code, ev.mods) ) {
 				pop_draw(p);
-				wm_composite();
+				wm_update();
 			}
 			break;
 		case HID_EV_MOVE: {
@@ -2087,7 +2087,7 @@ LOCAL INT pop_run( POPUP *p, INT under )
 		dt_draw(pop_win);
 	}
 	panel_draw();
-	wm_composite();
+	wm_update();
 
 	return answer;
 }
@@ -2593,7 +2593,7 @@ EXPORT void df_panel_toggle( DTWIN *d )
 	} else {
 		df_panel_show(d);
 	}
-	wm_composite();
+	wm_update();
 }
 
 /*
@@ -2685,7 +2685,7 @@ EXPORT void df_panel_follow( INT sx, INT sy )
 	o.right = o.left + ( w.outer.right - w.outer.left );
 	o.bottom = o.top + ( w.outer.bottom - w.outer.top );
 	if ( wm_move(df_panel, &o) >= E_OK ) {
-		wm_composite();
+		wm_update();
 	}
 }
 
@@ -2831,7 +2831,7 @@ EXPORT void df_transform( DTWIN *d )
 			ts_drag = -1;
 			ts_take();
 			dt_draw(d);
-			wm_composite();
+			wm_update();
 			return;
 		}
 	}
@@ -2858,7 +2858,7 @@ EXPORT BOOL df_transform_press( DTWIN *d, INT x, INT y )
 	/* anywhere else: the change is over */
 	ts_win = NULL;
 	dt_draw(d);
-	wm_composite();
+	wm_update();
 
 	return FALSE;
 }
@@ -2874,7 +2874,7 @@ EXPORT void df_transform_end( DTWIN *d )
 		ts_win = NULL;
 		ts_drag = -1;
 		dt_draw(d);
-		wm_composite();
+		wm_update();
 	}
 }
 
@@ -2918,7 +2918,7 @@ EXPORT void df_transform_follow( INT sx, INT sy )
 	}
 	pointer_at(fx, fy);
 	dt_draw(d);
-	wm_composite();
+	wm_update();
 }
 
 /* The change put into the record, and the handles kept for more */
@@ -2959,7 +2959,7 @@ EXPORT void df_transform_release( void )
 		ts_take();
 	}
 	dt_draw(d);
-	wm_composite();
+	wm_update();
 }
 
 /* The shape's new lines while a handle is carried, or else the handles */
@@ -3062,7 +3062,7 @@ EXPORT void df_paper_toggle( DTWIN *d )
 {
 	d->paper_frame = (BOOL)!d->paper_frame;
 	dt_draw(d);
-	wm_composite();
+	wm_update();
 }
 
 /* 用紙枠設定: the paper and its margins, written ahead of the figure */
@@ -3172,7 +3172,7 @@ EXPORT void df_realsize_toggle( DTWIN *d )
 		wm_close(rs_wid);
 		rs_wid = 0;
 		rs_of = NULL;
-		wm_composite();
+		wm_update();
 		return;
 	}
 	if ( d == NULL || wm_ref(d->wid, &w) < E_OK ) {
@@ -3191,7 +3191,7 @@ EXPORT void df_realsize_toggle( DTWIN *d )
 	rs_draw(d);
 	wm_raise(rs_wid);
 	wm_focus(d->wid);
-	wm_composite();
+	wm_update();
 }
 
 /* A window gone: a 実寸 panel of it goes too */
@@ -3234,6 +3234,62 @@ EXPORT void df_paste_text( DTWIN *d )
 }
 
 /*
+ * Letters carried here and let go at (sx, sy), on the screen, the
+ * corner of the outline: into the piece of text that stands there, where
+ * the corner is, or else into a new piece of text whose top left is
+ * there, as wide as the letters in the 書式 palette's look. E_PAR when
+ * the figure cannot be changed.
+ */
+#define TX_DROP_MIN	96		/* the least width of a piece made for letters */
+#define TX_DROP_MAX	480
+
+EXPORT ER df_text_drop( DTWIN *d, INT sx, INT sy, CONST UB *s, INT n )
+{
+	T_DPRECT	page;
+	T_WMWIN		ww;
+	INT		i, fx, fy, w;
+	ER		er;
+
+	if ( !df_is(d) || d->fig == NULL || d->sealed || d->xml_view || s == NULL || n <= 0
+	  || wm_ref(d->wid, &ww) < E_OK ) {
+		return E_PAR;
+	}
+	df_text_end(d);
+	to_fig(d, sx - ww.work.left, sy - ww.work.top, &fx, &fy);	/* the work area's own places */
+	for ( i = d->fig->nsh - 1; i >= 0; i-- ) {
+		CONST T_TVSHAPE	*sh = &d->fig->sh[i];
+
+		if ( sh->kind == TV_SH_DOC && sh->node != NULL && fx >= sh->r.left && fx < sh->r.right
+		  && fy >= sh->r.top && fy < sh->r.bottom ) {
+			break;
+		}
+	}
+	if ( i >= 0 ) {
+		/* a piece of text there: the letters go in where the corner is */
+		ed_before(d);
+		df_text_begin(d, d->fig->sh[i].node, -1, -1);
+	} else {
+		/* room for the letters as the piece draws them, with a margin */
+		w = str_w((CONST char *)s, fl.font_size) * 2 + 32;
+		w = ( w < TX_DROP_MIN ) ? TX_DROP_MIN : ( w > TX_DROP_MAX ) ? TX_DROP_MAX : w;
+		snap(&fx, &fy);
+		make_text(d, fx, fy, fx + w, fy + fl.font_size * 2 + 12);
+	}
+	if ( d->tb == NULL ) {
+		return E_NOMEM;
+	}
+	dt_work_rect(d->tb, &page);
+	if ( i < 0 ) {
+		sx = ww.work.left + page.left;
+		sy = ww.work.top + page.top;
+	}
+	er = dd_text_drop(d->tb, sx, sy, s, n);
+	df_text_end(d);
+	tm_printf((UB *)"figure: text dropped %s (%d)\n", ( i >= 0 ) ? "into a piece" : "as a new piece", (INT)er);
+	return er;
+}
+
+/*
  * A piece of text in the figure edited where it stands: a press on it
  * twice with the pointer in hand, or a new one drawn with the 文字 tool.
  * Its editor is a text editor of its own whose page is the piece's box;
@@ -3269,7 +3325,7 @@ EXPORT void df_text_begin( DTWIN *d, T_TADNODE *node, INT x, INT y )
 		dd_release();
 	}
 	dt_draw(d);
-	wm_composite();
+	wm_update();
 }
 
 EXPORT void df_text_end( DTWIN *d )
@@ -3285,7 +3341,7 @@ EXPORT void df_text_end( DTWIN *d )
 	Kfree(tb);
 	if ( d->used ) {
 		dt_draw(d);
-		wm_composite();
+		wm_update();
 	}
 }
 
@@ -3305,7 +3361,7 @@ EXPORT BOOL df_text_press( DTWIN *d, INT x, INT y, UD when )
 		if ( x >= page.left && x < page.right && y >= page.top && y < page.bottom ) {
 			dd_press(d->tb, x, y, FALSE);
 			dt_draw(d);
-			wm_composite();
+			wm_update();
 			return TRUE;
 		}
 		df_text_end(d);		/* pressed elsewhere: done, and that press goes on */

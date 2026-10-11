@@ -14,6 +14,6 @@
 <item code="source">書庫の場所を替える</item>
 <line/>
 <item code="stop">中止</item>
-<item code="win">ウインドウ<link id="01a0d889-46ba-7c69-8f7a-b0c1d2e3f456_0.xtad" vobjid="01a0d8c3-2002-7e67-8a04-92a3b4c5d6e7"/></item>
+<include><link id="01a0d889-46bd-7f9c-8bad-e3f4a5b6c789_0.xtad" vobjid="01a0d8c3-2002-7fd1-9a0a-c1d2e3f40a0a"/></include>
 </menu>
 </tad>

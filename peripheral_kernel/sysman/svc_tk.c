@@ -37,7 +37,9 @@
  *	  handlers run in the kernel: a process has none of them (E_NOSPT),
  *	  nor tk_dis_dsp and tk_ena_dsp.
  *	- Every pointer is made sure of (E_MACV), and what the core reads or
- *	  writes goes through the kernel's own memory.
+ *	  writes goes through the kernel's own memory: copied in and out
+ *	  with the way to the process's pages open (knl_ua_get, knl_ua_put;
+ *	  PAN), the core itself never reaching them.
  */
 
 #include <sys/machine.h>
@@ -126,7 +128,7 @@ LOCAL ID svc_tk_cre_tsk( CONST T_CTSK *pk )
 	ID	tid;
 
 	if ( !uok(t, pk, sizeof(*pk), FALSE) ) return E_MACV;
-	c = *pk;
+	knl_ua_get(&c, pk, sizeof(c));
 	HELD(t, tid = knl_prc_cre_tsk(&c));
 	return tid;
 }
@@ -262,6 +264,16 @@ LOCAL ER svc_tk_chg_pri( ID tid, PRI pri )
 	return er;
 }
 
+/* Its own tasks only, as tk_chg_pri (design 4.3.1) */
+LOCAL ER svc_tk_chg_slt( ID tid, RELTIM slicetime )
+{
+	TCB	*t = ME();
+	ER	er;
+
+	CORE(t, er, tk_chg_slt(tid, slicetime));
+	return er;
+}
+
 LOCAL ER svc_tk_rot_rdq( PRI pri )
 {
 	TCB	*t = ME();
@@ -280,7 +292,7 @@ LOCAL ER svc_tk_ref_tsk( ID tid, T_RTSK *pk )
 
 	if ( !uok(t, pk, sizeof(*pk), TRUE) ) return E_MACV;
 	CORE(t, er, tk_ref_tsk(tid, &r));
-	if ( er >= E_OK ) *pk = r;
+	if ( er >= E_OK ) knl_ua_put(pk, &r, sizeof(r));
 	return er;
 }
 
@@ -298,7 +310,7 @@ LOCAL ID svc_tk_cre_sem( CONST T_CSEM *pk )
 	ID	id;
 
 	if ( !uok(t, pk, sizeof(*pk), FALSE) ) return E_MACV;
-	c = *pk;
+	knl_ua_get(&c, pk, sizeof(c));
 	HELD(t, id = knl_prc_tk_cre(TK_OWN_SEM, &c));
 	return id;
 }
@@ -338,7 +350,7 @@ LOCAL ER svc_tk_ref_sem( ID id, T_RSEM *pk )
 
 	if ( !uok(t, pk, sizeof(*pk), TRUE) ) return E_MACV;
 	CORE(t, er, tk_ref_sem(id, &r));
-	if ( er >= E_OK ) *pk = r;
+	if ( er >= E_OK ) knl_ua_put(pk, &r, sizeof(r));
 	return er;
 }
 
@@ -351,7 +363,7 @@ LOCAL ID svc_tk_cre_flg( CONST T_CFLG *pk )
 	ID	id;
 
 	if ( !uok(t, pk, sizeof(*pk), FALSE) ) return E_MACV;
-	c = *pk;
+	knl_ua_get(&c, pk, sizeof(c));
 	HELD(t, id = knl_prc_tk_cre(TK_OWN_FLG, &c));
 	return id;
 }
@@ -392,7 +404,7 @@ LOCAL ER svc_tk_wai_flg( ID id, UINT waiptn, UINT wfmode, UINT *p_flgptn, TMO tm
 
 	if ( !uok(t, p_flgptn, sizeof(*p_flgptn), TRUE) ) return E_MACV;
 	CORE(t, er, tk_wai_flg(id, waiptn, wfmode, &ptn, tmout));
-	if ( er >= E_OK ) *p_flgptn = ptn;
+	if ( er >= E_OK ) knl_ua_put(p_flgptn, &ptn, sizeof(ptn));
 	return er;
 }
 
@@ -404,7 +416,7 @@ LOCAL ER svc_tk_ref_flg( ID id, T_RFLG *pk )
 
 	if ( !uok(t, pk, sizeof(*pk), TRUE) ) return E_MACV;
 	CORE(t, er, tk_ref_flg(id, &r));
-	if ( er >= E_OK ) *pk = r;
+	if ( er >= E_OK ) knl_ua_put(pk, &r, sizeof(r));
 	return er;
 }
 
@@ -419,7 +431,7 @@ LOCAL ID svc_tk_cre_mtx( CONST T_CMTX *pk )
 	ID	id;
 
 	if ( !uok(t, pk, sizeof(*pk), FALSE) ) return E_MACV;
-	c = *pk;
+	knl_ua_get(&c, pk, sizeof(c));
 	(void)main_task(t, &base);
 	if ( ( c.mtxatr & TA_CEILING ) == TA_CEILING && c.ceilpri < base ) return E_PAR;
 	HELD(t, id = knl_prc_tk_cre(TK_OWN_MTX, &c));
@@ -461,7 +473,7 @@ LOCAL ER svc_tk_ref_mtx( ID id, T_RMTX *pk )
 
 	if ( !uok(t, pk, sizeof(*pk), TRUE) ) return E_MACV;
 	CORE(t, er, tk_ref_mtx(id, &r));
-	if ( er >= E_OK ) *pk = r;
+	if ( er >= E_OK ) knl_ua_put(pk, &r, sizeof(r));
 	return er;
 }
 
@@ -481,7 +493,7 @@ LOCAL ID svc_tk_cre_mbf( CONST T_CMBF *pk )
 	ID	id;
 
 	if ( !uok(t, pk, sizeof(*pk), FALSE) ) return E_MACV;
-	c = *pk;
+	knl_ua_get(&c, pk, sizeof(c));
 	if ( ( c.mbfatr & TA_USERBUF ) != 0 ) return E_RSATR;
 	if ( c.bufsz < 0 || c.bufsz > MBF_BUF_MAX || c.maxmsz <= 0 || c.maxmsz > MBF_MSG_MAX ) {
 		return E_PAR;
@@ -508,7 +520,7 @@ LOCAL ER svc_tk_snd_mbf( ID id, CONST void *msg, INT msgsz, TMO tmout )
 
 	if ( msgsz <= 0 || msgsz > MBF_MSG_MAX ) return E_PAR;
 	if ( !uok(t, msg, msgsz, FALSE) ) return E_MACV;
-	knl_memcpy(m, msg, msgsz);
+	knl_ua_get(m, msg, msgsz);
 	CORE(t, er, tk_snd_mbf(id, m, msgsz, tmout));
 	return er;
 }
@@ -524,7 +536,7 @@ LOCAL INT svc_tk_rcv_mbf( ID id, void *msg, TMO tmout )
 	if ( n < E_OK ) return n;
 	if ( !uok(t, msg, r.maxmsz, TRUE) ) return E_MACV;
 	CORE(t, n, tk_rcv_mbf(id, m, tmout));
-	if ( n > 0 ) knl_memcpy(msg, m, n);
+	if ( n > 0 ) knl_ua_put(msg, m, n);
 	return n;
 }
 
@@ -536,7 +548,7 @@ LOCAL ER svc_tk_ref_mbf( ID id, T_RMBF *pk )
 
 	if ( !uok(t, pk, sizeof(*pk), TRUE) ) return E_MACV;
 	CORE(t, er, tk_ref_mbf(id, &r));
-	if ( er >= E_OK ) *pk = r;
+	if ( er >= E_OK ) knl_ua_put(pk, &r, sizeof(r));
 	return er;
 }
 
@@ -558,7 +570,7 @@ LOCAL ER svc_tk_set_tim( CONST SYSTIM *pk )
 	ER	er;
 
 	if ( !uok(ME(), pk, sizeof(*pk), FALSE) ) return E_MACV;
-	s = *pk;
+	knl_ua_get(&s, pk, sizeof(s));
 	if ( ( er = knl_dt_may_set() ) < E_OK ) return er;
 	return set_told(tk_set_tim(&s));
 }
@@ -570,7 +582,7 @@ LOCAL ER svc_tk_get_tim( SYSTIM *pk )
 
 	if ( !uok(ME(), pk, sizeof(*pk), TRUE) ) return E_MACV;
 	er = tk_get_tim(&s);
-	if ( er >= E_OK ) *pk = s;
+	if ( er >= E_OK ) knl_ua_put(pk, &s, sizeof(s));
 	return er;
 }
 
@@ -581,7 +593,7 @@ LOCAL ER svc_tk_get_otm( SYSTIM *pk )
 
 	if ( !uok(ME(), pk, sizeof(*pk), TRUE) ) return E_MACV;
 	er = tk_get_otm(&s);
-	if ( er >= E_OK ) *pk = s;
+	if ( er >= E_OK ) knl_ua_put(pk, &s, sizeof(s));
 	return er;
 }
 
@@ -591,7 +603,7 @@ LOCAL ER svc_tk_set_utc( CONST SYSTIM *pk )
 	ER	er;
 
 	if ( !uok(ME(), pk, sizeof(*pk), FALSE) ) return E_MACV;
-	s = *pk;
+	knl_ua_get(&s, pk, sizeof(s));
 	if ( ( er = knl_dt_may_set() ) < E_OK ) return er;
 	return set_told(tk_set_utc(&s));
 }
@@ -603,7 +615,7 @@ LOCAL ER svc_tk_get_utc( SYSTIM *pk )
 
 	if ( !uok(ME(), pk, sizeof(*pk), TRUE) ) return E_MACV;
 	er = tk_get_utc(&s);
-	if ( er >= E_OK ) *pk = s;
+	if ( er >= E_OK ) knl_ua_put(pk, &s, sizeof(s));
 	return er;
 }
 
@@ -632,7 +644,7 @@ LOCAL ER svc_tk_wai_flg_u( ID id, UINT waiptn, UINT wfmode, UINT *p_flgptn, TMO_
 
 	if ( !uok(t, p_flgptn, sizeof(*p_flgptn), TRUE) ) return E_MACV;
 	CORE(t, er, tk_wai_flg_u(id, waiptn, wfmode, &ptn, tmout));
-	if ( er >= E_OK ) *p_flgptn = ptn;
+	if ( er >= E_OK ) knl_ua_put(p_flgptn, &ptn, sizeof(ptn));
 	return er;
 }
 
@@ -653,7 +665,7 @@ LOCAL ER svc_tk_snd_mbf_u( ID id, CONST void *msg, INT msgsz, TMO_U tmout )
 
 	if ( msgsz <= 0 || msgsz > MBF_MSG_MAX ) return E_PAR;
 	if ( !uok(t, msg, msgsz, FALSE) ) return E_MACV;
-	knl_memcpy(m, msg, msgsz);
+	knl_ua_get(m, msg, msgsz);
 	CORE(t, er, tk_snd_mbf_u(id, m, msgsz, tmout));
 	return er;
 }
@@ -669,7 +681,7 @@ LOCAL INT svc_tk_rcv_mbf_u( ID id, void *msg, TMO_U tmout )
 	if ( n < E_OK ) return n;
 	if ( !uok(t, msg, r.maxmsz, TRUE) ) return E_MACV;
 	CORE(t, n, tk_rcv_mbf_u(id, m, tmout));
-	if ( n > 0 ) knl_memcpy(msg, m, n);
+	if ( n > 0 ) knl_ua_put(msg, m, n);
 	return n;
 }
 
@@ -684,8 +696,8 @@ LOCAL ER svc_tk_get_tim_u( SYSTIM_U *tim, UW *ofs )
 	if ( ofs != NULL && !uok(t, ofs, sizeof(*ofs), TRUE) ) return E_MACV;
 	er = tk_get_tim_u(&s, &o);
 	if ( er >= E_OK ) {
-		*tim = s;
-		if ( ofs != NULL ) *ofs = o;
+		knl_ua_put(tim, &s, sizeof(s));
+		if ( ofs != NULL ) knl_ua_put(ofs, &o, sizeof(o));
 	}
 	return er;
 }
@@ -701,8 +713,8 @@ LOCAL ER svc_tk_get_otm_u( SYSTIM_U *tim, UW *ofs )
 	if ( ofs != NULL && !uok(t, ofs, sizeof(*ofs), TRUE) ) return E_MACV;
 	er = tk_get_otm_u(&s, &o);
 	if ( er >= E_OK ) {
-		*tim = s;
-		if ( ofs != NULL ) *ofs = o;
+		knl_ua_put(tim, &s, sizeof(s));
+		if ( ofs != NULL ) knl_ua_put(ofs, &o, sizeof(o));
 	}
 	return er;
 }
@@ -792,4 +804,5 @@ EXPORT const FP knl_tk_prc_tbl[TSN_TK_MAX + 1] = {
 	[TSN_NUMBER(TSN_TK_SET_UTC)]	= F(svc_tk_set_utc),
 	[TSN_NUMBER(TSN_TK_GET_UTC)]	= F(svc_tk_get_utc),
 	[TSN_NUMBER(TSN_TK_GET_PRC)]	= F(tk_get_prc),
+	[TSN_NUMBER(TSN_TK_CHG_SLT)]	= F(svc_tk_chg_slt),
 };

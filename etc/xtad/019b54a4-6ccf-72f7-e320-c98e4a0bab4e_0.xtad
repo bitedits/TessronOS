@@ -1,0 +1,8 @@
+<tad version="1.0" filename="基本表計算" encoding="UTF-8">
+<document>
+<p>
+<calcPos cell="A1"/>	<calcPos cell="B1"/>	<calcPos cell="C1"/>	<calcPos cell="D1"/></p>
+<p><calcPos cell="A2"/>	<calcPos cell="B2"/>	<calcPos cell="C2"/>	<calcPos cell="D2"/></p>
+<p><calcPos cell="A3"/>	<calcPos cell="B3"/>	<calcPos cell="C3"/>	<calcPos cell="D3"/></p>
+</document>
+</tad>

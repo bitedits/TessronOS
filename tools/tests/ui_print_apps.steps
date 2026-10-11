@@ -1,0 +1,59 @@
+# 印刷 from the programs that run as processes (design 11.22.6), for
+# tools/ui_run.py: each makes its pages, hands them to the desktop
+# (DT_RQ_PRINT), and the desktop's 印刷設定 comes up over the program's
+# window; Enter prints, and the PDF file's link goes on the desktop.
+# 基本表計算: the sample sheet, its cells and charts
+open 019b15f8-72b8-7151-a57f-149fb1f59a17
+expect calc: ready
+wait 1500
+win 基本表計算
+click 900 117
+wait 300
+key 13 01
+expect calc: print
+wait 1500
+shot print_calc_panel
+key 28
+expect calc: print answered 0
+wait 1500
+shot print_calc_done
+key 08 01
+wait 1500
+# マイクロカード: 住所録, the list on paper (its own panel first, then the desktop's)
+open 01a0d8c4-5336-7a17-8c28-d3e4f5a6b736
+expect mcard: ready
+wait 1500
+win 住所録
+click 400 100
+wait 300
+key 13 01
+expect mcard: print panel
+wait 800
+shot print_mcard_cards
+key 28
+expect mcard: print list
+wait 1500
+shot print_mcard_panel
+key 28
+expect mcard: print answered 0
+wait 1500
+shot print_mcard_done
+key 08 01
+wait 1500
+# 予定表: the month shown
+open 019d6f00-1a2b-7c3d-8e4f-a1b2c3d4e5f6
+expect calendar: ready
+wait 1500
+win 予定表
+click 500 110
+wait 300
+key 13 01
+expect calendar: print month
+wait 1500
+shot print_cal_panel
+key 28
+expect calendar: print answered 0
+wait 1500
+shot print_cal_done
+# nothing it did was refused for want of a right
+absent !OACV!

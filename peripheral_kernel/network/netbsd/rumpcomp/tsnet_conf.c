@@ -19,7 +19,10 @@
  *	needs to know nothing of the kernel's structures. Each entry point
  *	enters the rump kernel as a thread of it for the time it runs.
  *
- *	Addresses are IPv4 in network byte order.
+ *	IPv4 addresses are 32 bit words in network byte order, IPv6 ones 16
+ *	bytes in the order they are sent. A link-local IPv6 address crosses
+ *	in its plain form; the zone the kernel keeps inside it is put in and
+ *	taken out here.
  */
 
 #include <sys/param.h>
@@ -29,20 +32,46 @@
 #include <sys/filedesc.h>
 #include <sys/kernel.h>
 #include <sys/mbuf.h>
+#include <sys/pserialize.h>
 #include <sys/socket.h>
 #include <sys/socketvar.h>
 #include <sys/sockio.h>
+#include <sys/timevar.h>
 
 #include <net/if.h>
 #include <net/route.h>
 #include <netinet/in.h>
+#include <netinet/in_systm.h>
+#include <netinet/ip.h>
+#include <netinet/in_pcb.h>
 #include <netinet/in_var.h>
+#include <netinet6/in6_var.h>
+#include <netinet6/nd6.h>
+#include <netinet6/scope6_var.h>
 
 #include <rump-sys/kern.h>
+
+/* One IPv6 address of an interface (so_nb.h has the same layout) */
+struct tsnet_a6 {
+	uint8_t		addr[16];
+	int32_t		plen;
+	uint32_t	flags;		/* IN6_IFF_ */
+	uint32_t	vltime;		/* seconds of its valid lifetime left; ~0: no end */
+	uint32_t	pltime;		/* of its preferred lifetime */
+};
 
 int	rump_tsnet_setaddr4(const char *, uint32_t, uint32_t, uint32_t);
 int	rump_tsnet_getaddr4(const char *, uint32_t *, uint32_t *);
 int	rump_tsnet_defroute4(uint32_t);
+int	rump_tsnet_addrs6(const char *, struct tsnet_a6 *, int);
+int	rump_tsnet_setaddr6(const char *, const uint8_t *, int, uint32_t, uint32_t,
+	    uint32_t);
+int	rump_tsnet_ip6on(const char *, int);
+void	rump_tsnet_prefer_temp(int);
+int	rump_tsnet_deladdr6(const char *, const uint8_t *);
+int	rump_tsnet_defroute6(const char *, const uint8_t *);
+int	rump_tsnet_cmsg_hlim(void *, unsigned int);
+int	rump_tsnet_cmsg_tos(void *, unsigned int);
 int	rump_tsnet_ifindex(const char *);
 int	rump_tsnet_ifname(int, char *);
 int	rump_tsnet_ifup(const char *, int);
@@ -176,6 +205,293 @@ rump_tsnet_defroute4(uint32_t gw)
 	rump_unschedule();
 	return error;
 }
+
+/* ---------------------------------------------------------------- IPv6 */
+
+/* What is left of a lifetime that ends at 'expire' (time_uptime); ~0 for none */
+static uint32_t
+tsnet_left(uint32_t lifetime, time_t expire)
+{
+
+	if (lifetime == ND6_INFINITE_LIFETIME || expire == 0)
+		return ND6_INFINITE_LIFETIME;
+	return (expire > time_uptime) ? (uint32_t)(expire - time_uptime) : 0;
+}
+
+/*
+ * The IPv6 addresses of the interface, up to max of them into list;
+ * how many there are, or -1 for no such interface.
+ */
+int
+rump_tsnet_addrs6(const char *ifname, struct tsnet_a6 *list, int max)
+{
+	struct ifnet		*ifp;
+	struct ifaddr		*ifa;
+	struct in6_ifaddr	*ia;
+	struct in6_addr		a;
+	int			n = 0, s;
+
+	rump_schedule();
+	ifp = ifunit(ifname);
+	if (ifp == NULL) {
+		rump_unschedule();
+		return -1;
+	}
+	s = pserialize_read_enter();
+	IFADDR_READER_FOREACH(ifa, ifp) {
+		if (ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_INET6)
+			continue;
+		if (n >= max)
+			break;
+		ia = (struct in6_ifaddr *)ifa;
+		a = ia->ia_addr.sin6_addr;
+		in6_clearscope(&a);
+		memcpy(list[n].addr, &a, sizeof(a));
+		list[n].plen = in6_mask2len(&ia->ia_prefixmask.sin6_addr, NULL);
+		list[n].flags = ia->ia6_flags;
+		list[n].vltime = tsnet_left(ia->ia6_lifetime.ia6t_vltime,
+		    ia->ia6_lifetime.ia6t_expire);
+		list[n].pltime = tsnet_left(ia->ia6_lifetime.ia6t_pltime,
+		    ia->ia6_lifetime.ia6t_preferred);
+		n++;
+	}
+	pserialize_read_exit(s);
+	rump_unschedule();
+	return n;
+}
+
+static void
+tsnet_sin6(struct sockaddr_in6 *sin6, const uint8_t *addr)
+{
+
+	memset(sin6, 0, sizeof(*sin6));
+	sin6->sin6_len = sizeof(*sin6);
+	sin6->sin6_family = AF_INET6;
+	if (addr != NULL)
+		memcpy(&sin6->sin6_addr, addr, sizeof(sin6->sin6_addr));
+}
+
+/*
+ * An address put on the interface with its prefix length, lifetimes
+ * (seconds, ~0 for no end) and flags (IN6_IFF_AUTOCONF for one made
+ * from a router's prefix, IN6_IFF_TEMPORARY as well for a temporary
+ * one, 0 for one the settings fix), or the lifetimes of one it has
+ * renewed. A new address is checked for duplicates on the link first and is
+ * tentative until then; one whose valid lifetime runs out is taken away
+ * by the kernel itself, and one past its preferred lifetime is no longer
+ * chosen as the source of new connections.
+ */
+int
+rump_tsnet_setaddr6(const char *ifname, const uint8_t *addr, int plen,
+    uint32_t vltime, uint32_t pltime, uint32_t flags)
+{
+	struct socket		*so;
+	struct in6_aliasreq	ifra;
+	int			error;
+
+	if (plen <= 0 || plen > 128)
+		return EINVAL;
+	rump_schedule();
+	error = socreate(AF_INET6, &so, SOCK_DGRAM, 0, curlwp, NULL);
+	if (error)
+		goto out;
+	memset(&ifra, 0, sizeof(ifra));
+	strlcpy(ifra.ifra_name, ifname, sizeof(ifra.ifra_name));
+	tsnet_sin6(&ifra.ifra_addr, addr);
+	tsnet_sin6(&ifra.ifra_prefixmask, NULL);
+	in6_prefixlen2mask(&ifra.ifra_prefixmask.sin6_addr, plen);
+	ifra.ifra_flags = flags & (IN6_IFF_AUTOCONF | IN6_IFF_TEMPORARY);
+	ifra.ifra_lifetime.ia6t_vltime = vltime;
+	ifra.ifra_lifetime.ia6t_pltime = pltime;
+	error = (*ifioctl)(so, SIOCAIFADDR_IN6, &ifra, curlwp);
+	soclose(so);
+out:
+	rump_unschedule();
+	return error;
+}
+
+/* An IPv6 address taken off the interface */
+int
+rump_tsnet_deladdr6(const char *ifname, const uint8_t *addr)
+{
+	struct socket		*so;
+	struct in6_ifreq	ifr;
+	int			error;
+
+	rump_schedule();
+	error = socreate(AF_INET6, &so, SOCK_DGRAM, 0, curlwp, NULL);
+	if (error)
+		goto out;
+	memset(&ifr, 0, sizeof(ifr));
+	strlcpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
+	tsnet_sin6(&ifr.ifr_addr, addr);
+	error = (*ifioctl)(so, SIOCDIFADDR_IN6, &ifr, curlwp);
+	soclose(so);
+out:
+	rump_unschedule();
+	return error;
+}
+
+/*
+ * The IPv6 default route through gw, a router's link-local address on
+ * the interface; gw NULL takes it away. The routing table holds a
+ * link-local gateway with its zone inside the address.
+ */
+int
+rump_tsnet_defroute6(const char *ifname, const uint8_t *gw)
+{
+	struct sockaddr_in6	dst, via, mask;
+	struct ifnet		*ifp;
+	int			error = 0;
+
+	tsnet_sin6(&dst, NULL);
+	tsnet_sin6(&mask, NULL);
+	tsnet_sin6(&via, gw);
+
+	rump_schedule();
+	(void)rtrequest(RTM_DELETE, sin6tosa(&dst), NULL, sin6tosa(&mask), 0, NULL);
+	if (gw != NULL) {
+		ifp = ifunit(ifname);
+		if (ifp == NULL)
+			error = ENXIO;
+		else
+			error = in6_setscope(&via.sin6_addr, ifp, NULL);
+		if (error == 0)
+			error = rtrequest(RTM_ADD, sin6tosa(&dst), sin6tosa(&via),
+			    sin6tosa(&mask), RTF_UP | RTF_GATEWAY | RTF_STATIC, NULL);
+	}
+	rump_unschedule();
+	return error;
+}
+
+/*
+ * IPv6 on the interface turned on (on != 0) or off. Off, the kernel
+ * neither sends nor takes IPv6 there and holds every address of it as
+ * tentative; on again, it checks them for duplicates once more, the
+ * link-local address first.
+ */
+int
+rump_tsnet_ip6on(const char *ifname, int on)
+{
+	struct socket		*so;
+	struct in6_ndireq	nd;
+	int			error;
+
+	rump_schedule();
+	error = socreate(AF_INET6, &so, SOCK_DGRAM, 0, curlwp, NULL);
+	if (error)
+		goto out;
+	memset(&nd, 0, sizeof(nd));
+	strlcpy(nd.ifname, ifname, sizeof(nd.ifname));
+	error = (*ifioctl)(so, SIOCGIFINFO_IN6, &nd, curlwp);
+	if (error == 0) {
+		if (on)
+			nd.ndi.flags &= ~ND6_IFF_IFDISABLED;
+		else
+			nd.ndi.flags |= ND6_IFF_IFDISABLED;
+		error = (*ifioctl)(so, SIOCSIFINFO_FLAGS, &nd, curlwp);
+	}
+	soclose(so);
+out:
+	rump_unschedule();
+	return error;
+}
+
+/*
+ * Whether a temporary address is chosen before the others of its
+ * prefix as the source of a new connection (RFC 6724 rule 7).
+ */
+void
+rump_tsnet_prefer_temp(int yes)
+{
+	extern int ip6_prefer_tempaddr;
+
+	ip6_prefer_tempaddr = yes ? 1 : 0;
+}
+
+/*
+ * The hop limit a datagram arrived with, from the ancillary data a
+ * receive gave back (IPV6_RECVHOPLIMIT); -1 when it is not there.
+ */
+int
+rump_tsnet_cmsg_hlim(void *ctl, unsigned int len)
+{
+	struct msghdr	m;
+	struct cmsghdr	*c;
+	int		h;
+
+	memset(&m, 0, sizeof(m));
+	m.msg_control = ctl;
+	m.msg_controllen = len;
+	for (c = CMSG_FIRSTHDR(&m); c != NULL; c = CMSG_NXTHDR(&m, c)) {
+		if (c->cmsg_level == IPPROTO_IPV6 && c->cmsg_type == IPV6_HOPLIMIT &&
+		    c->cmsg_len >= CMSG_LEN(sizeof(int))) {
+			memcpy(&h, CMSG_DATA(c), sizeof(h));
+			return h;
+		}
+	}
+	return -1;
+}
+
+/*
+ * The type of service of an IPv4 datagram as it is received (ECN).
+ * NetBSD has no option that hands it over, so a socket asks for the
+ * datagrams' TTL (IP_RECVTTL) in its stead, and the ancillary data made
+ * for each of them gets one more message: the TOS byte, of the level
+ * IPPROTO_IP and the type below, which no option of NetBSD's uses.
+ * build.sh links the stack so that its calls of ip_savecontrol come
+ * here (ld --wrap).
+ */
+#define TSNET_CMSG_TOS	0x7453
+
+void	__real_rumpns_ip_savecontrol(struct inpcb *, struct mbuf **, struct ip *,
+	    struct mbuf *);
+void	__wrap_rumpns_ip_savecontrol(struct inpcb *, struct mbuf **, struct ip *,
+	    struct mbuf *);
+
+void
+__wrap_rumpns_ip_savecontrol(struct inpcb *inp, struct mbuf **mp, struct ip *ip,
+    struct mbuf *m)
+{
+
+	__real_rumpns_ip_savecontrol(inp, mp, ip, m);
+	if ((inp->inp_flags & INP_RECVTTL) == 0)
+		return;
+	while (*mp != NULL)
+		mp = &(*mp)->m_next;
+	*mp = sbcreatecontrol(&ip->ip_tos, sizeof(uint8_t), TSNET_CMSG_TOS,
+	    IPPROTO_IP);
+}
+
+/*
+ * The type of service (IPv4) or the traffic class (IPv6) a datagram
+ * arrived with, from the ancillary data a receive gave back; -1 when
+ * it is not there.
+ */
+int
+rump_tsnet_cmsg_tos(void *ctl, unsigned int len)
+{
+	struct msghdr	m;
+	struct cmsghdr	*c;
+	int		v;
+
+	memset(&m, 0, sizeof(m));
+	m.msg_control = ctl;
+	m.msg_controllen = len;
+	for (c = CMSG_FIRSTHDR(&m); c != NULL; c = CMSG_NXTHDR(&m, c)) {
+		if (c->cmsg_level == IPPROTO_IP && c->cmsg_type == TSNET_CMSG_TOS &&
+		    c->cmsg_len >= CMSG_LEN(sizeof(uint8_t)))
+			return *(uint8_t *)CMSG_DATA(c);
+		if (c->cmsg_level == IPPROTO_IPV6 && c->cmsg_type == IPV6_TCLASS &&
+		    c->cmsg_len >= CMSG_LEN(sizeof(int))) {
+			memcpy(&v, CMSG_DATA(c), sizeof(v));
+			return v & 0xff;
+		}
+	}
+	return -1;
+}
+
+/* ---------------------------------------------------------------- interfaces */
 
 /* The index of an interface by its name; 0 for none */
 int

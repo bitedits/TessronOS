@@ -1,0 +1,58 @@
+<tad version="1.0" encoding="UTF-8" filename="文字検索のデータボックス">
+<document>
+<p>文字検索のデータボックス</p>
+<p>文字検索の窓のパネルと、尋ねるパネルの定義。窓は〈コード一覧〉〈漢字検索〉〈記号検索〉〈文字情報〉のタブを持ち、パネルの下にプログラムが文字の一覧と文字情報を描く。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,640,136" title="文字検索" kind="bare">
+<tags num="100" rect="0,0,640,136" inner="4,28,636,132" value="1"><tag>コード一覧</tag><tag>漢字検索</tag><tag>記号検索</tag><tag>文字情報</tag></tags>
+<text sheet="1" x="12" y="52">文字種：</text>
+<select num="11" sheet="1" rect="76,34,628,60" across="true" value="1"><name>日本基本</name><name>日本補助</name><name>中国</name><name>韓国</name><name>各国</name><name>ＴＲＯＮ</name></select>
+<text sheet="1" x="12" y="88">コード：</text>
+<box num="12" sheet="1" rect="76,68,236,96" max="16" ascii="true"/>
+<button num="13" sheet="1" rect="244,70,324,94" emph="true">表示</button>
+<button num="14" sheet="1" rect="332,70,402,94">前頁</button>
+<button num="15" sheet="1" rect="410,70,480,94">次頁</button>
+<button num="16" sheet="1" rect="548,70,628,94">入力</button>
+<text num="17" sheet="1" x="12" y="122"> </text>
+<text sheet="2" x="12" y="52">条件：</text>
+<box num="21" sheet="2" rect="64,34,452,62" max="60" jp="true"/>
+<button num="22" sheet="2" rect="460,36,540,60" emph="true">検索</button>
+<button num="23" sheet="2" rect="548,36,628,60">部品一覧</button>
+<switch num="24" sheet="2" rect="64,68,156,92" value="1">日本基本</switch>
+<switch num="25" sheet="2" rect="164,68,256,92">日本補助</switch>
+<switch num="26" sheet="2" rect="264,68,340,92">中国</switch>
+<switch num="27" sheet="2" rect="348,68,424,92">韓国</switch>
+<button num="28" sheet="2" rect="460,68,540,92">前頁</button>
+<button num="29" sheet="2" rect="548,68,628,92">次頁</button>
+<text num="30" sheet="2" x="12" y="122"> </text>
+<button num="31" sheet="2" rect="548,102,628,126">入力</button>
+<text sheet="3" x="12" y="52">名称：</text>
+<box num="41" sheet="3" rect="64,34,300,62" max="40" jp="true"/>
+<text sheet="3" x="308" y="52">部品：</text>
+<box num="42" sheet="3" rect="356,34,540,62" max="20" jp="true"/>
+<button num="43" sheet="3" rect="548,36,628,60" emph="true">検索</button>
+<text sheet="3" x="12" y="88">字種：</text>
+<serial num="44" sheet="3" rect="64,68,196,96"><n value="0"><name>指定なし</name><name>ラテン</name><name>キリル</name><name>ギリシア</name><name>アラビア</name><name>ヘブライ</name><name>インド</name><name>タイ</name><name>ハングル</name><name>中国</name><name>日本</name><name>その他</name></n></serial>
+<text sheet="3" x="212" y="88">分類：</text>
+<serial num="45" sheet="3" rect="264,68,396,96"><n value="0"><name>指定なし</name><name>大小文字</name><name>文字一般</name><name>数字</name><name>記号一般</name><name>発音記号</name><name>図形</name><name>単位</name></n></serial>
+<button num="46" sheet="3" rect="460,70,540,94">前頁</button>
+<button num="47" sheet="3" rect="548,70,628,94">次頁</button>
+<text num="48" sheet="3" x="12" y="122"> </text>
+<button num="49" sheet="3" rect="548,102,628,126">入力</button>
+<text sheet="4" x="12" y="52">文字：</text>
+<box num="51" sheet="4" rect="64,34,184,62" max="2" jp="true"/>
+<button num="52" sheet="4" rect="192,36,272,60" emph="true">調べる</button>
+<button num="53" sheet="4" rect="280,36,360,60">入力</button>
+<button num="55" sheet="4" rect="368,36,500,60">コードを入力</button>
+<button num="54" sheet="4" rect="508,36,628,60">トレーの文字</button>
+<text num="56" sheet="4" x="12" y="88"> </text>
+</panel>
+<panel num="10" rect="0,0,440,128" title="文字検索">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<text num="3" x="24" y="84"> </text>
+<button num="101" rect="328,92,416,116" answer="ok" emph="true">確認</button>
+</panel>
+</databox>
+</tad>

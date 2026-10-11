@@ -139,6 +139,10 @@ LOCAL void test_card( void )
 #ifdef KT_SD_SECTORS
 	KT_ASSERT_EQ(whole_blocks, (UD)KT_SD_SECTORS);
 #endif
+#ifdef KT_SD_EMMC
+	/* an eMMC (make SD_EMMC=1) is soldered on, a card can be taken out */
+	KT_ASSERT_EQ(info.removable, ( KT_SD_EMMC ) ? FALSE : TRUE);
+#endif
 	KT_ASSERT(whole_blocks > 0);
 
 	/* the GPT header says where the image ends: the card is at least that big */

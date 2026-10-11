@@ -22,7 +22,12 @@
  *			to the V3D.
  *	  CNF_V3D = 2	also set up the MMU and the interrupts, register
  *			as the GPU backend and run a small self test
- *			(a BO entered in the MMU, a cache clean job).
+ *			(a BO entered in the MMU, a cache clean job), then
+ *			the tests on the board (v3d_test.c), which end with
+ *			the check of compositing on the GPU (v3d_compose.c).
+ *	  CNF_V3D = 3	the same without the tests on the board: the GPU
+ *			set up for use, its compositing checked once and
+ *			used when the check passes.
  *
  *	The core's first identification word reads "V3D" when the block is
  *	powered and clocked. Nothing else is read before that word is seen,
@@ -95,6 +100,19 @@
 
 LOCAL T_SPLOCK	v3d_lock;
 
+/*
+ * An address space of a process's (13-gpu.md 13.5): a page table of its
+ * own over the whole 32 bit space, so that no address the GPU is given
+ * reads an entry from outside the table, whatever the address cap; and
+ * the binner's overflow memory of its own, entered there, so that no
+ * job of the process writes memory another job reads.
+ */
+typedef struct {
+	T_V3DMMU	mmu;
+	T_GPUBO		*overflow;
+	UW		overflow_va;
+} V3DAS;
+
 /* Each step of the setup names itself first, so that a stop on the board
    shows which of the writes it was */
 #define V3D_STEP(s)	tm_printf((UB *)"v3d: - " s "\n")
@@ -116,6 +134,10 @@ typedef struct {
 	UD		scratch_pa;		/* where invalid GPU accesses go */
 	T_GPUBO		*overflow;		/* binner overflow memory */
 	BOOL		overflow_given;		/* given out during the running job */
+	UW		overflow_va;		/* the running job's: its address there */
+	UW		overflow_size;
+	UD		cur_pt;			/* the table in the MMU now */
+	BOOL		as_allowed;		/* the check of the spaces at start passed */
 	T_GPUCL		cl;			/* the running control list job */
 	BOOL		cl_running;
 	UINT		fldone_at;		/* flush count before the binner started */
@@ -126,6 +148,11 @@ typedef struct {
 	UINT		job_ints;		/* interrupts since the job started */
 	UINT		job_faults;		/* faults reported since the job started */
 	T_V3DSTAT	st;			/* counted for the tests */
+	T_V3DJOBT	jt;			/* the jobs' times, summed */
+	UD		t_kick;			/* the running job's times: started */
+	UD		t_bin;			/* the binner started */
+	UD		t_binend;		/* its end seen */
+	UD		t_render;		/* the renderer started */
 } V3D;
 
 LOCAL V3D	v3d;
@@ -235,6 +262,26 @@ LOCAL ER v3d_identify( void )
 	return E_OK;
 }
 
+/* ---------------------------------------------------------------- time */
+
+LOCAL UD ticks( void )
+{
+	UD	v;
+
+	Asm("isb; mrs %0, cntvct_el0" : "=r"(v) :: "memory");
+	return v;
+}
+
+EXPORT void v3d_jobt_take( T_V3DJOBT *t )
+{
+	UINT	imask;
+
+	ISpinLock(&v3d_lock, &imask);
+	*t = v3d.jt;
+	knl_memset(&v3d.jt, 0, sizeof(v3d.jt));
+	ISpinUnlock(&v3d_lock, &imask);
+}
+
 /* ---------------------------------------------------------------- caches and the MMU */
 
 LOCAL BOOL poll_clear( UBINT reg, UW bits )
@@ -255,7 +302,7 @@ LOCAL void caches_invalidate( void )
 	out_w(CORE(V3D_CTL_L2TFLEND), ~0U);
 	out_w(CORE(V3D_CTL_L2TCACTL), V3D_L2TCACTL_L2TFLS
 				     | ( V3D_L2TCACTL_FLM_FLUSH << V3D_L2TCACTL_FLM_SHIFT ));
-	out_w(CORE(V3D_CTL_SLCACTL), ~0U);
+	out_w(CORE(V3D_CTL_SLCACTL), 0x0F0F0F0FU);	/* TVCCS, TDCCS, UCC, ICC */
 }
 
 /* After a job whose results the processor reads: write them all to memory */
@@ -276,10 +323,12 @@ LOCAL void mmu_flush( void *arg )
 	if ( !v3d.hw_ready ) {
 		return;
 	}
-	out_w(HUB(V3D_MMU_CTL), in_w(HUB(V3D_MMU_CTL)) | V3D_MMU_CTL_TLB_CLEAR);
+	/* the cache of table entries first, then the TLB filled from it */
 	poll_clear(HUB(V3D_MMU_CTL), V3D_MMU_CTL_TLB_CLEARING);
 	out_w(HUB(V3D_MMUC_CONTROL), V3D_MMUC_ENABLE | V3D_MMUC_FLUSH);
 	poll_clear(HUB(V3D_MMUC_CONTROL), V3D_MMUC_FLUSHING);
+	out_w(HUB(V3D_MMU_CTL), in_w(HUB(V3D_MMU_CTL)) | V3D_MMU_CTL_TLB_CLEAR);
+	poll_clear(HUB(V3D_MMU_CTL), V3D_MMU_CTL_TLB_CLEARING);
 }
 
 LOCAL ER mmu_setup( void )
@@ -306,8 +355,9 @@ LOCAL ER mmu_setup( void )
 
 	V3D_STEP("MMU registers");
 	out_w(HUB(V3D_MMU_PT_PA_BASE), (UW)( v3d.mmu.pt_pa >> V3D_PAGE_SHIFT ));
+	v3d.cur_pt = v3d.mmu.pt_pa;
 	out_w(HUB(V3D_MMU_ILLEGAL_ADDR), (UW)( v3d.scratch_pa >> V3D_PAGE_SHIFT ) | V3D_MMU_ILLEGAL_ENABLE);
-	out_w(HUB(V3D_MMU_CTL), V3D_MMU_CTL_ENABLE);
+	out_w(HUB(V3D_MMU_CTL), V3D_MMU_CTL_ON);
 	out_w(HUB(V3D_MMUC_CONTROL), V3D_MMUC_ENABLE);
 	v3d.hw_ready = TRUE;
 	V3D_STEP("TLB clear");
@@ -321,7 +371,13 @@ LOCAL ER mmu_setup( void )
 
 LOCAL void start_render( void )
 {
+	v3d.t_binend = ticks();
+	if ( v3d.t_bin == 0 ) {
+		v3d.t_bin = v3d.t_binend;		/* nothing was binned */
+	}
 	caches_invalidate();
+	poll_clear(CORE(V3D_CTL_L2TCACTL), V3D_L2TCACTL_L2TFLS);
+	v3d.t_render = ticks();
 	v3d.phase = PH_RENDER;
 	v3d.frdone_at = in_w(CORE(V3D_CLE_RFC)) & 0xFF;
 	out_w(CORE(V3D_CLE_CT1QBA), v3d.cl.rcl_start);
@@ -331,6 +387,7 @@ LOCAL void start_render( void )
 LOCAL void start_bin( void )
 {
 	caches_invalidate();
+	poll_clear(CORE(V3D_CTL_L2TCACTL), V3D_L2TCACTL_L2TFLS);
 	if ( v3d.cl.qma != 0 ) {
 		out_w(CORE(V3D_CLE_CT0QMA), v3d.cl.qma);
 		out_w(CORE(V3D_CLE_CT0QMS), v3d.cl.qms);
@@ -338,19 +395,90 @@ LOCAL void start_bin( void )
 	if ( v3d.cl.qts != 0 ) {
 		out_w(CORE(V3D_CLE_CT0QTS), V3D_CLE_CT0QTS_ENABLE | v3d.cl.qts);
 	}
+	v3d.t_bin = ticks();
 	v3d.phase = PH_BIN;
 	v3d.fldone_at = in_w(CORE(V3D_CLE_BFC)) & 0xFF;
 	out_w(CORE(V3D_CLE_CT0QBA), v3d.cl.bcl_start);
 	out_w(CORE(V3D_CLE_CT0QEA), v3d.cl.bcl_end);		/* starts it */
 }
 
-LOCAL ER v3d_kick( void *priv, CONST T_GPUJOB *job )
+/*
+ * The first jobs' threads, told on the console: their state before the
+ * lists are given, and a little after, whether the binner runs.
+ */
+#define KICK_TOLD	8
+LOCAL INT	kicks_told = 0;
+
+LOCAL void kick_tell( CONST char *when )
 {
+	tm_printf((UB *)"v3d: %s job: ct0cs %08x ct0ca %08x ct1cs %08x ct1ca %08x bfc %02x rfc %02x int %08x\n",
+		  when, in_w(CORE(V3D_CLE_CT0CS)), in_w(CORE(V3D_CLE_CT0CA)), in_w(CORE(V3D_CLE_CT1CS)),
+		  in_w(CORE(V3D_CLE_CT1CA)), in_w(CORE(V3D_CLE_BFC)) & 0xFF, in_w(CORE(V3D_CLE_RFC)) & 0xFF,
+		  in_w(CORE(V3D_CTL_INT_STS)));
+}
+
+/*
+ * The MMU given the table of the job about to run, when it is not the
+ * one there: what the caches hold of the job before is written out
+ * first, through the table it was made with, and then the cached
+ * entries and the TLB are dropped. Only between jobs, with both control
+ * list threads stopped. The overflow memory follows the table.
+ */
+LOCAL void table_for( V3DAS *as )
+{
+	UD	pt = ( as != NULL ) ? as->mmu.pt_pa : v3d.mmu.pt_pa;
+
+	if ( as != NULL ) {
+		v3d.overflow_va = as->overflow_va;
+		v3d.overflow_size = ( as->overflow != NULL ) ? OVERFLOW_BYTES : 0;
+	} else {
+		T_GPUBOINFO	bi;
+
+		v3d.overflow_va = 0;
+		v3d.overflow_size = 0;
+		if ( v3d.overflow != NULL ) {
+			knl_gpu_bo_ref(v3d.overflow, &bi);
+			v3d.overflow_va = bi.offset;
+			v3d.overflow_size = (UW)bi.size;
+		}
+	}
+	if ( pt == v3d.cur_pt ) {
+		return;
+	}
+	caches_clean();
+	out_w(HUB(V3D_MMU_PT_PA_BASE), (UW)( pt >> V3D_PAGE_SHIFT ));
+	v3d.cur_pt = pt;
+	mmu_flush(NULL);
+}
+
+LOCAL ER v3d_kick( void *priv, CONST T_GPUJOB *job, void *as )
+{
+	if ( as != NULL && !v3d.as_allowed ) {
+		return E_NOSPT;			/* never in the kernel's table instead */
+	}
+	if ( job->kind == GPU_JOB_CL || job->kind == GPU_JOB_CACHE ) {
+		table_for((V3DAS *)as);
+	}
 	switch ( job->kind ) {
 	case GPU_JOB_CL: {
 		UINT	imask;
 
+		BOOL	tell = ( kicks_told < KICK_TOLD );
+
+		if ( tell ) {
+			kick_tell("before the");
+		}
+		/*
+		 * Both threads from a known state: the binner of the job before
+		 * may stay where its list ended, and a new list given to it
+		 * then is not run.
+		 */
+		out_w(CORE(V3D_CLE_CT0CS), V3D_CLE_CTCS_CTRSTA);
+		out_w(CORE(V3D_CLE_CT1CS), V3D_CLE_CTCS_CTRSTA);
+		out_w(CORE(V3D_CTL_INT_CLR), ~0U);	/* no end of the job before left set */
 		ISpinLock(&v3d_lock, &imask);
+		v3d.t_kick = ticks();
+		v3d.t_bin = 0;
 		v3d.cl = job->u.cl;
 		v3d.cl_running = TRUE;
 		v3d.overflow_given = FALSE;
@@ -363,6 +491,11 @@ LOCAL ER v3d_kick( void *priv, CONST T_GPUJOB *job )
 			start_bin();
 		}
 		ISpinUnlock(&v3d_lock, &imask);
+		if ( tell ) {
+			kicks_told++;
+			tk_dly_tsk(1);
+			kick_tell("1ms into the");
+		}
 		return E_OK;
 	}
 
@@ -376,6 +509,8 @@ LOCAL ER v3d_kick( void *priv, CONST T_GPUJOB *job )
 	}
 }
 
+LOCAL void irq_regs( void );
+
 LOCAL void v3d_reset( void *priv )
 {
 	UINT	imask;
@@ -386,6 +521,25 @@ LOCAL void v3d_reset( void *priv )
 		  in_w(HUB(V3D_HUB_INT_STS)), in_w(CORE(V3D_CLE_CT0CS)), in_w(CORE(V3D_CLE_CT1CS)),
 		  in_w(CORE(V3D_CLE_CT0CA)), in_w(CORE(V3D_CLE_CT1CA)),
 		  in_w(CORE(V3D_CLE_BFC)) & 0xFF, v3d.fldone_at, in_w(CORE(V3D_CLE_RFC)) & 0xFF, v3d.frdone_at);
+	{
+		/*
+		 * Where the job's lists were, and the first words of the binner's
+		 * list as memory holds them: whether the GPU ran what was written
+		 */
+		UW	pte = v3d_mmu_lookup(&v3d.mmu, v3d.cl.bcl_start);
+		UD	pa = ( (UD)( pte & V3D_PTE_PFN_MASK ) << V3D_PAGE_SHIFT )
+			     + ( v3d.cl.bcl_start & ( ( 1U << V3D_PAGE_SHIFT ) - 1 ) );
+		UW	w[4] = { 0, 0, 0, 0 };
+
+		if ( ( pte & V3D_PTE_VALID ) != 0 ) {
+			knl_gpu_dcache_clean_inval((UBINT)PA2VA(pa), sizeof(w));
+			knl_memcpy(w, (CONST void *)PA2VA(pa), sizeof(w));
+		}
+		tm_printf((UB *)"v3d: the job: bin %08x-%08x render %08x-%08x tile memory %08x+%x state %08x; "
+			  "bin list at %lx: %08x %08x %08x %08x\n",
+			  v3d.cl.bcl_start, v3d.cl.bcl_end, v3d.cl.rcl_start, v3d.cl.rcl_end,
+			  v3d.cl.qma, v3d.cl.qms, v3d.cl.qts, pa, w[0], w[1], w[2], w[3]);
+	}
 	ISpinLock(&v3d_lock, &imask);
 	v3d.cl_running = FALSE;
 	v3d.phase = PH_IDLE;
@@ -395,6 +549,11 @@ LOCAL void v3d_reset( void *priv )
 	out_w(CORE(V3D_CTL_INT_CLR), ~0U);
 	out_w(HUB(V3D_HUB_INT_CLR), ~0U);
 	mmu_flush(NULL);
+	/* the caches too: nothing of the job that stopped is kept for the next */
+	caches_invalidate();
+	poll_clear(CORE(V3D_CTL_L2TCACTL), V3D_L2TCACTL_L2TFLS);
+	tm_printf((UB *)"v3d: after the reset: ct0cs %08x ct1cs %08x ct0ca %08x\n",
+		  in_w(CORE(V3D_CLE_CT0CS)), in_w(CORE(V3D_CLE_CT1CS)), in_w(CORE(V3D_CLE_CT0CA)));
 }
 
 /* ---------------------------------------------------------------- the job's steps */
@@ -402,11 +561,24 @@ LOCAL void v3d_reset( void *priv )
 /* The renderer is done: the job ends. Called with the lock held */
 LOCAL void frame_done( void )
 {
+	UD	t_end, t_done = ticks();
+
 	v3d.cl_running = FALSE;
 	v3d.phase = PH_IDLE;
 	if ( ( v3d.cl.flags & GPU_CL_FLUSH_CACHE ) != 0 ) {
 		caches_clean();
 	}
+	t_end = ticks();
+	v3d.jt.njob++;
+	if ( v3d.jt.first_kick == 0 ) {
+		v3d.jt.first_kick = v3d.t_kick;
+	}
+	v3d.jt.last_end = t_end;
+	v3d.jt.setup += v3d.t_bin - v3d.t_kick;
+	v3d.jt.bin += v3d.t_binend - v3d.t_bin;
+	v3d.jt.mid += v3d.t_render - v3d.t_binend;
+	v3d.jt.render += t_done - v3d.t_render;
+	v3d.jt.clean += t_end - t_done;
 	knl_gpu_job_end(v3d.faulted ? E_IO : E_OK);
 }
 
@@ -414,10 +586,40 @@ LOCAL void frame_done( void )
  * The counters of flushes and frames tell the ends too, whatever the
  * interrupt bits are. Called with the lock held
  */
+/*
+ * The binner ran out of tile memory: the overflow memory is given once a
+ * job; out of it again, the job ends. TRUE when the job ended. Called
+ * with the lock held
+ */
+LOCAL BOOL give_overflow( void )
+{
+	v3d.st.outomem++;
+	if ( v3d.overflow_va != 0 && !v3d.overflow_given ) {
+		out_w(CORE(V3D_PTB_BPOA), v3d.overflow_va);
+		out_w(CORE(V3D_PTB_BPOS), v3d.overflow_size);
+		v3d.overflow_given = TRUE;
+		return FALSE;
+	}
+	if ( v3d.cl_running ) {
+		v3d.cl_running = FALSE;
+		v3d.phase = PH_IDLE;
+		knl_gpu_job_end(E_NOMEM);
+		return TRUE;
+	}
+	return FALSE;
+}
+
 LOCAL void counters_check( void )
 {
 	if ( !v3d.cl_running ) {
 		return;
+	}
+	/* out of tile memory with no interrupt told: the watch gives it too */
+	if ( v3d.phase == PH_BIN && ( in_w(CORE(V3D_CTL_INT_STS)) & V3D_INT_OUTOMEM ) != 0 ) {
+		out_w(CORE(V3D_CTL_INT_CLR), V3D_INT_OUTOMEM);
+		if ( give_overflow() ) {
+			return;
+		}
 	}
 	if ( v3d.phase == PH_BIN && ( in_w(CORE(V3D_CLE_BFC)) & 0xFF ) != v3d.fldone_at ) {
 		v3d.st.fldone_count++;
@@ -473,25 +675,14 @@ LOCAL void v3d_core_inthdr( UINT intno )
 	}
 	if ( storm(intno) ) {
 		ISpinUnlock(&v3d_lock, &imask);
+		EndOfInt(intno);
 		return;
 	}
 
-	if ( ( sts & V3D_INT_OUTOMEM ) != 0 ) {
-		v3d.st.outomem++;
-		if ( v3d.overflow != NULL && !v3d.overflow_given ) {
-			T_GPUBOINFO	bi;
-
-			knl_gpu_bo_ref(v3d.overflow, &bi);
-			out_w(CORE(V3D_PTB_BPOA), bi.offset);
-			out_w(CORE(V3D_PTB_BPOS), (UW)bi.size);
-			v3d.overflow_given = TRUE;
-		} else if ( v3d.cl_running ) {
-			v3d.cl_running = FALSE;
-			v3d.phase = PH_IDLE;
-			knl_gpu_job_end(E_NOMEM);
-			ISpinUnlock(&v3d_lock, &imask);
-			return;
-		}
+	if ( ( sts & V3D_INT_OUTOMEM ) != 0 && give_overflow() ) {
+		ISpinUnlock(&v3d_lock, &imask);
+		EndOfInt(intno);
+		return;
 	}
 	if ( ( sts & V3D_INT_FLDONE ) != 0 ) {
 		v3d.st.fldone++;
@@ -507,6 +698,7 @@ LOCAL void v3d_core_inthdr( UINT intno )
 	}
 	counters_check();
 	ISpinUnlock(&v3d_lock, &imask);
+	EndOfInt(intno);		/* the GIC takes the next only after this */
 }
 
 LOCAL void v3d_hub_inthdr( UINT intno )
@@ -516,6 +708,7 @@ LOCAL void v3d_hub_inthdr( UINT intno )
 	out_w(HUB(V3D_HUB_INT_CLR), sts);
 	v3d.st.hub_ints++;
 	if ( storm(intno) ) {
+		EndOfInt(intno);
 		return;
 	}
 
@@ -535,6 +728,7 @@ LOCAL void v3d_hub_inthdr( UINT intno )
 				  v3d.st.fault_addr, v3d.st.fault_id);
 		}
 	}
+	EndOfInt(intno);
 }
 
 EXPORT void v3d_stat( T_V3DSTAT *st )
@@ -543,10 +737,9 @@ EXPORT void v3d_stat( T_V3DSTAT *st )
 	st->scratch_pa = v3d.scratch_pa;
 }
 
-LOCAL void irq_setup( void )
+LOCAL void irq_regs( void )
 {
 	UW	hub = V3D_HUB_INT_MMU_WRV | V3D_HUB_INT_MMU_PTI | V3D_HUB_INT_MMU_CAP;
-	T_CCYC	cc;
 
 	/* every core bit: the ones not known are told of (CORE_INTS_KNOWN) */
 	out_w(CORE(V3D_CTL_INT_MSK_CLR), ~0U);
@@ -554,6 +747,13 @@ LOCAL void irq_setup( void )
 	out_w(HUB(V3D_HUB_INT_MSK_SET), ~hub);
 	out_w(HUB(V3D_HUB_INT_MSK_CLR), hub);
 	out_w(HUB(V3D_HUB_INT_CLR), ~0U);
+}
+
+LOCAL void irq_setup( void )
+{
+	T_CCYC	cc;
+
+	irq_regs();
 
 	knl_define_inthdr(V3D_CORE0_INTNO, TA_HLNG, (FP)v3d_core_inthdr);
 	knl_define_inthdr(V3D_HUB_INTNO, TA_HLNG, (FP)v3d_hub_inthdr);
@@ -609,6 +809,84 @@ LOCAL void v3d_bo_unbind( void *priv, UW offset, UD npages )
 	v3d_mmu_free(&v3d.mmu, offset, npages);
 }
 
+/* ---------------------------------------------------------------- address spaces */
+
+LOCAL ER v3d_as_bind( void *priv, void *as, T_GPUBO *bo, UD npages, UW *p_va )
+{
+	V3DAS	*a = (V3DAS *)as;
+	ER	er = v3d_mmu_alloc(&a->mmu, npages, 1, p_va);
+
+	if ( er < E_OK ) {
+		return er;
+	}
+	v3d_mmu_insert(&a->mmu, *p_va, knl_gpu_bo_pages(bo), npages, TRUE);
+	return E_OK;
+}
+
+LOCAL void v3d_as_unbind( void *priv, void *as, UW va, UD npages )
+{
+	V3DAS	*a = (V3DAS *)as;
+
+	v3d_mmu_remove(&a->mmu, va, npages);
+	v3d_mmu_free(&a->mmu, va, npages);
+}
+
+LOCAL void v3d_as_destroy( void *priv, void *as )
+{
+	V3DAS	*a = (V3DAS *)as;
+
+	if ( a->overflow != NULL ) {
+		v3d_as_unbind(priv, a, a->overflow_va, OVERFLOW_BYTES >> PAGE_SHIFT);
+		knl_gpu_bo_put(a->overflow);
+	}
+	v3d_mmu_fini(&a->mmu);
+	Kfree(a);
+}
+
+/*
+ * A table of 4MB (every 32 bit address) with nothing in it but its
+ * overflow memory. E_OBJ when the check at start did not pass: then a
+ * process gets no space, and no job of a process runs on the V3D.
+ */
+LOCAL ER v3d_as_create( void *priv, void **p_as )
+{
+	V3DAS	*a;
+	ER	er;
+
+	if ( !v3d.as_allowed ) {
+		return E_OBJ;
+	}
+	a = (V3DAS *)Kmalloc(sizeof(V3DAS));
+	if ( a == NULL ) {
+		return E_NOMEM;
+	}
+	knl_memset(a, 0, sizeof(*a));
+	er = v3d_mmu_init(&a->mmu, V3D_VA_FULL);
+	if ( er < E_OK ) {
+		Kfree(a);
+		return er;
+	}
+	a->mmu.flush = mmu_flush;
+	a->mmu.flush_arg = NULL;
+	a->overflow = knl_gpu_bo_create(OVERFLOW_BYTES, GPU_BO_NOGPU, &er);
+	if ( a->overflow == NULL || v3d_as_bind(priv, a, a->overflow, OVERFLOW_BYTES >> PAGE_SHIFT,
+						&a->overflow_va) < E_OK ) {
+		if ( a->overflow != NULL ) knl_gpu_bo_put(a->overflow);
+		a->overflow = NULL;
+		v3d_mmu_fini(&a->mmu);
+		Kfree(a);
+		return E_NOMEM;
+	}
+	*p_as = a;
+	return E_OK;
+}
+
+/* For the check at start (v3d_test.c): the table of a space (NULL: the kernel's) */
+EXPORT T_V3DMMU *v3d_as_mmu( void *as )
+{
+	return ( as != NULL ) ? &((V3DAS *)as)->mmu : &v3d.mmu;
+}
+
 LOCAL T_GPUOPS	v3d_ops = {
 	GPU_KIND_V3D,
 	GPU_FEAT_CL | GPU_FEAT_CACHE | GPU_FEAT_MMU,
@@ -617,7 +895,11 @@ LOCAL T_GPUOPS	v3d_ops = {
 	v3d_bo_bind,
 	v3d_bo_unbind,
 	v3d_kick,
-	v3d_reset
+	v3d_reset,
+	v3d_as_create,
+	v3d_as_destroy,
+	v3d_as_bind,
+	v3d_as_unbind
 };
 
 /* A BO in the MMU and a job that runs without a list */
@@ -693,6 +975,13 @@ EXPORT ER knl_v3d_init( void )
 	v3d.overflow = knl_gpu_bo_create(OVERFLOW_BYTES, 0, &er);
 	V3D_STEP("self test");
 	v3d_selftest();
+	V3D_STEP("address spaces");
+	v3d.as_allowed = TRUE;			/* for the check's own space */
+	v3d.as_allowed = v3d_as_check();
+	V3D_STEP("compositing");
+	if ( v3d_compose_init() >= E_OK && CNF_V3D != 2 ) {
+		v3d_compose_start();		/* with the tests, they check it after theirs */
+	}
 	v3d_test_start();
 	return E_OK;
 }

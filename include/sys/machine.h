@@ -22,12 +22,17 @@
 /* ===== System dependencies definitions ================================ */
 
 /*
- * TessronOS のターゲットは makefile の TARGET(-D_RPI5_ / -D_QEMU_VIRT_)で選ぶ。
- * どちらも AArch64(armv8a コア)で、ボードとSoCの違いは sysdepend 配下で吸収する。
+ * TessronOS のターゲットは makefile の TARGET(-D_RPI5_ / -D_RPI4_ / -D_QEMU_VIRT_)で選ぶ。
+ * いずれも AArch64(armv8a コア)で、ボードとSoCの違いは sysdepend 配下で吸収する。
  */
 
 #ifdef _RPI5_
 #include "sysdepend/rpi5/machine.h"
+#define Csym(sym) sym
+#endif
+
+#ifdef _RPI4_
+#include "sysdepend/rpi4/machine.h"
 #define Csym(sym) sym
 #endif
 
@@ -36,8 +41,8 @@
 #define Csym(sym) sym
 #endif
 
-#if !defined(_RPI5_) && !defined(_QEMU_VIRT_)
-#error "TARGET is not defined (use make TARGET=_RPI5_ or TARGET=_QEMU_VIRT_)"
+#if !defined(_RPI5_) && !defined(_RPI4_) && !defined(_QEMU_VIRT_)
+#error "TARGET is not defined (use make TARGET=_RPI5_, TARGET=_RPI4_ or TARGET=_QEMU_VIRT_)"
 #endif
 
 /* ===== C compiler dependencies definitions ============================= */

@@ -18,6 +18,11 @@
  *	output just before it needs it. Input is pushed: the backend hands
  *	what it recorded to knl_snd_capture().
  *
+ *	A backend has one or more outputs, each named by its id (include/
+ *	ts/snd.h): the USB audio backend one for every function plugged in,
+ *	the HDMI one a socket each. The device picks the output, and the
+ *	backend plays on the one it is given.
+ *
  *	Everything here is called with the USB manager's lock held, which is
  *	the sound device's lock too: the USB audio streams run in the
  *	manager's task, and the other backends are served from the same
@@ -31,13 +36,19 @@
 
 typedef struct {
 	INT	kind;				/* SND_BE_* */
-	BOOL	(*can_play)( void );
+	/*
+	 * The outputs it has now, up to max of them: id, name, kind and
+	 * the flags SND_OF_NOSOUND and SND_OF_LEVEL. Cheap: it is asked
+	 * every few hundred milliseconds while a stream plays.
+	 */
+	INT	(*outputs)( SDOut *o, INT max );
 	BOOL	(*can_record)( void );
 	/*
-	 * Output: from here on the backend asks knl_snd_mix() for its
-	 * samples, perhaps already before this returns.
+	 * Output on the output id: from here on the backend asks
+	 * knl_snd_mix() for its samples, perhaps already before this
+	 * returns.
 	 */
-	ER	(*play_start)( UW *rate, INT *channels );
+	ER	(*play_start)( CONST UB *id, UW *rate, INT *channels );
 	void	(*play_stop)( void );
 	BOOL	(*play_running)( void );
 	/* Input near rate Hz; the rate and channels it comes in at */
@@ -49,6 +60,15 @@ typedef struct {
 	/* the levels it has (DN_SDVOL*, DN_SDGAIN*); E_NOSPT for one it has not */
 	ER	(*get_level)( INT dn, SDVol *v );
 	ER	(*set_level)( INT dn, CONST SDVol *v );
+	/*
+	 * Silence before the first samples of a stream that has just
+	 * started (a screen takes a while to let sound through), and how
+	 * long the stream goes on in silence once the last channel has
+	 * stopped, so that a short sound soon after is not cut by that
+	 * wait again. 0 for neither.
+	 */
+	UW	lead_ms;
+	UW	tail_ms;
 } SNDHW;
 
 /*
@@ -59,11 +79,20 @@ typedef struct {
  */
 IMPORT INT knl_snd_mix( UB *dst, INT frames, UW rate, INT channels, BOOL wait );
 
+/* An id and a name into an output entry, cut to fit */
+IMPORT void knl_snd_out_set( SDOut *o, CONST UB *id, CONST UB *name, UW kind, UW flags );
+
 /* The backends there are */
 IMPORT CONST SNDHW	knl_uac_hw;
 #ifdef RPI5
 IMPORT CONST SNDHW	knl_i2s_hw;
 IMPORT ER knl_i2s_init( void );
+IMPORT CONST SNDHW	knl_hdmi_hw;
+IMPORT ER knl_hdmi_init( void );
+
+/* For the checks on the board: how far the stream went, and clk_i2s counted */
+IMPORT BOOL knl_i2s_pace( UW *blocks, UW *ms, UW *clk_khz );
+IMPORT INT  knl_hdmi_pace( UW *blocks, UW *ms );
 #endif
 
 #endif /* __SNDHW_H__ */

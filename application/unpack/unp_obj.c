@@ -37,6 +37,7 @@
 #include <ts/dtreq.h>
 
 #define CHUNK		( 64 * 1024 )
+#define ARC_PROG	"archive-manager"	/* 書庫管理's program id */
 #define PROG_MAX	64
 #define ICON_KEEP	8
 
@@ -281,6 +282,12 @@ LOCAL const char *put_applist( BPKBUF *b, const BPKFILE *f )
 	for ( i = 0; i < f->nexec && nseen < 16; i++ ) {
 		const char	*name, *id = bpk_appl_prog(f->exec[i].appl, &name);
 
+		if ( id != NULL && f->exec[i].appl[1] == BPK_APPL_ARCHIVE && first == NULL && prog_find(ARC_PROG) != NULL ) {
+			/* an archive inside opens with 書庫管理, which takes it out as 書庫解凍 does */
+			bpk_buf_printf(b, "\"%s\":{\"name\":\"書庫管理\",\"defaultOpen\":true}", ARC_PROG);
+			first = ARC_PROG;
+			seen[nseen++] = ARC_PROG;
+		}
 		if ( id == NULL || prog_find(id) == NULL ) continue;
 		for ( k = 0; k < nseen && strcmp(seen[k], id) != 0; k++ ) ;
 		if ( k < nseen ) continue;
@@ -288,6 +295,11 @@ LOCAL const char *put_applist( BPKBUF *b, const BPKFILE *f )
 			  first == NULL ? "true" : "false");
 		if ( first == NULL ) first = id;
 		seen[nseen++] = id;
+	}
+	if ( first == NULL && bpk_mc_file(f) && prog_find(BPK_MC_PROG) != NULL ) {
+		bpk_buf_printf(b, "\"%s\":{\"name\":\"%s\",\"defaultOpen\":true},"
+			       "\"basic-text-editor\":{\"name\":\"基本文章編集\",\"defaultOpen\":false}", BPK_MC_PROG, BPK_MC_NAME);
+		first = BPK_MC_PROG;
 	}
 	if ( first == NULL ) {
 		t = first_tad(f);
@@ -306,8 +318,34 @@ LOCAL const char *put_applist( BPKBUF *b, const BPKFILE *f )
 	return first;
 }
 
-/* A file's metadata, and the program that opens it first */
-LOCAL const char *meta_of( BPKBUF *b, const BPKFILE *f )
+/*
+ * The times the local header keeps. The period of keeping goes into the
+ * metadata as periodDate (BPK_NO_TIME none). The store gives an object
+ * made here its own times of making, changing and looking at, so the
+ * ones the archive had are kept beside them as "tessronos":{"btron":
+ * {"ctime","mtime","atime"}}, as バックアップ keeps them, for a book
+ * made again to carry. A time of 0 says nothing and is left out.
+ */
+#define BPK_NO_TIME	0xFFFFFFFFU
+
+LOCAL void put_times( BPKBUF *b, const BPKLHEAD *h )
+{
+	char	t[24];
+	INT	n = 0;
+
+	if ( h->f_ltime != 0 && h->f_ltime != BPK_NO_TIME && bpk_stime_iso(h->f_ltime, t) > 0 ) {
+		bpk_buf_printf(b, "\"periodDate\":\"%s\",", t);
+	}
+	if ( h->f_ctime == 0 && h->f_mtime == 0 && h->f_atime == 0 ) return;
+	bpk_buf_puts(b, "\"tessronos\":{\"btron\":{");
+	if ( h->f_ctime != 0 && bpk_stime_iso(h->f_ctime, t) > 0 ) bpk_buf_printf(b, "%s\"ctime\":\"%s\"", n++ ? "," : "", t);
+	if ( h->f_mtime != 0 && bpk_stime_iso(h->f_mtime, t) > 0 ) bpk_buf_printf(b, "%s\"mtime\":\"%s\"", n++ ? "," : "", t);
+	if ( h->f_atime != 0 && bpk_stime_iso(h->f_atime, t) > 0 ) bpk_buf_printf(b, "%s\"atime\":\"%s\"", n++ ? "," : "", t);
+	bpk_buf_puts(b, "}},");
+}
+
+/* A file's metadata, and the program that opens it first; maker says who made the object */
+LOCAL const char *meta_of( BPKBUF *b, const BPKFILE *f, const char *maker )
 {
 	const BPKEXEC	*win = NULL, *bg = NULL, *sv = NULL;
 	const BPKREC	*t = first_tad(f);
@@ -336,8 +374,12 @@ LOCAL const char *meta_of( BPKBUF *b, const BPKFILE *f )
 	}
 	bpk_buf_puts(b, "{\"name\":\"");
 	bpk_buf_json(b, f->name);
-	bpk_buf_puts(b, "\",\"relationship\":[],\"linktype\":false,\"refCount\":0,"
-		   "\"editable\":true,\"deletable\":true,\"readable\":true,\"maker\":\"書庫解凍\",");
+	bpk_buf_printf(b, "\",\"relationship\":[],\"linktype\":false,\"refCount\":0,"
+		       "\"editable\":%s,\"deletable\":%s,\"readable\":true,\"maker\":\"",
+		       ( f->head.f_type & BPK_F_RONLY ) ? "false" : "true", ( f->head.f_type & BPK_F_PERM ) ? "false" : "true");
+	bpk_buf_json(b, ( maker != NULL && maker[0] != 0 ) ? maker : "書庫解凍");
+	bpk_buf_puts(b, "\",");
+	put_times(b, &f->head);
 	bpk_buf_printf(b, "\"window\":{\"pos\":{\"x\":%d,\"y\":%d},\"width\":%d,\"height\":%d,\"backgroundColor\":\"%s\"},",
 		  x, y, w, h, colour);
 	bpk_buf_puts(b, "\"applist\":");
@@ -405,7 +447,7 @@ LOCAL ER count_links( const char *xml )
 	for ( p = xml; ( p = strstr(p, "<link id=\"") ) != NULL; p++ ) {
 		TS_UUID	u;
 
-		if ( !unp_uuid_parse(p + 10, &u) ) continue;
+		if ( !unp_uuid_parse(p + 10 + ts_lnk_split((const UB *)p + 10, (INT)strlen(p + 10), NULL, NULL), &u) ) continue;
 		er = ob_lnk_obj(&u);
 		if ( er < E_OK ) return er;
 	}
@@ -504,7 +546,7 @@ EXPORT ER unp_job_run( UNPJOB *j, const TS_UUID *into, void (*progress)( UNPJOB 
 		INT		icolen = 0;
 
 		bpk_buf_init(&b);
-		prog = meta_of(&b, &a->file[i]);
+		prog = meta_of(&b, &a->file[i], j->maker);
 		ico = icon_of(prog, &icolen);
 		if ( ico == NULL ) ico = icon_of("basic-text-editor", &icolen);
 		if ( ico == NULL ) j->noicon++;
@@ -542,7 +584,7 @@ EXPORT ER unp_job_run( UNPJOB *j, const TS_UUID *into, void (*progress)( UNPJOB 
 	for ( i = 0; er >= E_OK && i < (INT)a->nfiles; i++ ) {
 		const BPKFILE	*f = &a->file[i];
 		INT		t = 0;
-		BOOL		archive = FALSE;
+		BOOL		archive = FALSE, mc = bpk_mc_file(f);
 
 		k = ob_opn_obj(&j->made[i], OB_OP_R | OB_OP_W);
 		if ( k <= 0 ) {
@@ -553,7 +595,17 @@ EXPORT ER unp_job_run( UNPJOB *j, const TS_UUID *into, void (*progress)( UNPJOB 
 		j->curkey = k;
 		j->curfile = i;
 		bpk_conv_object(cv);
-		for ( r = 0; er >= E_OK && r < f->nrec; r++ ) {
+		if ( mc ) {
+			/* マイクロカード実身: record 0 names the link records' objects in their order */
+			bpk_buf_init(&b);
+			bpk_mc_xml(&b, f->name, f->nlink, &hook);
+			er = b.fail ? E_NOMEM : add_rec(k, OB_RT_TAD, 0, b.s, (UINT)b.n);
+			if ( er >= E_OK && !j->autoref ) er = count_links(b.s);
+			bpk_buf_free(&b);
+			if ( er < E_OK ) seterr(j, "レコードを書けません", er);
+			t = 1;
+		}
+		for ( r = 0; !mc && er >= E_OK && r < f->nrec; r++ ) {
 			if ( f->rec[r].type != BPK_RT_TAD || !bpk_tad_is_doc(f->rec[r].data, f->rec[r].size) ) continue;
 			bpk_buf_init(&b);
 			er = bpk_tad_to_xml(cv, f->name, j->ids[i], t++, f->rec[r].data, f->rec[r].size, &b);
@@ -586,7 +638,7 @@ EXPORT ER unp_job_run( UNPJOB *j, const TS_UUID *into, void (*progress)( UNPJOB 
 			UH	ty = f->rec[r].type;
 
 			if ( ty == BPK_RT_LINK || ty == BPK_RT_EXEC
-			  || ( ty == BPK_RT_TAD && !archive && bpk_tad_is_doc(f->rec[r].data, f->rec[r].size) ) ) continue;
+			  || ( ty == BPK_RT_TAD && !archive && !mc && bpk_tad_is_doc(f->rec[r].data, f->rec[r].size) ) ) continue;
 			er = add_rec(k, OB_RT_SYSDATA, f->rec[r].sub, f->rec[r].data, f->rec[r].size);
 			if ( er < E_OK ) seterr(j, "レコードを書けません", er);
 		}

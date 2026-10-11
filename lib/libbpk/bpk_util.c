@@ -171,3 +171,78 @@ EXPORT void bpk_colour( UINT raw, const UINT *cmap, INT ncmap, char out[8] )
 	}
 	snprintf(out, 8, "#%06x", rgb & 0xFFFFFF);
 }
+
+/* ---------------------------------------------------------------- times */
+
+/* Days from 1970-01-01 to a date of the proleptic Gregorian calendar */
+LOCAL INT days_from_civil( INT y, INT m, INT d )
+{
+	INT	era, yoe, doy, doe;
+
+	y -= ( m <= 2 );
+	era = ( y >= 0 ? y : y - 399 ) / 400;
+	yoe = y - era * 400;
+	doy = ( 153 * ( m + ( m > 2 ? -3 : 9 ) ) + 2 ) / 5 + d - 1;
+	doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+	return era * 146097 + doe - 719468;
+}
+
+#define DAYS_1985	5479		/* days_from_civil(1985, 1, 1) */
+
+EXPORT INT bpk_stime_iso( UINT stime, char *out )
+{
+	INT	days = (INT)( stime / 86400 ) + DAYS_1985, secs = (INT)( stime % 86400 );
+	INT	z = days + 719468, era, doe, yoe, doy, mp, d, m, y;
+
+	era = ( z >= 0 ? z : z - 146096 ) / 146097;
+	doe = z - era * 146097;
+	yoe = ( doe - doe / 1460 + doe / 36524 - doe / 146096 ) / 365;
+	y = yoe + era * 400;
+	doy = doe - ( 365 * yoe + yoe / 4 - yoe / 100 );
+	mp = ( 5 * doy + 2 ) / 153;
+	d = doy - ( 153 * mp + 2 ) / 5 + 1;
+	m = mp + ( mp < 10 ? 3 : -9 );
+	y += ( m <= 2 );
+	return snprintf(out, 24, "%04d-%02d-%02dT%02d:%02d:%02dZ", y, m, d, secs / 3600, secs / 60 % 60, secs % 60);
+}
+
+/* n decimal digits at s, or -1 */
+LOCAL INT digits( const char *s, INT n )
+{
+	INT	v = 0, i;
+
+	for ( i = 0; i < n; i++ ) {
+		if ( s[i] < '0' || s[i] > '9' ) return -1;
+		v = v * 10 + ( s[i] - '0' );
+	}
+	return v;
+}
+
+EXPORT UINT bpk_iso_stime( const char *s )
+{
+	INT	y, mo, d, h = 0, mi = 0, se = 0, i = 19, off = 0;
+	D	t;
+
+	if ( s == NULL ) return 0;
+	y = digits(s, 4);
+	mo = ( y >= 0 && s[4] == '-' ) ? digits(s + 5, 2) : -1;
+	d = ( mo >= 1 && mo <= 12 && s[7] == '-' ) ? digits(s + 8, 2) : -1;
+	if ( d < 1 ) return 0;
+	if ( s[10] == 'T' || s[10] == ' ' ) {
+		h = digits(s + 11, 2);
+		mi = ( s[13] == ':' ) ? digits(s + 14, 2) : -1;
+		se = ( s[16] == ':' ) ? digits(s + 17, 2) : 0;
+		if ( h < 0 || mi < 0 || se < 0 ) return 0;
+		if ( s[16] != ':' ) i = 16;
+		if ( s[i] == '.' ) {
+			for ( i++; s[i] >= '0' && s[i] <= '9'; i++ ) ;
+		}
+		if ( s[i] == '+' || s[i] == '-' ) {
+			INT	oh = digits(s + i + 1, 2), om = digits(s + i + ( s[i + 3] == ':' ? 4 : 3 ), 2);
+
+			if ( oh >= 0 && om >= 0 ) off = ( oh * 60 + om ) * 60 * ( s[i] == '-' ? -1 : 1 );
+		}
+	}
+	t = (D)( days_from_civil(y, mo, d) - DAYS_1985 ) * 86400 + h * 3600 + mi * 60 + se - off;
+	return ( t > 0 && t < 0xFFFFFFFFLL ) ? (UINT)t : 0;
+}

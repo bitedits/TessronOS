@@ -1,0 +1,90 @@
+# コンソール (design 16.5.19), for tools/ui_run.py: the accessory opened from its program
+# (its window at 100,80 to 760,500), the place it starts in, bin (pwd typed in the full-width
+# letters the system starts with), the links of bin listed by their names, hello run with an
+# argument and its exit code, a name that is nothing, ".." up to "/", hello run from there,
+# the システム箱 by its UUID, the プログラム箱 gone into by a name typed in 日本語 (ぷろぐらむ turned to
+# katakana with Shift+無変換) and completed with Tab, and back to bin. Last, the command hello
+# opened from the desktop as a double press opens it: run in a コンソール of its own.
+open 01a0d8c4-5219-7c3e-8a41-2f6b9d0e5c11
+wait 1500
+win コンソール
+click 420 300
+wait 200
+text pwd
+key 28
+expect /bin
+# 半角
+key 35
+text ls
+key 28
+expect [コマンド] hello
+expect [コマンド] v8prog
+text hello
+key 2C
+text 7
+key 28
+expect hello from a TessronOS process
+expect arguments: 7
+expect hello: 終了コード 7
+text nosuch
+key 28
+expect nosuch: そういう命令もプログラムもありません
+text cd
+key 2C
+text ..
+key 28
+text pwd
+key 28
+expect /> pwd
+text ls
+key 28
+expect [実身] bin/
+expect [実身] home/
+text hello
+key 2C
+text 3
+key 28
+expect hello: 終了コード 3
+wait 300
+shot con_root
+# the システム箱 by its UUID
+text cd
+key 2C
+text 01a0d8c4-5211-7c52-9e0a-3b61d27f4c85
+key 28
+text ls
+key 28
+expect [実身] プログラム箱/
+# cd プログラム: the kana turned to katakana, committed, and the name completed
+text cd
+key 2C
+key 88
+text puroguramu
+key 8B 02
+wait 300
+shot con_ime
+key 28
+# the mode keys act at once, the window's keys when it reads them: let Enter be read first
+wait 300
+key 39
+key 2B
+wait 200
+shot con_tab
+key 28
+expect システム箱> cd プログラム箱/
+text ls
+key 28
+expect [小物] 時計
+text cd
+key 28
+text pwd
+key 28
+expect bin> pwd
+wait 300
+shot con_back
+# hello opened from the desktop: a コンソール started for it runs it
+open 01a0d8c4-5462-7c93-8ea4-bc1d2e3f5462
+expect hello: 終了コード 0
+wait 500
+shot con_open
+absent !OACV!

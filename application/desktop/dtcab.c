@@ -330,5 +330,5 @@ EXPORT void dt_cab_command( DTWIN *d, INT cmd, BOOL on_vobj, CONST T_VOBJ *v )
 	case CM_UNBG:		ed_protect(d, TRUE, FALSE);	break;
 	default:		break;
 	}
-	wm_composite();
+	wm_update();
 }

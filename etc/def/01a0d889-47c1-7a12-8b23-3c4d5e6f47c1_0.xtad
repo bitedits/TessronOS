@@ -1,0 +1,13 @@
+<tad version="1.0" encoding="UTF-8" filename="電子手帳の表示">
+<document>
+<p>電子手帳の表示</p>
+<p>予定表、カレンダー、住所録、検索パネル。メニューの定義。</p>
+</document>
+<menu>
+<item code="view.sched">予定表</item>
+<item code="view.cal">カレンダー</item>
+<item code="view.addr">住所録</item>
+<line/>
+<item code="view.find" key="F">検索パネル</item>
+</menu>
+</tad>

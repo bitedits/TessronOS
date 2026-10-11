@@ -35,14 +35,23 @@ typedef struct {
 	INT	tm_year;		/* years since 1900 */
 	INT	tm_wday;		/* 0-6, Sunday is 0 */
 	INT	tm_yday;		/* 0-365 */
-	INT	tm_isdst;		/* always 0: summer time is not kept */
+	INT	tm_isdst;		/* 1 in summer time (dt_localtime), else 0 */
 } TS_TM;
 
 /*
- * Time zone: minutes east of UTC. Summer time rules are not supported.
+ * Time zone: its standard offset, minutes east of UTC, and the IANA name
+ * of the zone it stands for ("Asia/Tokyo"; "" when it names none).
+ * dt_localtime and dt_mktime_local follow summer time in the zones that
+ * keep it (the United States and Canada, the European Union, the
+ * south-east of Australia, New Zealand). dt_setsystz sets the offset
+ * alone, and drops the name when the offset is another.
  */
+#define DT_ZONE_MAX	48		/* bytes of a zone's name, with the 0 */
+
 IMPORT ER dt_getsystz( INT *p_minutes );
 IMPORT ER dt_setsystz( INT minutes );
+IMPORT INT dt_getsyszone( char *name, INT max );		/* the name's length */
+IMPORT ER dt_setsyszone( CONST char *name, INT minutes );
 
 IMPORT ER dt_gmtime( CONST TS_TIME *t, TS_TM *tm );		/* UTC */
 IMPORT ER dt_localtime( CONST TS_TIME *t, TS_TM *tm );		/* system time zone */

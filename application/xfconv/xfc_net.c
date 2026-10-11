@@ -250,6 +250,14 @@ EXPORT ER xfc_net_up( void )
 		return E_OK;
 	}
 	er = so_dhcp_start();
+	if ( er == E_OACV ) {
+		/* bringing the interface up is the administrator's: the password asked for, by the desktop */
+		if ( ts_admin_ask("ネットワークの開始", NULL) >= E_OK ) {
+			er = so_dhcp_start();
+			(void)ob_end_adm();
+		}
+		if ( er == E_OACV ) ts_no_right("ネットワークを開始");
+	}
 	if ( er < E_OK ) {
 		return er;
 	}
@@ -262,11 +270,17 @@ EXPORT ER xfc_net_up( void )
 
 /* ---------------------------------------------------------------- the settings */
 
-LOCAL ID prog_key( UINT ops )
+/*
+ * The connections are kept in the metadata of ファイル変換の箱
+ * (SYSDEF_XFCONV_BOX), the person's to write as what is taken in is;
+ * the program object, which is the system's, is only read, for what a
+ * system before kept there.
+ */
+LOCAL ID conf_key( UINT ops, BOOL prog )
 {
 	TS_UUID	u;
 
-	if ( !xfc_uuid_parse(SYSDEF_PROG_XFCONV, &u) ) return E_PAR;
+	if ( !xfc_uuid_parse(prog ? SYSDEF_PROG_XFCONV : SYSDEF_XFCONV_BOX, &u) ) return E_PAR;
 	return ob_opn_obj(&u, ops);
 }
 
@@ -275,17 +289,23 @@ EXPORT INT xfc_conf_load( XFCCONN *c, INT max )
 	T_JSON	root, tf, xc, list, it;
 	UB	*meta;
 	SZ	len = 0;
-	INT	n = 0;
-	ID	key;
+	INT	n = 0, at;
+	ID	key = 0;
+	BOOL	found = FALSE;
 
-	key = prog_key(OB_OP_ATRRD);
-	if ( key <= 0 ) {
-		return 0;
-	}
 	meta = (UB *)malloc(OB_ATR_MAX + 1);
-	if ( meta != NULL && ob_get_atr(key, meta, OB_ATR_MAX, &len) >= E_OK
-	  && js_parse(meta, (INT)len, &root) >= E_OK && js_get(&root, "tessronos", &tf) >= E_OK
-	  && js_get(&tf, "xfconv", &xc) >= E_OK && js_get(&xc, "ftp", &list) >= E_OK ) {
+	for ( at = 0; at < 2 && !found && meta != NULL; at++ ) {
+		key = conf_key(OB_OP_ATRRD, (BOOL)( at == 1 ));
+		if ( key <= 0 ) continue;
+		found = (BOOL)( ob_get_atr(key, meta, OB_ATR_MAX, &len) >= E_OK
+			     && js_parse(meta, (INT)len, &root) >= E_OK && js_get(&root, "tessronos", &tf) >= E_OK
+			     && js_get(&tf, "xfconv", &xc) >= E_OK && js_get(&xc, "ftp", &list) >= E_OK );
+		if ( !found ) {
+			ob_cls_obj(key);
+			key = 0;
+		}
+	}
+	if ( found ) {
 		for ( it.s = NULL; n < max && js_next(&list, &it); n++ ) {
 			XFCCONN	*k = &c[n];
 			UB	e[24];
@@ -311,7 +331,7 @@ EXPORT INT xfc_conf_load( XFCCONN *c, INT max )
 		}
 	}
 	free(meta);
-	ob_cls_obj(key);
+	if ( key > 0 ) ob_cls_obj(key);
 	return n;
 }
 
@@ -335,7 +355,7 @@ EXPORT ER xfc_conf_save( CONST XFCCONN *c, INT n )
 	ID	key;
 	ER	er;
 
-	key = prog_key(OB_OP_ATRRD | OB_OP_ATRWR);
+	key = conf_key(OB_OP_ATRRD | OB_OP_ATRWR, FALSE);
 	if ( key <= 0 ) {
 		return (ER)key;
 	}

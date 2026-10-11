@@ -84,11 +84,31 @@ typedef struct {
 #endif /* USE_FPU */
 
 /*
+ * Whether a task can be started: one of protection level 2/3 only with
+ * the user stack knl_tcb_sysdep_cre gave it. tk_sta_tsk refuses any
+ * other (E_SYS); it never runs at EL1 in its place.
+ */
+#define knl_task_startable(tcb) \
+	( ( (tcb)->tskatr & TA_RNG3 ) < TA_RNG2 || (tcb)->tskctxb.ustk != NULL )
+
+/* Where a task of protection level 2/3 without a user stack would start (cpu_cntl.c) */
+IMPORT void knl_task_no_ustack( INT stacd, void *exinf );
+
+/* The PSTATE an EL1 task starts with: PAN set where it is in use */
+#define PSR_EL1_TASK	( PSR_M_EL1h | ( knl_pan_on ? PSR_PAN : 0 ) )
+
+/*
  * Create stack frame for task startup
  *	Protection level 0/1: runs at EL1h on the system stack.
  *	Protection level 2/3: runs at EL0t on a user stack in the system
- *	process space; the system stack takes exceptions and system calls.
+ *	process space, or in its process's space (knl_tsk_set_space); the
+ *	system stack takes exceptions and system calls.
  *	The task starts with interrupts enabled.
+ *
+ *	A task of protection level 2/3 runs only at EL0. Should it have no
+ *	user stack -- knl_tcb_sysdep_cre refuses to create it so, and
+ *	tk_sta_tsk to start it -- its frame does not lead to its own code
+ *	at all but to knl_task_no_ustack, which says so and ends it.
  */
 Inline void knl_setup_context( TCB *tcb )
 {
@@ -119,8 +139,14 @@ Inline void knl_setup_context( TCB *tcb )
 			/* not created for a process: the system process space */
 			tcb->tskctxb.ttbr0 = knl_sysprc_ttbr0;
 		}
+	} else if ( rng >= TA_RNG2 ) {
+		/* no user stack: never its own code, nor a process's space */
+		ssp->elr	= (UD)(UBINT)knl_task_no_ustack;
+		ssp->spsr	= PSR_EL1_TASK;
+		ssp->sp_el0	= 0;
+		tcb->tskctxb.ttbr0 = knl_ttbr0_null;
 	} else {
-		ssp->spsr	= PSR_M_EL1h;			/* EL1, SP_EL1, DAIF clear */
+		ssp->spsr	= PSR_EL1_TASK;			/* EL1, SP_EL1, DAIF clear */
 		ssp->sp_el0	= 0;
 		tcb->tskctxb.ttbr0 = knl_ttbr0_null;
 	}

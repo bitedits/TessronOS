@@ -1,0 +1,11 @@
+<tad version="1.0" encoding="UTF-8" filename="ディスク操作">
+<document>
+<p>ディスク操作</p>
+<p>ディスクの接続と切り離し、押した位置の仮身が指す実身のディスクの状態。メニューの定義。</p>
+</document>
+<menu>
+<item code="disk.connect">接続</item>
+<item code="disk.detach">切り離し</item>
+<item code="disk.status">状態表示</item>
+</menu>
+</tad>

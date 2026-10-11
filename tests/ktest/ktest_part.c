@@ -557,6 +557,27 @@ LOCAL void test_list( void )
 	if ( pid <= 0 ) return;
 	KT_ASSERT_ER(wm_panel_draw(pid), E_OK);
 
+	/* the wheel turned toward the person over the list rolls it three rows: the first row is the fourth name */
+	ev_at(&ev, HID_EV_WHEEL, 20 + 10 + 40, 20 + 10 + 30);
+	ev.dz = -1;
+	KT_ASSERT_ER(wm_panel_event(pid, &ev, &ans), E_OK);
+	ev_at(&ev, HID_EV_BTN_DOWN, 20 + 10 + 40, 20 + 10 + 2 + 9);
+	KT_ASSERT_ER(wm_panel_event(pid, &ev, &ans), E_OK);
+	ev_at(&ev, HID_EV_BTN_UP, 20 + 10 + 40, 20 + 10 + 2 + 9);
+	KT_ASSERT_ER(wm_panel_event(pid, &ev, &ans), E_OK);
+	KT_ASSERT_ER(wm_panel_get(pid, 1, &value), E_OK);
+	KT_ASSERT_EQ(value, 4);
+	/* and back, turned away; not past the first */
+	ev_at(&ev, HID_EV_WHEEL, 20 + 10 + 40, 20 + 10 + 30);
+	ev.dz = 2;
+	KT_ASSERT_ER(wm_panel_event(pid, &ev, &ans), E_OK);
+	ev_at(&ev, HID_EV_BTN_DOWN, 20 + 10 + 40, 20 + 10 + 2 + 9);
+	KT_ASSERT_ER(wm_panel_event(pid, &ev, &ans), E_OK);
+	ev_at(&ev, HID_EV_BTN_UP, 20 + 10 + 40, 20 + 10 + 2 + 9);
+	KT_ASSERT_ER(wm_panel_event(pid, &ev, &ans), E_OK);
+	KT_ASSERT_ER(wm_panel_get(pid, 1, &value), E_OK);
+	KT_ASSERT_EQ(value, 1);
+
 	/* pressing the second row chooses the second name */
 	{
 		INT	rowh = 0, y;

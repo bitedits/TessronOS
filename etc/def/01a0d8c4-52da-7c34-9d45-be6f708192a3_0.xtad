@@ -1,0 +1,6 @@
+<tad version="1.0" encoding="UTF-8" filename="実時間メディア">
+<document>
+<p>実時間メディア</p>
+<p>実時間制御TADの音(音声ファイル、音符、MIDIメッセージ、PCM)を鳴らすプロセス。デスクトップの再生部が起動し、チャネルで指示する。ウインドウは持たない。</p>
+</document>
+</tad>

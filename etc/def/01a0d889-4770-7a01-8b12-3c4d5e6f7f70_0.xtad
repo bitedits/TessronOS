@@ -1,0 +1,15 @@
+<tad version="1.0" encoding="UTF-8" filename="書庫管理のメニュー">
+<document>
+<p>書庫管理のメニュー</p>
+<p>書庫管理の窓のメニュー。書籍情報、実身名一覧、書籍の削除、圧縮しない。メニューの定義。書籍の取り出しは書籍を置きたい所へ運んで行う。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2008-7001-9a10-c1d2e3f40e01"/></include>
+<item code="info" key="I">書籍情報</item>
+<item code="list" key="L">実身名一覧</item>
+<line/>
+<item code="delete">書籍の削除</item>
+<item code="store">圧縮しない</item>
+<include><link id="01a0d889-46bd-7f9c-8bad-e3f4a5b6c789_0.xtad" vobjid="01a0d8c3-2008-7002-9a10-c1d2e3f40e02"/></include>
+</menu>
+</tad>

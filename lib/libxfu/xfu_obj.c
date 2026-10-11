@@ -152,6 +152,7 @@ EXPORT INT xfu_links( CONST UB *s, SZ n, XFU_LINKCB cb, void *arg )
 		j = xfu_find(s, n, ">", i + 5);
 		if ( j < 0 ) break;
 		v = attr_at(s, i + 5, j, "id");
+		if ( v >= 0 ) v += ts_lnk_split(s + v, j - v, NULL, NULL);	/* past a volume it names */
 		if ( v >= 0 && v + 36 <= j && xfu_str_uuid(s + v, &u) ) {
 			if ( cb != NULL ) cb(arg, &u);
 			cnt++;
@@ -159,6 +160,34 @@ EXPORT INT xfu_links( CONST UB *s, SZ n, XFU_LINKCB cb, void *arg )
 		i = j + 1;
 	}
 	return cnt;
+}
+
+/*
+ * The ids of the links made bare (design 8.3): what is written as files
+ * in one directory, the TADjs form, has every object in that directory,
+ * and TADjs takes the whole id before "_N.xtad" for the object.
+ */
+EXPORT SZ xfu_links_bare( UB *s, SZ n )
+{
+	INT	i = 0, j, v, k;
+
+	while ( (SZ)i + 5 < n ) {
+		i = xfu_find(s, n, "<link", i);
+		if ( i < 0 || (SZ)i + 5 >= n ) break;
+		j = xfu_find(s, n, ">", i + 5);
+		if ( j < 0 ) break;
+		v = attr_at(s, i + 5, j, "id");
+		k = ( v >= 0 ) ? ts_lnk_split(s + v, j - v, NULL, NULL) : 0;
+		if ( k > 0 ) {
+			SZ	q;
+
+			for ( q = (SZ)v; q + (SZ)k < n; q++ ) s[q] = s[q + (SZ)k];
+			n -= k;
+			j -= k;
+		}
+		i = j + 1;
+	}
+	return n;
 }
 
 EXPORT void xfu_link_xml( XBUF *w, CONST TS_UUID *target, INT l, INT t, INT r, INT b, INT z )
@@ -242,6 +271,7 @@ EXPORT ER xfu_link_add( CONST TS_UUID *box, CONST TS_UUID *u )
 		j = xfu_find(rec, size, ">", i);
 		if ( j < 0 ) break;
 		v = attr_at(rec, i + 5, j, "id");
+		if ( v >= 0 ) v += ts_lnk_split(rec + v, (INT)( j - v ), NULL, NULL);
 		if ( v >= 0 && xfu_str_uuid(rec + v, &t) && xfu_uuid_eq(&t, u) ) {
 			xfu_sys_free(rec);
 			ob_cls_obj(key);

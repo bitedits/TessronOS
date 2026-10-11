@@ -33,15 +33,41 @@
 #include <ts/sysdef.h>
 
 /*
- * The system's faces, objects in the 書体箱 by the names of their files:
- * a TrueType face when one was put in etc/font/, else the OpenType face
- * the repository carries
+ * The faces read: a TrueType face the test disk carries as a file on
+ * /boot (it is not one of the system's faces, so it is not in the
+ * 書体箱), else the system's OpenType face, an object in the 書体箱 by
+ * the name of its file
  */
-#define TTFFILE		"koganei.ttf"
+#define TTFPATH		"/boot/koganei.ttf"
 #define OTFFILE		"NotoSansJP-Regular.otf"
-LOCAL CONST char	*font_file = TTFFILE;
-#define FONTFILE	font_file
+LOCAL BOOL	from_file = FALSE;	/* the face read is TTFPATH */
 #define PX		16
+
+/* A whole file in memory, NULL when it is not there */
+LOCAL UB *read_file( CONST char *path, SZ *p_size )
+{
+	T_FSTAT	st;
+	UB	*d;
+	SZ	got;
+	INT	fd;
+
+	if ( fs_stat(path, &st) < EX_OK || st.size <= 0 ) return NULL;
+	d = (UB *)Kmalloc((SZ)st.size);
+	if ( d == NULL ) return NULL;
+	fd = fs_open(path, O_RDONLY);
+	if ( fd < 0 ) {
+		Kfree(d);
+		return NULL;
+	}
+	got = (SZ)fs_read(fd, d, (SZ)st.size);
+	fs_close(fd);
+	if ( got != (SZ)st.size ) {
+		Kfree(d);
+		return NULL;
+	}
+	*p_size = got;
+	return d;
+}
 
 LOCAL UB	*blob = NULL;
 LOCAL SZ	blobsz = 0;
@@ -63,14 +89,15 @@ LOCAL void test_open( void )
 {
 	TS_UUID	u, ou;
 
-	if ( kt_sysobj(SYSDEF_FONT_BOX, TTFFILE, &u) >= E_OK ) {
-		font_file = TTFFILE;
+	blob = read_file(TTFPATH, &blobsz);
+	if ( blob != NULL ) {
+		from_file = TRUE;
 	} else if ( kt_sysobj(SYSDEF_FONT_BOX, OTFFILE, &u) >= E_OK ) {
-		font_file = OTFFILE;
+		from_file = FALSE;
+		blob = kt_obj_data(&u, &blobsz);
 	} else {
 		KT_SKIP("no font on the disk (put one in etc/font/)");
 	}
-	blob = kt_obj_data(&u, &blobsz);
 	KT_ASSERT(blob != NULL && blobsz > 0);
 	if ( blob == NULL ) return;
 
@@ -323,9 +350,13 @@ LOCAL void test_stream( void )
 
 	if ( !ready ) KT_SKIP("no font");
 
-	/* the same face read as a stream from its object's record */
-	KT_ASSERT_ER(kt_sysobj(SYSDEF_FONT_BOX, FONTFILE, &u), E_OK);
-	KT_ASSERT_ER(fn_open_obj(&u, xf_data_rec(&u), 0, &sfid), E_OK);
+	/* the same face read as a stream: from its file, or from its object's record */
+	if ( from_file ) {
+		KT_ASSERT_ER(fn_open_file(TTFPATH, 0, &sfid), E_OK);
+	} else {
+		KT_ASSERT_ER(kt_sysobj(SYSDEF_FONT_BOX, OTFFILE, &u), E_OK);
+		KT_ASSERT_ER(fn_open_obj(&u, xf_data_rec(&u), 0, &sfid), E_OK);
+	}
 	if ( sfid <= 0 ) return;
 	KT_ASSERT_ER(fn_set_size(sfid, PX), E_OK);
 

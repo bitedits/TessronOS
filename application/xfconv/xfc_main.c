@@ -22,6 +22,13 @@
  *	Several may be open at once; closing one takes its volume off again
  *	when it was this window that mounted it.
  *
+ *	A disk of the BTRON file system -- a BTRON CD-ROM, or a partition
+ *	that is the image of one -- is not mounted: its window lists the
+ *	実身 the root file links to (xfc_btron.c), a 実身 that links to
+ *	others is gone into as a directory is, and a 実身 carried out or
+ *	taken in brings every 実身 it links to with it, made xmlTAD 実身
+ *	the way an archive is taken out. No panel asks how.
+ *
  *	In a file list the 仮身 are chosen by a click, added to with Shift,
  *	or taken in a rectangle pulled out over them. Carried out of the
  *	window, the desktop moves their outline with the pointer (a carry,
@@ -111,6 +118,7 @@ static char	job_what[64];
 
 static void rescan( XWIN *w );
 static void event( CONST T_OBNTM *m );
+static void where_text( XWIN *w, char *out, INT max );
 
 static BOOL same_uuid( CONST TS_UUID *a, CONST TS_UUID *b )
 {
@@ -214,7 +222,7 @@ static ER win_open( XWIN *w, CONST char *title, INT x, INT y, INT ww, INT wh )
 	c.json = (CONST UB *)json;
 	c.jsonsz = (SZ)strlen(json);
 	if ( ob_cre_obj(&c, &w->win) < E_OK ) return E_OBJ;
-	w->kw = ob_opn_obj(&w->win, OB_OP_ALL);
+	w->kw = ob_opn_obj(&w->win, OB_OP_R | OB_OP_W | OB_OP_PROT);
 	w->gid = ( w->kw > 0 ) ? wm_obj_gid(w->kw) : E_ID;
 	memset(&req, 0, sizeof(req));
 	req.events = OB_E_CLOSE | OB_E_PRESS | OB_E_RELEASE | OB_E_MOVE | OB_E_KEY | OB_E_REDRAW
@@ -330,7 +338,7 @@ static void tell_chosen( XWIN *w )
 	}
 	xfc_log(s);
 	if ( w->kind == W_FILES ) {
-		if ( n == 0 ) snprintf(w->status, sizeof(w->status), "%s%s%s", w->label, w->dir[0] != 0 ? "/" : "", w->dir);
+		if ( n == 0 ) where_text(w, w->status, sizeof(w->status));
 		else snprintf(w->status, sizeof(w->status), "%d 個を選択（運ぶと実身にします）", n);
 		w->status_err = FALSE;
 	}
@@ -367,23 +375,49 @@ static void choose_run( XWIN *w, INT i )
 	keep_cur(w);
 }
 
-/* Where a disk is mounted, from its attributes (tessronos.mount) */
+/*
+ * Where a disk is mounted, and what is on it, from its attributes
+ * (tessronos.mount, tessronos.format): a kind no file system here
+ * mounts is shown as such and not offered to be opened.
+ */
 static void disk_mount( ID key, XFCENT *e )
 {
 	T_JSON	root, tf, m;
-	UB	*a;
+	UB	*a, fs[FS_FIMPNM_MAX];
 	SZ	len = 0;
 
 	e->mount[0] = 0;
 	e->ro = FALSE;
+	e->fmt[0] = 0;
+	e->nofs = FALSE;
 	a = (UB *)malloc(OB_ATR_MAX + 1);
 	if ( a == NULL ) return;
 	if ( ob_get_atr(key, a, OB_ATR_MAX, &len) >= E_OK && js_parse(a, (INT)len, &root) >= E_OK
-	  && js_get(&root, "tessronos", &tf) >= E_OK && js_get(&tf, "mount", &m) >= E_OK ) {
-		(void)js_get_str(&m, "path", e->mount, sizeof(e->mount));
-		e->ro = js_get_bool(&m, "readonly", FALSE);
+	  && js_get(&root, "tessronos", &tf) >= E_OK ) {
+		if ( js_get(&tf, "mount", &m) >= E_OK ) {
+			(void)js_get_str(&m, "path", e->mount, sizeof(e->mount));
+			e->ro = js_get_bool(&m, "readonly", FALSE);
+		}
+		if ( js_get(&tf, "format", &m) >= E_OK ) {
+			(void)js_get_str(&m, "kind", (UB *)e->fmt, sizeof(e->fmt));
+			fs[0] = 0;
+			(void)js_get_str(&m, "fs", fs, sizeof(fs));
+			e->nofs = (BOOL)( fs[0] == 0 );
+		}
 	}
 	free(a);
+}
+
+/* Why a disk could not be mounted, in words */
+static void mount_failed( XFCENT *e, ER er, char *s, INT max )
+{
+	if ( er == EX_NOTSUP && strcmp(e->fmt, "TSFS") == 0 ) {
+		snprintf(s, max, "%s は実身のディスク（TSFS）です。ディスク操作の接続で使ってください", e->name);
+	} else if ( er == EX_NOTSUP ) {
+		snprintf(s, max, "%s：この形式は扱えません（%s）", e->name, e->fmt[0] != 0 ? e->fmt : "不明");
+	} else {
+		snprintf(s, max, "%s をマウントできません（%d）", e->name, (INT)er);
+	}
 }
 
 /*
@@ -424,9 +458,9 @@ static void media_scan( XWIN *w )
 	UINT	sum = 0;
 
 	w->nent = 0;
-	list = (TS_UUID *)malloc(sizeof(TS_UUID) * 64);
-	if ( list != NULL && ob_lst_obj(OB_T_DEVICE, OB_S_DISK, NULL, list, 64, &cnt) >= E_OK ) {
-		for ( i = 0; i < cnt && i < 64; i++ ) {
+	list = (TS_UUID *)malloc(sizeof(TS_UUID) * XFC_DISKS);
+	if ( list != NULL && ob_lst_obj(OB_T_DEVICE, OB_S_DISK, NULL, list, XFC_DISKS, &cnt) >= E_OK ) {
+		for ( i = 0; i < cnt && i < XFC_DISKS; i++ ) {
 			if ( ob_ref_obj(&list[i], &r) < E_OK || r.sub != OB_S_DISK ) continue;
 			e = ent_add(w, E_DISK, r.name);
 			if ( e == NULL ) break;
@@ -442,6 +476,10 @@ static void media_scan( XWIN *w )
 				ob_cls_obj(key);
 			}
 			e->faint = (BOOL)( e->size == 0 );
+			/* the kernel said what is on it; the BTRON file system is read here, without mounting */
+			if ( !e->faint && e->mount[0] == 0 && ( e->fmt[0] == 0 || strncmp(e->fmt, "BTRON", 5) == 0 ) ) {
+				(void)xfc_bt_probe(&e->uuid, e->size, e->btron, sizeof(e->btron));
+			}
 		}
 	}
 	free(list);
@@ -460,14 +498,16 @@ static void media_scan( XWIN *w )
 		sum = xfu_crc32(sum, w->ent[i].name, strlen((char *)w->ent[i].name) + 1);
 		sum = xfu_crc32(sum, w->ent[i].mount, strlen((char *)w->ent[i].mount) + 1);
 		sum = xfu_crc32(sum, (CONST UB *)&w->ent[i].ro, sizeof(w->ent[i].ro));
+		sum = xfu_crc32(sum, (CONST UB *)w->ent[i].btron, strlen(w->ent[i].btron) + 1);
 	}
 	if ( sum == w->sum ) return;
 	w->sum = sum;
 	w->dirty = TRUE;
 	for ( i = 0; i < n0; i++ ) {
 		xfc_size_text(w->ent[i].size, sz, sizeof(sz));
-		snprintf(s, sizeof(s), "media %s %s %s%s", w->ent[i].name, sz,
-			 w->ent[i].mount[0] != 0 ? (CONST char *)w->ent[i].mount : "-", w->ent[i].ro ? " ro" : "");
+		snprintf(s, sizeof(s), "media %s %s %s%s%s%s", w->ent[i].name, sz,
+			 w->ent[i].mount[0] != 0 ? (CONST char *)w->ent[i].mount : "-", w->ent[i].ro ? " ro" : "",
+			 w->ent[i].btron[0] != 0 ? " btron " : "", w->ent[i].btron);
 		xfc_log(s);
 	}
 }
@@ -482,13 +522,55 @@ static INT list_put( void *arg, CONST T_XFUENT *x )
 	if ( e == NULL ) return -1;
 	e->size = x->size;
 	e->mtime = x->mtime;
+	e->iso = (BOOL)( w->bt != NULL );	/* a BTRON CD-ROM's ISO 9660 side */
 	return 0;
+}
+
+/* The ISO 9660 side of a BTRON CD-ROM: its folder at the foot of the root, and its directories */
+#define ISO_DIR		"@iso"
+#define ISO_NAME	"ISO 9660"
+
+static BOOL in_iso( CONST UB *dir )
+{
+	return (BOOL)( strncmp((CONST char *)dir, ISO_DIR, 4) == 0 && ( dir[4] == 0 || dir[4] == '/' ) );
+}
+
+/* A path of the window ("@iso/DOCS") as a path of the ISO 9660 tree ("DOCS") */
+static CONST UB *iso_path( CONST UB *dir )
+{
+	return ( dir[4] == '/' ) ? dir + 5 : dir + 4;
+}
+
+/* A 実身 of a BTRON disk that the one shown links to */
+static INT bt_put( void *arg, CONST UB *name, INT fid, BOOL links, D size )
+{
+	XWIN	*w = (XWIN *)arg;
+	XFCENT	*e;
+
+	e = ent_add(w, links ? E_DIR : E_FILE, name);
+	if ( e == NULL ) return -1;
+	e->fid = fid;
+	e->size = size;
+	e->hidden = FALSE;
+	return 0;
+}
+
+/* What the window shows, for the line at its foot: a BTRON disk's by the names of its 実身 */
+static void where_text( XWIN *w, char *out, INT max )
+{
+	char	d[XFU_PATH_MAX];
+
+	if ( w->bt != NULL && in_iso(w->dir) ) snprintf(d, sizeof(d), "%s%s%s", ISO_NAME, iso_path(w->dir)[0] != 0 ? "/" : "",
+							 iso_path(w->dir));
+	else if ( w->bt != NULL ) xfc_bt_names(w, w->dir, d, sizeof(d));
+	else snprintf(d, sizeof(d), "%s", w->dir);
+	snprintf(out, max, "%s%s%s", w->label, d[0] != 0 ? "/" : "", d);
 }
 
 /* The directory listed again; the names in keep (NUL between, NUL NUL at the end) chosen */
 static ER files_scan( XWIN *w, CONST UB *keep )
 {
-	char	s[XFU_PATH_MAX + 64];
+	char	s[XFU_PATH_MAX + 64], where[XFU_PATH_MAX + 64];
 	INT	i, n0;
 	ER	er;
 	CONST UB *k;
@@ -497,8 +579,26 @@ static ER files_scan( XWIN *w, CONST UB *keep )
 	(void)ent_add(w, E_VOL, w->dev);
 	if ( w->dir[0] != 0 ) (void)ent_add(w, E_UP, (CONST UB *)"..");
 	n0 = w->nent;
-	er = w->tree.list(w->tree.ctx, w->dir, list_put, w);
-	qsort(w->ent + n0, w->nent - n0, sizeof(XFCENT), ent_cmp);
+	if ( w->bt != NULL && in_iso(w->dir) ) {
+		/* the files beside the partition, by their names */
+		er = ( w->niso > 0 ) ? w->tree.list(w->tree.ctx, iso_path(w->dir), list_put, w) : E_NOEXS;
+		qsort(w->ent + n0, w->nent - n0, sizeof(XFCENT), ent_cmp);
+	} else if ( w->bt != NULL ) {
+		/* in the order of the link records, as the 実身 shows its 仮身; at the root, the ISO 9660 side after them */
+		er = xfc_bt_list(w, xfc_bt_fid(w->dir), bt_put, w);
+		if ( er >= E_OK && w->dir[0] == 0 && w->niso > 0 ) {
+			XFCENT	*e = ent_add(w, E_DIR, (CONST UB *)ISO_NAME);
+
+			if ( e != NULL ) {
+				e->iso = TRUE;
+				e->size = -1;
+				e->fid = -1;
+			}
+		}
+	} else {
+		er = w->tree.list(w->tree.ctx, w->dir, list_put, w);
+		qsort(w->ent + n0, w->nent - n0, sizeof(XFCENT), ent_cmp);
+	}
 	for ( k = keep; k != NULL && *k != 0; k += strlen((CONST char *)k) + 1 ) {
 		for ( i = n0; i < w->nent; i++ ) {
 			if ( strcmp((CONST char *)w->ent[i].name, (CONST char *)k) == 0 ) {
@@ -509,7 +609,8 @@ static ER files_scan( XWIN *w, CONST UB *keep )
 	}
 	keep_cur(w);
 	w->dirty = TRUE;
-	snprintf(s, sizeof(s), "dir %s/%s %d entries", w->label, w->dir, w->nent - n0);
+	where_text(w, where, sizeof(where));
+	snprintf(s, sizeof(s), "dir %s %d entries", where, w->nent - n0);
 	xfc_log(s);
 	for ( i = n0; i < w->nent && i < n0 + 64; i++ ) {
 		snprintf(s, sizeof(s), "- %s%s %d", w->ent[i].name, ( w->ent[i].kind == E_DIR ) ? "/" : "",
@@ -517,8 +618,7 @@ static ER files_scan( XWIN *w, CONST UB *keep )
 		xfc_log(s);
 	}
 	if ( er >= E_OK ) {
-		snprintf(w->status, sizeof(w->status), "%s%s%s（%d 個）", w->label, w->dir[0] != 0 ? "/" : "",
-			 w->dir, w->nent - n0);
+		snprintf(w->status, sizeof(w->status), "%s（%d 個）", where, w->nent - n0);
 		w->status_err = FALSE;
 	}
 	return er;
@@ -643,6 +743,15 @@ static void files_close( XWIN *w )
 		snprintf(s, sizeof(s), "disconnected %s", w->label);
 		xfc_log(s);
 	}
+	if ( w->bt != NULL ) {
+		xfc_bt_close(w);
+		snprintf(s, sizeof(s), "closed btron %s", w->dev);
+		xfc_log(s);
+		if ( w->removable ) {
+			snprintf(s, sizeof(s), "%s を閉じました。媒体を取り出せます", w->dev);
+			say(media, s, FALSE);
+		}
+	}
 	if ( w->mounted ) {
 		key = ob_opn_obj(&w->disk, OB_OP_R | ( w->ro ? 0 : OB_OP_WRITE ));
 		er = ( key > 0 ) ? fs_detach_dev(key) : (ER)key;
@@ -675,6 +784,40 @@ static XWIN *files_of_disk( CONST TS_UUID *disk )
 	return NULL;
 }
 
+/* A disk of the BTRON file system shown in a window of its own: the 実身 its root file links to */
+static void open_btron( XFCENT *e )
+{
+	XWIN	*w;
+	char	s[200];
+	ER	er;
+
+	w = files_new(e->btron);
+	if ( w == NULL ) return;
+	w->disk = e->uuid;
+	w->ro = TRUE;
+	w->removable = (BOOL)( e->name[0] == 'u' || e->name[0] == 's' || e->name[0] == 'm' );
+	er = xfc_bt_open(w, &e->uuid);
+	if ( er < E_OK ) {
+		snprintf(s, sizeof(s), "%s を読めません：%s（%d）", e->name, err_text(er), (INT)er);
+		files_free(w);
+		say(media, s, TRUE);
+		return;
+	}
+	snprintf((char *)w->dev, sizeof(w->dev), "%s", xfc_bt_name(w));
+	snprintf(w->label, sizeof(w->label), "%s", e->name);
+	snprintf(w->source, sizeof(w->source), "btron");
+	w->niso = xfc_bt_iso_tree(w, &w->tree);
+	if ( w->niso > 0 ) {
+		snprintf(s, sizeof(s), "iso %s %d entries", e->name, w->niso);
+		xfc_log(s);
+	}
+	snprintf(s, sizeof(s), "window %s", e->name);
+	xfc_log(s);
+	go_to(w, (CONST UB *)"");
+	snprintf(s, sizeof(s), "%s（%s）を開きました", w->dev, e->name);
+	say(media, s, FALSE);
+}
+
 /* The volume of a disk, mounted when it is not, shown in a window of its own from its root */
 static void open_disk( XFCENT *e )
 {
@@ -694,6 +837,10 @@ static void open_disk( XFCENT *e )
 		say(media, s, TRUE);
 		return;
 	}
+	if ( e->btron[0] != 0 ) {
+		open_btron(e);
+		return;
+	}
 	if ( e->mount[0] == 0 ) {
 		key = ob_opn_obj(&e->uuid, OB_OP_R | ( o_ro ? 0 : OB_OP_WRITE ));
 		if ( key <= 0 ) {
@@ -701,11 +848,14 @@ static void open_disk( XFCENT *e )
 			say(media, s, TRUE);
 			return;
 		}
-		er = fs_attach_dev(key, "fatfs", o_ro ? FS_MNT_RDONLY : 0);
+		/* the file system of the kind that is on it */
+		er = fs_attach_dev(key, NULL, o_ro ? FS_MNT_RDONLY : 0);
 		ob_cls_obj(key);
 		if ( er < 0 ) {
-			snprintf(s, sizeof(s), "%s をマウントできません（%d）", e->name, (INT)er);
+			mount_failed(e, er, s, sizeof(s));
 			say(media, s, TRUE);
+			snprintf(s, sizeof(s), "mount %s refused %d %s", e->name, (INT)er, e->fmt);
+			xfc_log(s);
 			return;
 		}
 		snprintf((char *)e->mount, sizeof(e->mount), "%s/%s", FS_MEDIA_DIR, e->name);
@@ -760,10 +910,10 @@ static void mount_toggle( void )
 	if ( w != NULL ) files_free(w);
 	if ( e->mount[0] == 0 ) {
 		key = ob_opn_obj(&e->uuid, OB_OP_R | ( o_ro ? 0 : OB_OP_WRITE ));
-		er = ( key > 0 ) ? fs_attach_dev(key, "fatfs", o_ro ? FS_MNT_RDONLY : 0) : (ER)key;
+		er = ( key > 0 ) ? fs_attach_dev(key, NULL, o_ro ? FS_MNT_RDONLY : 0) : (ER)key;
 		if ( key > 0 ) ob_cls_obj(key);
 		if ( er < 0 ) {
-			snprintf(s, sizeof(s), "%s をマウントできません（%d）", e->name, (INT)er);
+			mount_failed(e, er, s, sizeof(s));
 			say(media, s, TRUE);
 		} else {
 			snprintf(s, sizeof(s), "mounted %s/%s%s", FS_MEDIA_DIR, e->name, o_ro ? " ro" : "");
@@ -1075,6 +1225,17 @@ static ER open_obj( CONST TS_UUID *u )
 	return ask_desktop(&rq, &an, 3000);
 }
 
+/* The work of taking in a BTRON disk's 実身 goes on: what came meanwhile is seen to */
+static void bt_tick( INT done, INT total )
+{
+	if ( jobw != NULL ) {
+		snprintf(jobw->status, sizeof(jobw->status), "%s %d/%d（実身を作っています）", job_what, done, total);
+		jobw->status_err = FALSE;
+		jobw->dirty = TRUE;
+	}
+	job_events();
+}
+
 /* The object an entry names, taken in; E_OK and its UUID */
 static ER import_one( XWIN *w, XFCENT *x, CONST XFCIMP *how, CONST TS_UUID *box, CONST TS_UUID *near,
 		      TS_UUID *u, T_XFUSTAT *st )
@@ -1082,6 +1243,41 @@ static ER import_one( XWIN *w, XFCENT *x, CONST XFCIMP *how, CONST TS_UUID *box,
 	T_XFUOPT	opt;
 	UB		path[XFU_PATH_MAX];
 
+	if ( w->bt != NULL && ( x->iso || ( ( x->kind == E_UP || x->kind == E_VOL ) && in_iso(w->dir) ) ) ) {
+		/* a file or a directory of the ISO 9660 side: as one of a mounted disk */
+		if ( x->kind == E_UP || x->kind == E_VOL || ( x->kind == E_DIR && !in_iso(w->dir) ) ) {
+			snprintf((char *)path, sizeof(path), "%s", in_iso(w->dir) ? iso_path(w->dir) : (CONST UB *)"");
+		} else if ( path_join(path, sizeof(path), iso_path(w->dir), x->name) < E_OK ) {
+			return E_LIMIT;
+		}
+		memset(&opt, 0, sizeof(opt));
+		opt.source = "cdrom";
+		opt.note = note;
+		opt.tick = tick;
+		opt.stat = st;
+		if ( how != NULL ) {
+			opt.as = how->as;
+			opt.enc = how->enc;
+			opt.shrink = how->shrink;
+		}
+		opt.near = near;
+		return xfu_import(&w->tree, path, &opt, box, u);
+	}
+	if ( w->bt != NULL ) {
+		TS_UUID	into;
+		char	err[160], s[300];
+		INT	fid = ( x->kind == E_UP || x->kind == E_VOL ) ? xfc_bt_fid(w->dir) : x->fid;
+		ER	er;
+
+		if ( near != NULL ) into = *near;
+		else if ( box != NULL ) into = *box;
+		else if ( !xfc_uuid_parse(SYSDEF_XFCONV_BOX, &into) ) return E_SYS;
+		er = xfc_bt_import(w, fid, &into, u, &st->objects, bt_tick, err, sizeof(err));
+		snprintf(s, sizeof(s), "btron import %s %d objects %d %s", x->name, (INT)er, st->objects, err);
+		xfc_log(s);
+		if ( note(NULL, x->name, er) < E_OK && er >= E_OK ) er = E_ABORT;
+		return er;
+	}
 	if ( x->kind == E_UP || x->kind == E_VOL ) {
 		snprintf((char *)path, sizeof(path), "%s", w->dir);	/* the directory itself */
 	} else if ( path_join(path, sizeof(path), w->dir, x->name) < E_OK ) {
@@ -1099,6 +1295,19 @@ static ER import_one( XWIN *w, XFCENT *x, CONST XFCIMP *how, CONST TS_UUID *box,
 	}
 	opt.near = near;
 	return xfu_import(&w->tree, path, &opt, box, u);
+}
+
+/* Whether a file of the ISO 9660 side is among what is chosen (or is under the cursor) */
+static BOOL iso_chosen( XWIN *w )
+{
+	INT	i;
+
+	if ( w->bt == NULL ) return FALSE;
+	if ( in_iso(w->dir) ) return TRUE;
+	for ( i = 0; i < w->nent; i++ ) {
+		if ( ( marked(w) > 0 ) ? w->ent[i].marked && w->ent[i].iso : ( i == w->cur && w->ent[i].iso ) ) return TRUE;
+	}
+	return FALSE;
 }
 
 /* The name of the first entry chosen, or of the cursor's */
@@ -1135,7 +1344,8 @@ static void do_import( XWIN *w )
 	n = marked(w);
 	if ( n == 0 && w->cur >= 0 && w->cur < w->nent ) n = 1;
 	if ( n == 0 ) return;
-	if ( !xfc_ask_import(w, n, first_chosen(w), &how) ) return;
+	memset(&how, 0, sizeof(how));
+	if ( ( w->bt == NULL || iso_chosen(w) ) && !xfc_ask_import(w, n, first_chosen(w), &how) ) return;
 	tops = (TS_UUID *)malloc(sizeof(TS_UUID) * ( w->nent + 1 ));
 	if ( tops == NULL ) {
 		say(w, "メモリが足りません", TRUE);
@@ -1274,7 +1484,8 @@ static void carry_out( XWIN *w, INT px, INT py )
 	xfc_uuid_str(&an.into, a);
 	snprintf(s, sizeof(s), "carried %d into %s", n, a);
 	xfc_log(s);
-	if ( !xfc_ask_import(w, n, first_chosen(w), &how) ) return;
+	memset(&how, 0, sizeof(how));
+	if ( ( w->bt == NULL || iso_chosen(w) ) && !xfc_ask_import(w, n, first_chosen(w), &how) ) return;
 
 	tops = (TS_UUID *)malloc(sizeof(TS_UUID) * n);
 	rx = (INT *)malloc(sizeof(INT) * n * 3);
@@ -1419,6 +1630,10 @@ static void do_export( XWIN *w )
 		say(w, "書き出す先の窓で選んでください", TRUE);
 		return;
 	}
+	if ( w->bt != NULL ) {
+		say(w, "BTRON のディスクには書き出せません", TRUE);
+		return;
+	}
 	if ( hasarg ) src = &argobj;
 	else if ( haslast ) src = &lasttop;
 	else {
@@ -1510,6 +1725,11 @@ static void dropped( XWIN *w )
 		free(d);
 		return;
 	}
+	if ( w->bt != NULL ) {
+		drop_answer(w, d, OB_DR_REFUSE, "BTRON のディスクには書き出せません");
+		free(d);
+		return;
+	}
 	strncpy((char *)dir, (char *)w->dir, sizeof(dir) - 1);
 	dir[sizeof(dir) - 1] = 0;
 	row = xfc_hit(w, d->x, d->y);
@@ -1580,6 +1800,26 @@ static void open_entry( XWIN *w, INT i )
 		go_up(w);
 		break;
 	case E_DIR:
+		if ( w->bt != NULL && e->iso ) {
+			if ( !in_iso(w->dir) ) snprintf((char *)d, sizeof(d), "%s", ISO_DIR);
+			else if ( path_join(d, sizeof(d), w->dir, e->name) < E_OK ) {
+				say(w, "ディレクトリが深すぎます", TRUE);
+				break;
+			}
+			go_to(w, d);
+			break;
+		}
+		if ( w->bt != NULL ) {
+			char	id[16];
+
+			snprintf(id, sizeof(id), "%d", e->fid);
+			if ( path_join(d, sizeof(d), w->dir, (CONST UB *)id) < E_OK ) {
+				say(w, "仮身の入れ子が深すぎます", TRUE);
+				break;
+			}
+			go_to(w, d);
+			break;
+		}
 		if ( path_join(d, sizeof(d), w->dir, e->name) < E_OK ) {
 			say(w, "ディレクトリが深すぎます", TRUE);
 			break;
@@ -1587,7 +1827,8 @@ static void open_entry( XWIN *w, INT i )
 		go_to(w, d);
 		break;
 	default:
-		say(w, "ファイルは、仮身を TessronOS の窓へ運ぶと実身になります", FALSE);
+		say(w, ( w->bt != NULL && !e->iso ) ? "仮身を TessronOS の窓へ運ぶと、結ばれた実身ごと取り込みます"
+			 : "ファイルは、仮身を TessronOS の窓へ運ぶと実身になります", FALSE);
 		break;
 	}
 }
@@ -1913,7 +2154,20 @@ static void disk_notice( CONST T_OBNTM *m )
 	char	s[200];
 	T_FSTAT	st;
 
+	if ( m->event == OB_E_ATTACH || m->event == OB_E_DETACH || m->event == OB_E_DELETE ) {
+		xfc_bt_forget(&m->uuid);	/* a medium put in or taken out: looked at again */
+	}
 	w = files_of_disk(&m->uuid);
+	if ( w != NULL && w->bt != NULL ) {
+		if ( m->event == OB_E_DETACH || m->event == OB_E_DELETE ) {
+			snprintf(s, sizeof(s), "%s が外されました", w->label);
+			files_close(w);
+			say(media, s, TRUE);
+			return;
+		}
+		media_scan(media);
+		return;
+	}
 	if ( w != NULL && ( m->event == OB_E_DETACH || m->event == OB_E_DELETE || m->event == OB_E_CHANGE )
 	  && fs_stat(w->label, &st) < 0 ) {
 		snprintf(s, sizeof(s), "%s が外されました", w->label);

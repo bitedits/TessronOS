@@ -1,0 +1,12 @@
+<tad version="1.0" encoding="UTF-8" filename="トレーの表示">
+<document>
+<p>トレーの表示</p>
+<p>トレー小物の表示のメニュー。詳細表示、一覧表示、付せん表示。メニューの定義。</p>
+</document>
+<menu>
+<item code="tray.detail">詳細表示</item>
+<item code="tray.list">一覧表示</item>
+<line/>
+<item code="tray.tags">付せん表示</item>
+</menu>
+</tad>

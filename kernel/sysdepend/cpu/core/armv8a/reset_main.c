@@ -22,6 +22,7 @@
 #include "sysman/pfalloc.h"
 #include "sysman/space.h"
 #include <tm/tmonitor.h>
+#include <ts/board.h>
 
 EXPORT	void	*knl_lowmem_top;		/* Head of the system memory area */
 EXPORT	void	*knl_lowmem_limit;		/* End of the system memory area */
@@ -37,7 +38,8 @@ LOCAL void print_boot_info( void )
 	tm_printf((UB*)"TessronOS: CNTFRQ=%d Hz  CPUs=%d  PSCI=%s  DTB=%x%08x (%d bytes)\n",
 		(UW)frq, knl_num_cpu,
 		(knl_psci_method == PSCI_METHOD_SMC) ? "smc" :
-		(knl_psci_method == PSCI_METHOD_HVC) ? "hvc" : "?",
+		(knl_psci_method == PSCI_METHOD_HVC) ? "hvc" :
+		(knl_num_cpu > 1 && knl_cpu_enable[1] == CPU_ENABLE_SPIN) ? "none (spin table)" : "?",
 		(UW)(knl_dtb_addr >> 32), (UW)knl_dtb_addr, (UW)knl_dtb_size);
 	for ( i = 0; i < knl_mem_range_n; i++ ) {
 		UD	e = knl_mem_range[i].start + knl_mem_range[i].size;
@@ -59,6 +61,7 @@ EXPORT void reset_main( UBINT dtb )
 	knl_smp_init_primary();		/* per-CPU pointer (TPIDR_EL1) of the boot processor */
 	knl_dtb_addr = dtb;
 	knl_dtb_init(dtb != 0 ? (UBINT)PA2VA(dtb) : 0);	/* E_NOEXS without a DTB: the defaults below apply */
+	knl_board_init();		/* which board, as the device tree names it (board.c) */
 	knl_mmu_map_ram();		/* linear map for all RAM ranges */
 
 	/* Startup hardware (board dependent) */
@@ -85,6 +88,8 @@ EXPORT void reset_main( UBINT dtb )
 	Asm("tlbi vmalle1");
 	Asm("dsb ish");
 	Asm("isb");
+	/* PAN from here, before any task or process space is made (sysdepend.h) */
+	knl_pan_setup();
 	limit = top + CNF_IMALLOC_SIZE;
 	(void)i;
 #if USE_IMALLOC

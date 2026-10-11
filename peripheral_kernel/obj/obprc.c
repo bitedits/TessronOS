@@ -24,6 +24,7 @@
 #include <tk/tkernel.h>
 #include <ts/proc.h>
 #include <ts/so.h>
+#include <ts/sysdef.h>
 #include "obj.h"
 
 #define OBP_TEXT_MAX	6144		/* the status, the program's link and SO_MAX sockets' */
@@ -71,7 +72,65 @@ LOCAL ER obp_prot( CONST TS_UUID *uuid, T_OBPRT *prt )
 	return E_OK;
 }
 
-/* Starting a program object, with the argument given */
+/*
+ * The programs the system trusts with its own rights when the kernel
+ * starts them: helpers the desktop runs for its own work, which work on
+ * the channels and memory objects it makes for them and are never
+ * started for a person's own use. None is in a program box.
+ */
+LOCAL CONST char *CONST obp_trusted[] = {
+	SYSDEF_PROG_RTMEDIA,		/* what the player of 実時間制御TAD sounds and shows with */
+};
+
+/*
+ * Whether prog is such a helper: one of the identities above, on the
+ * volume of the system box, owned by the system, and not to be written
+ * or have its protection changed by anyone but an administrator -- an
+ * object that only says it is one does not count.
+ */
+EXPORT BOOL knl_ob_trusted( CONST TS_UUID *prog )
+{
+	CONST T_OBMGR	*m;
+	T_OBPRT		*prt;
+	TS_UUID		u, box;
+	UINT		i;
+	INT		k;
+	BOOL		named = FALSE, ok = FALSE;
+
+	if ( prog == NULL ) {
+		return FALSE;
+	}
+	for ( i = 0; i < sizeof(obp_trusted) / sizeof(obp_trusted[0]); i++ ) {
+		if ( ts_str_to_uuid(obp_trusted[i], &u) >= E_OK && ts_uuid_cmp(&u, prog) == 0 ) {
+			named = TRUE;
+		}
+	}
+	if ( !named || ts_str_to_uuid(SYSDEF_SYSTEM_BOX, &box) < E_OK
+	  || knl_obfile_vol_of(prog) <= 0 || knl_obfile_vol_of(prog) != knl_obfile_vol_of(&box) ) {
+		return FALSE;
+	}
+	m = knl_ob_mgr_of(prog);
+	prt = (T_OBPRT *)Kmalloc(sizeof(T_OBPRT));
+	if ( m != NULL && m->prot != NULL && prt != NULL && m->prot(prog, prt) >= E_OK ) {
+		ok = (BOOL)( ts_uuid_cmp(&prt->owner, &ob_user_system) == 0
+			  && ( prt->mode & 0002 ) == 0
+			  && ( ts_uuid_cmp(&prt->group, &ob_group_admin) == 0 || ( prt->mode & 0020 ) == 0 ) );
+		for ( k = 0; ok && k < prt->nacl && k < OB_ACL_MAX; k++ ) {
+			if ( ( prt->acl[k].ops & ( OB_OP_W | OB_OP_PROT ) ) != 0 ) {
+				ok = FALSE;
+			}
+		}
+	}
+	if ( prt != NULL ) Kfree(prt);
+	return ok;
+}
+
+/*
+ * Starting a program object, with the argument given. One the kernel
+ * starts -- the desktop, for the person working it -- acts for that
+ * person (TS_PRC_USER), but for a helper the system trusts, which acts
+ * as the system; one a process starts acts as the process does.
+ */
 LOCAL ER obp_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 {
 	T_CPRC	cprc;
@@ -85,6 +144,9 @@ LOCAL ER obp_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 	knl_memset(&cprc, 0, sizeof(cprc));
 	cprc.arg = c->arg;
 	cprc.argsz = c->argsz;
+	if ( ts_get_pid() <= 0 && !knl_ob_trusted(&c->prog) ) {
+		cprc.prcatr = TS_PRC_USER;
+	}
 	pid = ts_cre_prc_obj(vol, &c->prog, &cprc);
 	if ( pid <= 0 ) {
 		return ( pid < 0 ) ? (ER)pid : E_SYS;

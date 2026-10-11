@@ -88,10 +88,10 @@ LOCAL void gpu_mmu_table( void )
 	KT_ASSERT_EQ(flushes, 2);
 	KT_ASSERT_EQ(v3d_mmu_lookup(&m, va), 0);
 
-	/* what is given back is found again first */
+	/* what is given back is not given out again at once: the search goes on */
 	v3d_mmu_free(&m, va, 4);
 	KT_ASSERT_ER(v3d_mmu_alloc(&m, 4, 1, &va3), E_OK);
-	KT_ASSERT_EQ(va3, va);
+	KT_ASSERT(va3 != va && va3 > va2);
 	v3d_mmu_free(&m, va3, 4);
 	v3d_mmu_free(&m, va2, 16);
 	KT_ASSERT_EQ(m.nfree, before);
@@ -236,7 +236,7 @@ LOCAL void tb_unbind( void *priv, UW offset, UD npages )
 }
 
 /* A TFU job fails; the others end at once unless the test holds them */
-LOCAL ER tb_kick( void *priv, CONST T_GPUJOB *job )
+LOCAL ER tb_kick( void *priv, CONST T_GPUJOB *job, void *as )
 {
 	tb.kicked++;
 	tb.last_kind = job->kind;

@@ -18,7 +18,7 @@
       "id": "virtual-object-list",
       "kind": "app",
       "name": "仮身一覧",
-      "version": "R1.000",
+      "version": "R1.100",
       "builtin": true,
       "base": [
         "0199ce60-532a-7670-b8bc-84c970de11dc"

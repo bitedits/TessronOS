@@ -1,0 +1,41 @@
+<tad version="1.0" encoding="UTF-8" filename="単語登録のデータボックス">
+<document>
+<p>単語登録のデータボックス</p>
+<p>単語登録の窓のパネルと、尋ねるパネルの定義。窓は、読み、単語、品詞を入れる欄と、登録した単語の一覧。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,560,472" title="単語登録" kind="bare">
+<text x="16" y="31">読み：</text>
+<box num="1" rect="80,10,330,38" max="32" jp="true"/>
+<text x="16" y="65">単語：</text>
+<box num="2" rect="80,44,548,72" max="60" jp="true"/>
+<text x="16" y="99">品詞：</text>
+<list num="3" rect="80,80,330,214"/>
+<button num="4" rect="348,80,448,106" emph="true">登録</button>
+<button num="5" rect="348,114,448,140">変更</button>
+<button num="6" rect="348,148,448,174">削除</button>
+<button num="7" rect="348,182,448,208">クリア</button>
+<line rect="8,224,552,225"/>
+<text x="16" y="255">検索：</text>
+<box num="8" rect="80,234,330,262" max="32" jp="true"/>
+<button num="9" rect="348,236,448,260">検索</button>
+<button num="14" rect="456,236,548,260">全語</button>
+<list num="10" rect="12,270,548,432"/>
+<button num="11" rect="12,440,92,464">前頁</button>
+<button num="12" rect="100,440,180,464">次頁</button>
+<text num="13" x="196" y="458"> </text>
+</panel>
+<panel num="10" rect="0,0,420,128" title="単語登録">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<text num="3" x="24" y="84"> </text>
+<button num="101" rect="308,92,396,116" answer="ok" emph="true">確認</button>
+</panel>
+<panel num="11" rect="0,0,420,128" title="単語の削除">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<button num="102" rect="16,92,104,116" answer="cancel">取消</button>
+<button num="103" rect="308,92,396,116" answer="ok" emph="true">削除</button>
+</panel>
+</databox>
+</tad>

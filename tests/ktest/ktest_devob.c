@@ -24,6 +24,10 @@
  *	(tools/qemu_qmp.py). test_measure prints what the object path costs
  *	against the kernel function it replaced.
  *
+ *	test_cpu_limit takes the limit of the processors' clock (CPU_MHZ)
+ *	and the watchdog (WATCHDOG) from the machine's settings and reads
+ *	them back from the hardware's record.
+ *
  *	The banks of pins and the temperature and clocks of the Raspberry
  *	Pi are checked on the board at start (objtest:, kernel/sysdepend/
  *	rpi5/objtest.c); here QEMU says what it does not know.
@@ -40,6 +44,10 @@
 #include <ts/time.h>
 #include <ts/ob.h>
 #include <ts/fs.h>
+#include <ts/cpuclk.h>
+#include <ts/lockup.h>
+#include <ts/wm.h>
+#include <ts/conf.h>
 #include <tk/tkernel.h>
 
 #define SVCPROG		"/boot/SVCPROG.ELF"
@@ -512,7 +520,7 @@ LOCAL void test_hid_devices( void )
 		KT_ASSERT(links_to(&u, &ob_uuid_input));
 		KT_ASSERT(links_to(&ob_uuid_input, &u));
 	}
-#ifndef RPI5
+#if !KT_BOARD
 	/* the QEMU machine: two keyboards, a tablet, a mouse */
 	KT_ASSERT(nkbd >= 2 && nabs >= 1 && nrel >= 1);
 #endif
@@ -614,7 +622,7 @@ LOCAL void test_hw_state( void )
 	len = rec(&ob_uuid_system, OB_OP_R, OB_SYS_HW);
 	KT_ASSERT(len > 0);
 	tm_printf((UB *)"  %s", txt);
-#ifdef RPI5
+#if KT_BOARD
 	KT_ASSERT(has(txt, len, "ARM_HZ\t"));
 #else
 	/* QEMU: nothing to ask, and said so */
@@ -622,6 +630,99 @@ LOCAL void test_hw_state( void )
 		  && has(txt, len, "V3D_HZ\tunknown\n"));
 #endif
 	KT_ASSERT(rec(&ob_uuid_system, OB_OP_R, 0) > 0 && has(txt, TEXT_MAX, "Records 1 to 9"));
+}
+
+/*
+ * The limit of the processors' clock (include/ts/cpuclk.h): the clock
+ * asked of the firmware is the least of the firmware's most, the
+ * setting CPU_MHZ and the fan's slowing, and not below the firmware's
+ * least; the setting is taken from the machine's settings with
+ * everything else in them, CPU_MHZ_DEFAULT with no number, and shows in
+ * the hardware's record with the watchdog's seconds (WATCHDOG). QEMU
+ * has no firmware: the limit is kept and nothing is asked.
+ */
+#define MHZ(x)	( (UW)(x) * 1000000U )
+
+LOCAL INT limit_now( void )
+{
+	T_CPUCLK	c;
+
+	knl_cpu_clock(&c);
+	return (INT)c.limit_mhz;
+}
+
+LOCAL void test_cpu_limit( void )
+{
+	T_CPUCLK	c0, c;
+	char		was[32], wd_was[32];
+	BOOL		had, wd_had;
+	INT		len;
+
+	/* the Raspberry Pi 5's range: 1.5 to 2.4GHz */
+	KT_ASSERT_EQ(knl_cpu_want(1800, 0, MHZ(1500), MHZ(2400)), MHZ(1800));
+	KT_ASSERT_EQ(knl_cpu_want(CPU_MHZ_MOST, 0, MHZ(1500), MHZ(2400)), MHZ(2400));
+	KT_ASSERT_EQ(knl_cpu_want(3000, 0, MHZ(1500), MHZ(2400)), MHZ(2400));	/* held to the most */
+	KT_ASSERT_EQ(knl_cpu_want(1000, 0, MHZ(1500), MHZ(2400)), MHZ(1500));	/* and to the least */
+	KT_ASSERT_EQ(knl_cpu_want(0, MHZ(1800), MHZ(1500), MHZ(2400)), MHZ(1800));	/* the fan's slowing */
+	KT_ASSERT_EQ(knl_cpu_want(2200, MHZ(1800), MHZ(1500), MHZ(2400)), MHZ(1800));
+	KT_ASSERT_EQ(knl_cpu_want(1500, MHZ(1800), MHZ(1500), MHZ(2400)), MHZ(1500));	/* never above the limit */
+	KT_ASSERT_EQ(knl_cpu_want(2000, 0, MHZ(1500), MHZ(2400)), MHZ(2000));	/* the fan's end: back to the limit */
+	/* the Raspberry Pi 4's: 0.6 to 1.8GHz */
+	KT_ASSERT_EQ(knl_cpu_want(2200, 0, MHZ(600), MHZ(1800)), MHZ(1800));
+	KT_ASSERT_EQ(knl_cpu_want(1500, 0, MHZ(600), MHZ(1800)), MHZ(1500));
+	/* a firmware that tells nothing */
+	KT_ASSERT_EQ(knl_cpu_want(1800, 0, 0, 0), MHZ(1800));
+	KT_ASSERT_EQ(knl_cpu_want(0, 0, 0, 0), 0);
+
+	had = wm_dev_conf_get("CPU_MHZ", was, sizeof(was));
+	wd_had = wm_dev_conf_get("WATCHDOG", wd_was, sizeof(wd_was));
+	if ( wm_dev_conf_put("CPU_MHZ", "2200") < E_OK ) KT_SKIP("no machine settings object");
+	knl_cpu_clock(&c0);
+	KT_ASSERT_ER(wm_dev_conf_apply(), E_OK);
+	knl_cpu_clock(&c);
+	tm_printf((UB *)"  cpu: limit %d MHz, now %d MHz, the firmware %d..%d MHz, taken %d, asked %d\n",
+		  (INT)c.limit_mhz, (INT)( c.hz / 1000000 ), (INT)( c.min_hz / 1000000 ),
+		  (INT)( c.max_hz / 1000000 ), (INT)c.taken, (INT)c.applied);
+	KT_ASSERT_EQ(c.limit_mhz, 2200);
+	KT_ASSERT(c.taken > c0.taken);
+#if !KT_BOARD
+	KT_ASSERT_EQ(c.applied, 0);		/* nothing to ask */
+	KT_ASSERT_EQ(c.hz, 0);
+#endif
+	len = rec(&ob_uuid_system, OB_OP_R, OB_SYS_HW);
+	KT_ASSERT(len > 0 && has(txt, len, "ARM_LIMIT_MHZ\t2200\n"));
+	KT_ASSERT(has(txt, len, "UNDERVOLT\t") && has(txt, len, "ARM_HEAT_HZ\t"));
+
+	KT_ASSERT_ER(wm_dev_conf_put("CPU_MHZ", "0"), E_OK);	/* the most */
+	KT_ASSERT_ER(wm_dev_conf_apply(), E_OK);
+	KT_ASSERT_EQ(limit_now(), CPU_MHZ_MOST);
+	len = rec(&ob_uuid_system, OB_OP_R, OB_SYS_HW);
+	KT_ASSERT(len > 0 && has(txt, len, "ARM_LIMIT_MHZ\t0\n"));
+	KT_ASSERT_ER(wm_dev_conf_put("CPU_MHZ", ""), E_OK);	/* no value: the default */
+	KT_ASSERT_ER(wm_dev_conf_apply(), E_OK);
+	KT_ASSERT_EQ(limit_now(), CPU_MHZ_DEFAULT);
+	KT_ASSERT_ER(wm_dev_conf_put("CPU_MHZ", "1500"), E_OK);
+	KT_ASSERT_ER(wm_cpu_conf_apply(), E_OK);		/* as at the start: the clock alone */
+	KT_ASSERT_EQ(limit_now(), 1500);
+	KT_ASSERT_ER(wm_dev_conf_put("CPU_MHZ", "fast"), E_OK);	/* not a number */
+	KT_ASSERT_ER(wm_dev_conf_apply(), E_OK);
+	KT_ASSERT_EQ(limit_now(), CPU_MHZ_DEFAULT);
+
+	/* the watchdog with it */
+	KT_ASSERT_ER(wm_dev_conf_put("WATCHDOG", "45"), E_OK);
+	KT_ASSERT_ER(wm_dev_conf_apply(), E_OK);
+	KT_ASSERT_EQ(knl_wdog_get(NULL), 45);
+	len = rec(&ob_uuid_system, OB_OP_R, OB_SYS_HW);
+	KT_ASSERT(len > 0 && has(txt, len, "WATCHDOG_S\t45\n") && has(txt, len, "WATCHDOG_HW\t"));
+	KT_ASSERT_ER(wm_dev_conf_put("WATCHDOG", "0"), E_OK);
+	KT_ASSERT_ER(wm_dev_conf_apply(), E_OK);
+	KT_ASSERT_EQ(knl_wdog_get(NULL), 0);
+
+	/* as it was */
+	KT_ASSERT_ER(wm_dev_conf_put("CPU_MHZ", had ? was : ""), E_OK);
+	KT_ASSERT_ER(wm_dev_conf_put("WATCHDOG", wd_had ? wd_was : ""), E_OK);
+	KT_ASSERT_ER(wm_dev_conf_apply(), E_OK);
+	KT_ASSERT_EQ(knl_wdog_get(NULL), wd_had ? cf_num(wd_was, LK_RESET_S_DEFAULT) : LK_RESET_S_DEFAULT);
 }
 
 /* ---------------------------------------------------------------- coming and going */
@@ -836,6 +937,7 @@ EXPORT void ktest_devob( void )
 	KT_RUN(test_hid_devices);
 	KT_RUN(test_usb_devices);
 	KT_RUN(test_hw_state);
+	KT_RUN(test_cpu_limit);
 	KT_RUN_EXCEPT_RPI5(test_hotplug, "devices are taken out through the QEMU monitor");
 	KT_RUN(test_process);
 	KT_RUN(test_measure);

@@ -45,6 +45,9 @@ typedef struct {
 	BOOL	has_pick;		/* something is picked */
 	BOOL	is_root;		/* the document has no link to it */
 	BOOL	can_paste;		/* the tray has a set a text can take */
+	BOOL	vertical;		/* 縦書き: the lines run down */
+	BOOL	comb;			/* what is picked is 縦中横 */
+	BOOL	turned;			/* what is picked is 回転 */
 
 	/* 書体: the faces used last, newest first, as <font face> names them */
 	INT	nrecent;
@@ -76,6 +79,7 @@ typedef struct {
 #define DM_SELECT_ALL		125
 #define DM_FIND			126
 #define DM_VIRTUALIZE		127
+#define DM_WORDDIC		128	/* the selection to 単語登録 */
 
 /* 書体 */
 #define DM_FONT_LIST		130
@@ -145,6 +149,11 @@ typedef struct {
 #define DM_PAGEBREAK		204
 #define DM_PAPER_FRAME		205
 #define DM_PAGE_SETUP		206
+#define DM_DIR_VERT		207	/* 縦書き */
+#define DM_DIR_HORIZ		208	/* 横書き */
+#define DM_COMB			209	/* 縦中横, on and off */
+#define DM_TURN			210	/* 回転, on and off */
+#define DM_PRINT		211	/* 印刷 */
 
 /* 書体: DM_FONT_RECENT + the number of the face among those used last */
 #define DM_FONT_RECENT		240

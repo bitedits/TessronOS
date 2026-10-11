@@ -97,8 +97,18 @@ IMPORT UB  *kt_obj_data( const TS_UUID *uuid, SZ *p_size );
  *			was made with for the purpose (mksd.py
  *			--scratch-mb): nothing else on it is written to
  *			below the file system.
+ *
+ * The Raspberry Pi 4 family is a board in the same sense: KT_BOARD is 1
+ * on either family and 0 under QEMU virt. The Raspberry Pi 4 image runs
+ * under QEMU's raspi4b too, which then counts as the board.
  */
-#ifdef RPI5
+#if defined(RPI5) || defined(RPI4)
+#define KT_BOARD	1
+#else
+#define KT_BOARD	0
+#endif
+
+#if KT_BOARD
 #define KT_DISK		"sda"
 #define KT_BOOTDEV	"sda0"
 #define KT_DISK_PARTS	2
@@ -109,16 +119,16 @@ IMPORT UB  *kt_obj_data( const TS_UUID *uuid, SZ *p_size );
 #endif
 IMPORT CONST char *kt_scratch( void );
 
-#define KT_NO_SCRATCH	"no scratch partition (Raspberry Pi 5: the card needs one, make KTEST=1 sdimg)"
+#define KT_NO_SCRATCH	"no scratch partition (Raspberry Pi: the card needs one, make KTEST=1 sdimg)"
 
 /*
- * A test that the Raspberry Pi 5 does not run: on it the test is
+ * A test that the Raspberry Pi boards do not run: on them the test is
  * reported skipped with the reason, and the function need not exist
  * there. Everywhere else it runs as KT_RUN does.
  */
-#ifdef RPI5
+#if KT_BOARD
 #define KT_RUN_EXCEPT_RPI5(fn, why) \
-	do { kt_begin(#fn); kt_skip(#fn, "not run (Raspberry Pi 5: " why ")"); kt_end(); } while (0)
+	do { kt_begin(#fn); kt_skip(#fn, "not run (Raspberry Pi: " why ")"); kt_end(); } while (0)
 #else
 #define KT_RUN_EXCEPT_RPI5(fn, why)	KT_RUN(fn)
 #endif
@@ -142,6 +152,11 @@ IMPORT BOOL kt_screen( void );
 	tm_printf((UB*)"  @%s:%d\n", __FILE__, __LINE__)
 
 /* Priorities: the test task runs at KT_PRI_MAIN */
+/* Rounds of the tests that make and end processes or tasks over and over (make KT_CHURN_N=) */
+#ifndef KT_CHURN_N
+#define KT_CHURN_N	1000
+#endif
+
 #define KT_PRI_MAIN	20
 #define KT_PRI_HIGH	5		/* preempts the test task */
 #define KT_PRI_LOW	25		/* runs only while the test task waits */
@@ -153,13 +168,17 @@ IMPORT void ktest_time( void );
 IMPORT void ktest_mem( void );
 IMPORT void ktest_el0( void );
 IMPORT void ktest_smp( void );
+IMPORT void ktest_lockup( void );
 IMPORT void ktest_blk( void );
 IMPORT void ktest_sd( void );
+IMPORT void ktest_board( void );
 IMPORT void ktest_ser( void );
 IMPORT void ktest_fs( void );
 IMPORT void ktest_fat( void );
 IMPORT void ktest_proc( void );
 IMPORT void ktest_prcobj( void );
+IMPORT void ktest_pan( void );
+IMPORT void ktest_cred( void );
 IMPORT void ktest_cxx( void );
 IMPORT void ktest_v8( void );
 IMPORT void ktest_uuid( void );
@@ -169,37 +188,61 @@ IMPORT void ktest_tsfscut( void );
 IMPORT void ktest_tsfsbtree( void );
 IMPORT void ktest_tsfsjrnl( void );
 IMPORT void ktest_tsfsobj( void );
+IMPORT void ktest_dfix( void );
 IMPORT void ktest_ob( void );
 IMPORT void ktest_tad( void );
 IMPORT void ktest_om( void );
 IMPORT void ktest_pcie( void );
 IMPORT void ktest_usb( void );
 IMPORT void ktest_snd( void );
+IMPORT void ktest_cam( void );
 IMPORT void ktest_disp( void );
 IMPORT void ktest_dp( void );
 IMPORT void ktest_wm( void );
 IMPORT void ktest_cab( void );
 IMPORT void ktest_tv( void );
+IMPORT void ktest_vt( void );
+IMPORT void ktest_prn( void );
 IMPORT void ktest_store( void );
 IMPORT void ktest_part( void );
 IMPORT void ktest_mn( void );
 IMPORT void ktest_ms( void );
 IMPORT void ktest_unp( void );
+IMPORT void ktest_arc( void );
 IMPORT void ktest_btbk( void );
 IMPORT void ktest_bkp( void );
 IMPORT void ktest_tray( void );
 IMPORT void ktest_xf( void );
 IMPORT void ktest_xfu( void );
 IMPORT void ktest_xfc( void );
+IMPORT void ktest_btcd( void );
+IMPORT void ktest_vols( void );
 IMPORT void ktest_drop( void );
+IMPORT void ktest_dtwin( void );
 IMPORT void ktest_fault( void );
+IMPORT void ktest_fq( void );
 IMPORT void ktest_bt2( void );
 IMPORT void ktest_devob( void );
 IMPORT void ktest_fn( void );
 IMPORT void ktest_net( void );
 IMPORT void ktest_so( void );
+IMPORT void ktest_rump( void );
 IMPORT void ktest_svcio( void );
+IMPORT void ktest_psx( void );
 IMPORT void ktest_gpu( void );
+IMPORT void ktest_gl( void );
+IMPORT void ktest_cal( void );
+IMPORT void ktest_calc( void );
+IMPORT void ktest_kana( void );
+IMPORT void ktest_udic( void );
+IMPORT void ktest_calcu( void );
+IMPORT void ktest_km( void );
+IMPORT void ktest_mcard( void );
+IMPORT void ktest_techo( void );
+IMPORT void ktest_chs( void );
+IMPORT void ktest_slide( void );
+IMPORT void ktest_scr( void );
+IMPORT void ktest_rt( void );
 
 /* Helpers shared by the groups */
 IMPORT ID kt_cre_tsk( FP task, PRI pri, void *exinf );	/* TA_HLNG|TA_RNG0, 4KB stack */

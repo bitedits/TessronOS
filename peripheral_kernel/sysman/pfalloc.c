@@ -34,6 +34,7 @@ LOCAL T_SPLOCK	pf_lock;
 EXPORT PFRAME	*knl_pf_db;
 EXPORT UD	knl_pf_base;
 EXPORT UD	knl_pf_npages;
+EXPORT UD	knl_fb_page2 = 0;	/* a second screen page kept from the start, 0: none */
 
 typedef struct {
 	QUEUE	free[PF_MAX_ORDER + 1];	/* free lists per order */
@@ -43,7 +44,15 @@ typedef struct {
 
 LOCAL ZONE	zones[ZONE_NUM];
 
+/*
+ * Where the zone that bus masters reach ends: 4GB, or lower on a board
+ * whose DMA sees less (the Raspberry Pi 4: 1GB, sysdef.h)
+ */
+#ifdef DMA_ZONE_LIMIT
+#define ZONE_DMA32_LIMIT	((UD)DMA_ZONE_LIMIT)
+#else
 #define ZONE_DMA32_LIMIT	(U64(1) << 32)
+#endif
 
 #define PF_INDEX(pf)		((UD)((pf) - knl_pf_db))
 #define PF_OF(idx)		(&knl_pf_db[idx])
@@ -301,9 +310,41 @@ EXPORT void knl_pfalloc_init( UBINT *p_kernel_end_pa, UD extra_reserve )
 	if ( knl_dtb_addr != 0 ) reserve_range(knl_dtb_addr, knl_dtb_size);
 	/* a screen the firmware left running: its pixels are scanned out from there */
 	if ( knl_dtb_fb.size != 0 ) reserve_range(knl_dtb_fb.pa, knl_dtb_fb.size);
+#if defined(RPI5) && CNF_DISP_FLIP
+	/*
+	 * A second page for the screen, which the display's scaler is pointed
+	 * at in turn with the first (disp_rpi5.c): as large as the firmware's,
+	 * below 4GB, and contiguous, more than the allocator hands out in one
+	 * block, so taken now from the start of the first RAM range past it
+	 */
+	if ( knl_dtb_fb.size != 0 ) {
+		UD	best = 0;
+
+		for ( i = 0; i < (UD)knl_mem_range_n; i++ ) {
+			UD	s = ( knl_mem_range[i].start + PAGE_SIZE - 1 ) & PAGE_MASK;
+
+			if ( s >= knl_dtb_fb.pa + knl_dtb_fb.size && s + knl_dtb_fb.size <= 0x100000000ULL
+			  && knl_mem_range[i].start + knl_mem_range[i].size >= s + knl_dtb_fb.size
+			  && ( best == 0 || s < best ) ) {
+				best = s;
+			}
+		}
+		if ( best != 0 ) {
+			reserve_range(best, knl_dtb_fb.size);
+			knl_fb_page2 = best;
+		}
+	}
+#endif
 #ifdef TFA_BL31_END
 	reserve_range(0, TFA_BL31_END);
 #endif
+#ifdef LOW_RESERVED_END
+	reserve_range(0, LOW_RESERVED_END);
+#endif
+	/* what the device tree's header says the firmware keeps (/memreserve/) */
+	for ( i = 0; i < (UD)knl_mem_rsv_n; i++ ) {
+		reserve_range(knl_mem_rsv[i].start, knl_mem_rsv[i].size);
+	}
 
 	if ( knl_mem_range_n == 0 ) {
 		release_range(lo, hi);

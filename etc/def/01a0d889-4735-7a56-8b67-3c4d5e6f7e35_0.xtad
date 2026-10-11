@@ -1,0 +1,20 @@
+<tad version="1.0" encoding="UTF-8" filename="マイクロカードのマーク">
+<document>
+<p>マイクロカードのマーク</p>
+<p>マークの付け外しと、マーク付カードの検索。メニューの定義。</p>
+</document>
+<menu>
+<item code="mark.flip">このマークを反転</item>
+<item code="mark.flipall">すべてのマークを反転</item>
+<item code="mark.all">すべてをマーク付け</item>
+<item code="mark.none">すべてをマーク消し</item>
+<line/>
+<item code="mark.bon">前をマーク付け</item>
+<item code="mark.boff">前をマーク消し</item>
+<item code="mark.aon">後ろをマーク付け</item>
+<item code="mark.aoff">後ろをマーク消し</item>
+<line/>
+<item code="mark.find">マーク付カード新規検索</item>
+<item code="mark.add">マーク付カード追加検索</item>
+</menu>
+</tad>

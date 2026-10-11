@@ -211,20 +211,20 @@ LOCAL void test_relink( void )
 	rz = om_store_refs(&z);
 	KT_ASSERT(rx >= 5 && ry >= 5 && rz >= 0);
 
-	om_store_relink((CONST UB *)a, la, (CONST UB *)b, lb);
+	om_store_relink(NULL, (CONST UB *)a, la, (CONST UB *)b, lb);
 	KT_ASSERT_EQ(om_store_refs(&x), rx - 1);	/* two, then one */
 	KT_ASSERT_EQ(om_store_refs(&y), ry - 1);	/* one, then none */
 	KT_ASSERT_EQ(om_store_refs(&z), rz + 2);	/* none, then two */
 
-	om_store_relink((CONST UB *)b, lb, (CONST UB *)a, la);
+	om_store_relink(NULL, (CONST UB *)b, lb, (CONST UB *)a, la);
 	KT_ASSERT_EQ(om_store_refs(&x), rx);
 	KT_ASSERT_EQ(om_store_refs(&y), ry);
 	KT_ASSERT_EQ(om_store_refs(&z), rz);
 
 	/* a record that is new, and one that is gone */
-	om_store_relink(NULL, 0, (CONST UB *)a, la);
+	om_store_relink(NULL, NULL, 0, (CONST UB *)a, la);
 	KT_ASSERT_EQ(om_store_refs(&x), rx + 2);
-	om_store_relink((CONST UB *)a, la, NULL, 0);
+	om_store_relink(NULL, (CONST UB *)a, la, NULL, 0);
 	KT_ASSERT_EQ(om_store_refs(&x), rx);
 
 	om_store_bump(&x, -5);
@@ -341,9 +341,9 @@ LOCAL void test_copy_new( void )
 		for ( i = 0; "<link id=\""[i] != 0; i++ ) rec[rl++] = (UB)"<link id=\""[i];
 		for ( i = 0; us[i] != 0; i++ ) rec[rl++] = (UB)us[i];
 		for ( i = 0; "_0.xtad\"/>"[i] != 0; i++ ) rec[rl++] = (UB)"_0.xtad\"/>"[i];
-		om_store_relink(NULL, 0, rec, rl);
+		om_store_relink(NULL, NULL, 0, rec, rl);
 		KT_ASSERT_EQ(om_store_refs(&nid), 1);
-		om_store_relink(rec, rl, NULL, 0);
+		om_store_relink(NULL, rec, rl, NULL, 0);
 		KT_ASSERT_EQ(om_store_refs(&nid), 0);
 	}
 	KT_ASSERT_ER(ob_del_obj(&nid), E_OK);

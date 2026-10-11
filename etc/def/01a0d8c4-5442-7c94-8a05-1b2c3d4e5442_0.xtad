@@ -1,0 +1,64 @@
+<tad version="1.0" encoding="UTF-8" filename="ブラウザのデータボックス">
+<document>
+<p>ブラウザのデータボックス</p>
+<p>頁が尋ねるalert・confirm・promptのパネル、頁のselectの一覧を選ぶパネル、頁が求める許可を尋ねるパネル、頁に渡すファイルの実身を選ぶパネル、Widevineを導入する前に示すパネルの定義。言葉は部品1〜6、入力欄と一覧は部品11、ボタンは101(取消、拒否)と102(了解、許可、導入)。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,460,190" title="頁からの知らせ">
+<text num="1" x="20" y="36"> </text>
+<text num="2" x="20" y="58"> </text>
+<text num="3" x="20" y="80"> </text>
+<text num="4" x="20" y="102"> </text>
+<text num="5" x="20" y="124"> </text>
+<button num="102" rect="356,152,444,178" emph="true">了解</button>
+</panel>
+<panel num="2" rect="0,0,460,190" title="頁からの確認">
+<text num="1" x="20" y="36"> </text>
+<text num="2" x="20" y="58"> </text>
+<text num="3" x="20" y="80"> </text>
+<text num="4" x="20" y="102"> </text>
+<text num="5" x="20" y="124"> </text>
+<button num="101" rect="260,152,348,178" answer="cancel">取消</button>
+<button num="102" rect="356,152,444,178" emph="true">了解</button>
+</panel>
+<panel num="3" rect="0,0,460,226" title="頁からの問い合わせ">
+<text num="1" x="20" y="36"> </text>
+<text num="2" x="20" y="58"> </text>
+<text num="3" x="20" y="80"> </text>
+<text num="4" x="20" y="102"> </text>
+<box num="11" rect="20,120,444,148" max="255" jp="true"/>
+<button num="101" rect="260,188,348,214" answer="cancel">取消</button>
+<button num="102" rect="356,188,444,214" emph="true">了解</button>
+</panel>
+<panel num="4" rect="0,0,360,320" title="選択">
+<list num="11" rect="12,12,348,268"/>
+<button num="101" rect="164,284,252,310" answer="cancel">取消</button>
+<button num="102" rect="260,284,348,310" emph="true">了解</button>
+</panel>
+<panel num="5" rect="0,0,460,168" title="許可の確認">
+<text num="1" x="20" y="36"> </text>
+<text num="2" x="20" y="58"> </text>
+<text num="3" x="20" y="80"> </text>
+<text num="4" x="20" y="102"> </text>
+<button num="101" rect="260,130,348,156" answer="cancel">拒否</button>
+<button num="102" rect="356,130,444,156" emph="true">許可</button>
+</panel>
+<panel num="6" rect="0,0,420,340" title="ファイルの選択">
+<text num="1" x="20" y="28">頁に渡す実身を選んでください。</text>
+<text num="2" x="20" y="50">トレーにある仮身と、ここに入れた仮身が並びます。</text>
+<list num="11" rect="12,64,408,286"/>
+<button num="101" rect="224,300,312,326" answer="cancel">取消</button>
+<button num="102" rect="320,300,408,326" emph="true">了解</button>
+</panel>
+<panel num="7" rect="0,0,580,228" title="Widevineの導入">
+<text num="1" x="20" y="36">Widevineは、Googleの独自のソフトウェア(CDM)です。</text>
+<text num="2" x="20" y="58">TessronOSにもブラウザにも同梱していません。</text>
+<text num="3" x="20" y="80">〈導入〉を選ぶと、Raspberry Piの公式の倉庫</text>
+<text num="4" x="20" y="102">(archive.raspberrypi.com)からlibwidevinecdm0を取ってきて、</text>
+<text num="5" x="20" y="124">この利用者の実身に入れます(〈Widevineを外す〉で消せます)。</text>
+<text num="6" x="20" y="146">利用の条件は、導入する前にご自身で確かめてください。</text>
+<button num="101" rect="384,190,472,216" answer="cancel">取消</button>
+<button num="102" rect="480,190,568,216" emph="true">導入</button>
+</panel>
+</databox>
+</tad>

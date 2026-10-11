@@ -1,0 +1,11 @@
+<tad version="1.0" encoding="UTF-8" filename="基本表計算の線幅">
+<document>
+<p>基本表計算の線幅</p>
+<p>基本表計算の次に引く罫線の幅。メニューの定義。</p>
+</document>
+<menu>
+<item code="linewidth" value="1">細</item>
+<item code="linewidth" value="2">中</item>
+<item code="linewidth" value="3">太</item>
+</menu>
+</tad>

@@ -1,0 +1,45 @@
+# 音量ミキサー's list wound with the window's own scroll bar (design 11.6), for
+# tools/ui_run.py with --wav F: six programs play (SVCPROG.ELF's tone; the first two
+# for 14 seconds, the rest for 40), more than the five rows the window opens with.
+# The window is made shorter (three rows), wound with the wheel, two programs before
+# the first row end, a new one starts, the bar's track is pressed below its knob, and
+# the window is made taller: every time the mixer says how many rows it shows, from
+# which program, of how many, and which process is in the first row -- the first row
+# stays on its program while programs before it come and go. The window is at
+# 200,100,788,568: its corner at 784,564, the bar down 772..786.
+run /boot/SVCPROG.ELF 38 300 14000
+run /boot/SVCPROG.ELF 38 500 14000
+run /boot/SVCPROG.ELF 38 700 40000
+run /boot/SVCPROG.ELF 38 900 40000
+run /boot/SVCPROG.ELF 38 1100 40000
+run /boot/SVCPROG.ELF 38 1300 40000
+wait 300
+open 01a0d8c4-5440-7a51-8c62-7e8f90a15440
+expect sndmix: ready
+expect sndmix: rows 5 from 0 of 6, pid 2 first
+win 音量ミキサー
+shot mixs_open
+# shorter: three rows
+drag 784 564 784 484
+expect sndmix: rows 3 from 0 of 6, pid 2 first
+# the wheel, two notches toward the person: two programs on
+move 500 300
+wheel -2
+expect sndmix: rows 3 from 2 of 6, pid 4 first
+shot mixs_wheel
+# the first two end: the first row stays on its program
+expect sndmix: rows 3 from 0 of 4, pid 4 first
+# a new one comes, in the place of one that ended, before the first row
+run /boot/SVCPROG.ELF 38 400 20000
+expect sndmix: rows 3 from 1 of 5, pid 4 first
+# the bar's track pressed below its knob: a page on, as far as there is
+click 779 474
+expect sndmix: rows 3 from 2 of 5, pid 5 first
+shot mixs_bar
+# taller: as many rows as there are programs
+drag 784 484 784 604
+expect sndmix: rows 6 from 0 of 5
+shot mixs_tall
+key 08 01
+wait 500
+absent !OACV!

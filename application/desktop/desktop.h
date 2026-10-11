@@ -36,8 +36,9 @@
 #include <ts/tadview.h>
 #include <ts/mn.h>
 #include <ts/ob.h>
+#include <ts/print.h>
 
-#define DT_MAX_WIN	8		/* windows this program may have open */
+#define DT_MAX_WIN	32		/* windows this program may have open */
 #define DT_MARGIN	10		/* between the work area and the page */
 #define DT_UNDO_MAX	16		/* changes that can be taken back */
 #define DT_PAPER_W	595		/* A4, when a document names no paper */
@@ -155,15 +156,78 @@ typedef struct dtwin {
 	UB		*redo[DT_UNDO_MAX];
 	SZ		redo_len[DT_UNDO_MAX];
 	INT		nredo;
+
+	/*
+	 * A window whose work area a part of the desktop draws and works
+	 * itself rather than a record's page (DT_TOOL_OWN): 管理情報,
+	 * ディスク修復 and its 障害情報, 基本動画再生, スライド. 'own' says
+	 * how, 'self' is what that part keeps for the window.
+	 */
+	CONST struct dtown	*own;
+	void		*self;
 } DTWIN;
 
 #define DT_TOOL_NONE	0
 #define DT_TOOL_TRASH	1		/* 屑実身操作 */
 #define DT_TOOL_SEARCH	2		/* 実身/仮身検索 */
 #define DT_TOOL_NETWORK	3		/* 仮身ネットワーク */
+#define DT_TOOL_WINLIST	4		/* ウインドウ一覧 */
+#define DT_TOOL_OWN	5		/* a window with an own part (DTOWN) */
+
+/*
+ * What a window of the desktop's whose work area is its own part's does.
+ * The desktop keeps it as it keeps any of its windows: the frame moves
+ * it, sizes it and closes it, a press brings it to the front, the
+ * second button opens its menu -- the part's definition 'menu', which
+ * holds 閉じる and the tail of ウインドウ, 小物 and 実行 as every
+ * window's does -- and a letter with Ctrl chooses the item that has it.
+ * What is left is the part's:
+ *
+ *   draw	the work area drawn (opened, sized, uncovered)
+ *   input	an event in the work area: the first button pressed in it
+ *		and let go, a move, a key while it has the keys, the
+ *		wheel; TRUE when it was taken. A key with Ctrl it does not
+ *		take is looked for in the menu.
+ *   link_at	the link at a place of the work area, for 実行; may be NULL
+ *   menu_set	the menu's items set to what the window is; may be NULL
+ *   menu_do	an item of the part's chosen; the window may be gone after
+ *   closing	whether it may be closed now; NULL when always
+ *   close	what the part keeps freed, the window still there
+ *   poll	each turn of the desktop's loop; may be NULL
+ */
+typedef struct dtown {
+	CONST char	*menu;
+	void		(*draw)( DTWIN *d );
+	BOOL		(*input)( DTWIN *d, CONST T_WMEV *ev );
+	BOOL		(*link_at)( DTWIN *d, INT x, INT y, T_VOBJ *v );
+	void		(*menu_set)( DTWIN *d, ID mid );
+	void		(*menu_do)( DTWIN *d, CONST T_MNSEL *sel );
+	BOOL		(*closing)( DTWIN *d );
+	void		(*close)( DTWIN *d );
+	void		(*poll)( DTWIN *d );
+} DTOWN;
+
+/*
+ * A window of such a part opened at o with the attributes and title
+ * given, the icon of the program of id 'prog' in its band (NULL: none):
+ * NULL when there was no room. dt_own_next goes through those of a part
+ * open, after 'd' (NULL: from the first).
+ */
+IMPORT DTWIN *dt_own_open( CONST DTOWN *own, void *self, CONST T_DPRECT *o, UINT attr,
+			   CONST char *title, CONST char *prog );
+IMPORT DTWIN *dt_own_next( CONST DTOWN *own, DTWIN *d );
+IMPORT void   dt_own_ground( DTWIN *d );	/* the work area laid with a panel's ground */
 
 /* desktop.c */
 IMPORT DTWIN *dt_win_of( INT wid );
+
+/*
+ * A window carried by the hand: moved at once, or with LK_LIVE at 0 an
+ * outline in its place until the button is let go (dt_carry_end, TRUE
+ * when the window went there).
+ */
+IMPORT BOOL   dt_carry_window( INT wid, CONST T_DPRECT *o );
+IMPORT BOOL   dt_carry_end( INT wid );
 
 /*
  * dttray.c: what a window copies goes to the tray (design 18.16) as an
@@ -179,6 +243,7 @@ IMPORT T_TAD *dt_tray_frag( void );
 IMPORT UINT   dt_tray_kind( INT *p_links );
 IMPORT INT    dt_frag_shapes( CONST T_TAD *frag );
 IMPORT void   dt_tray_taken( void );
+IMPORT INT    dt_tray_pictures( CONST TS_UUID *id, CONST T_TAD *rec, T_TAD *frag );
 IMPORT T_TAD *dt_list_record( CONST char *title, CONST TS_UUID *ids,
 			      CONST char *CONST *names, INT n );
 IMPORT DTWIN *dt_open_made( T_TAD *rec, CONST char *title, UINT tool,
@@ -205,14 +270,21 @@ IMPORT BOOL   dt_drop_links( DTWIN *d, INT sx, INT sy, CONST T_VOBJ *v, INT n );
 /* The desktop run in a task of its own, and stopped again (the tests) */
 IMPORT ER     dt_start( void );
 IMPORT void   dt_quit( void );
+#if USE_KTEST
+/* The tests stop the desktop's loop: 1 waits there, 2 runs on the spot, 0 lets it go on */
+IMPORT volatile INT dt_test_stall;
+#endif
+
 
 /* The programs as real objects (dtprog.c, design 18.12) */
 #define DT_PROG_ID	40
 #define DT_PROG_BASE	4
 #define DT_VER_MAX	16		/* R, a number, a point and three digits */
+#define DT_TYPES_MAX	64
 #define DT_PK_APP	1		/* an application: templates, opens objects */
 #define DT_PK_ACCESSORY	2		/* 小物: no data of its own */
 #define DT_PK_UTILITY	3		/* a tool of the system */
+#define DT_PK_COMMAND	4		/* no window of its own: run in a コンソール */
 
 typedef struct {
 	UB	id[DT_PROG_ID];		/* what an applist names it by */
@@ -224,12 +296,22 @@ typedef struct {
 	BOOL	builtin;		/* carried in the desktop */
 	BOOL	menu;			/* an accessory shown in the 小物 menu */
 	UB	version[DT_VER_MAX];	/* R1.000; empty when its metadata says none */
+	UB	types[DT_TYPES_MAX];	/* the kinds of object 実行 offers it for (fileTypes): "xtad,tad" */
 } DTPROG;
 
 IMPORT ER     dt_prog_start( void );
 IMPORT CONST DTPROG *dt_prog_find( CONST UB *id );
 IMPORT CONST DTPROG *dt_prog_of( CONST TS_UUID *uuid );
+IMPORT ER     dt_command_run( CONST TS_UUID *target );	/* a command run in a コンソール; E_NOEXS: none */
+IMPORT CONST DTPROG *dt_prog_at( INT i );
 IMPORT INT    dt_prog_list( UINT kind, CONST DTPROG **out, INT max );
+/*
+ * The programs that say they open an object of this one's kind
+ * (fileTypes: "xtad" for xmlTAD, else the extension of the file it was
+ * taken in from), those its applist names already left out: what 実行
+ * offers after its applist.
+ */
+IMPORT INT    dt_prog_by_type( CONST T_VOBJ *v, CONST DTPROG **out, INT max );
 IMPORT T_TAD *dt_prog_page( UINT kind );
 IMPORT INT    dt_prog_roots( TS_UUID *ids, INT max );
 IMPORT CONST char *dt_prog_base_name( CONST TS_UUID *target );
@@ -287,19 +369,31 @@ IMPORT void   dt_sys_prt( T_OBPRT *prt );		/* owned by the system, read by all *
  * does one of them and answers TRUE, FALSE when the item is not one.
  */
 IMPORT void   dt_get_vmn( DTWIN *d, ID mid, BOOL on_vobj, CONST T_VOBJ *v );
+IMPORT void   dt_tail_fill( ID mid );		/* 小物 and 実行 of SYSDEF_MENU_TAIL */
+IMPORT BOOL   dt_tail_do( CONST T_MNSEL *sel );
+IMPORT void   dt_tail_poll( void );
+IMPORT void   dt_tail_start( void );
+IMPORT void   dt_tail_stop( void );
 IMPORT BOOL   dt_exe_vmn( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj,
 			  CONST T_VOBJ *v );
 IMPORT BOOL   dt_app_locked( CONST T_VOBJ *v );
 IMPORT BOOL   dt_app_lockable( CONST T_VOBJ *v );
 IMPORT void   dt_lock_app( DTWIN *d, CONST T_VOBJ *v );	/* 起動アプリの固定, turned over */
 
+/*
+ * The 仮身操作 and 実身操作 a process asks for a link it shows itself
+ * (DT_RQ_CLOSE .. DT_RQ_FULL of ts/dtreq.h), its panels over the
+ * process's window (dt_host_of, desktop.c); what the link is to become
+ * is put in the answer.
+ */
+IMPORT ER     dt_proc_link_op( CONST T_DTREQ *rq, T_DTANS *an );
+IMPORT DTWIN *dt_host_of( CONST TS_UUID *win );
+
 /* dtinfo.c: 管理情報 of the real object a link points at */
 IMPORT void   dt_real_info( DTWIN *d, CONST T_VOBJ *v );
 
 /* dtuitest.c: the desktop driven over the second serial port (make UITEST=1) */
 IMPORT void   dt_uitest_start( void );
-IMPORT BOOL   dt_info_event( CONST T_WMEV *ev );
-IMPORT void   dt_info_close_all( void );
 
 /*
  * dtfault.c: a process ended by a processor exception, told in a
@@ -314,7 +408,67 @@ IMPORT void   dt_fault_close_all( void );
 IMPORT INT    dt_fault_wid( void );
 IMPORT INT    dt_fault_lines( UB *buf, INT max );
 IMPORT DTWIN *dt_first_win( void );
+IMPORT DTWIN *dt_win_at( INT i );		/* the table's place i, used or not */
+
+/*
+ * dtdisk.c: ディスク操作 (design 11.26). The disks attached as volumes
+ * of objects, followed each turn; 接続, 切り離し and 状態表示 on the
+ * object of a link (or none); and the top object of a volume, where a
+ * link to what is saved on it goes.
+ */
+IMPORT void   dt_disk_poll( void );
+IMPORT void   dt_disk_connect( DTWIN *d, CONST T_VOBJ *v );
+IMPORT void   dt_disk_detach( DTWIN *d, CONST T_VOBJ *v );
+IMPORT void   dt_disk_status( DTWIN *d, CONST T_VOBJ *v );
+IMPORT BOOL   dt_disk_detachable( CONST T_VOBJ *v );
+IMPORT BOOL   dt_disk_top( CONST char *path, TS_UUID *p_top );
+IMPORT BOOL   dt_disk_absent( DTWIN *d, CONST T_VOBJ *v );
+IMPORT BOOL   dt_disk_on_delete( DTWIN *d, CONST T_VOBJ *v );
 IMPORT BOOL   dt_reachable( CONST T_VOBJ *v );
+
+/*
+ * dtslide.c: スライド, the objects a document links to shown one at a
+ * time over the whole screen, in a window of the desktop's with an own
+ * part (DTOWN). dt_slide_pages reads what a document's slides are and
+ * the screen they are made for; dt_slide_fit is where they go in a
+ * window that size and how much they are magnified, in eighths.
+ */
+IMPORT void   dt_slide_open( DTWIN *from, CONST T_VOBJ *v );
+IMPORT INT    dt_slide_pages( CONST T_TAD *rec, TS_UUID *ids, INT max, INT *p_w, INT *p_h );
+IMPORT INT    dt_slide_fit( INT ww, INT wh, INT tw, INT th, T_DPRECT *out );
+IMPORT BOOL   dt_slide_takes( CONST T_TAD *rec );
+
+/*
+ * dtrt.c: the player of 実時間制御TAD (design 19.5). A record's
+ * <realtime> shown in a part of a window and played by a task of its
+ * own; what the person does is passed to it with dtrt_input.
+ */
+typedef struct dtrt DTRT;
+
+IMPORT BOOL   dtrt_has( CONST T_TAD *rec );
+IMPORT void   dtrt_scene_size( CONST T_TAD *rec, INT *p_w, INT *p_h );
+IMPORT DTRT  *dtrt_open( INT wid, CONST TS_UUID *obj, INT recno, CONST T_DPRECT *area, INT tw, INT th,
+			 UW paper, INT slide_no );
+IMPORT void   dtrt_close( DTRT *p );
+IMPORT void   dtrt_redraw( DTRT *p );
+IMPORT void   dtrt_relayout( DTRT *p, CONST T_DPRECT *area );
+IMPORT void   dtrt_fit( DTRT *p, T_DPRECT *r );
+IMPORT BOOL   dtrt_input( DTRT *p, CONST T_WMEV *ev, BOOL look );
+IMPORT void   dtrt_visible( DTRT *p, BOOL on );
+IMPORT UINT   dtrt_action( DTRT *p, INT *p_n );
+IMPORT BOOL   dtrt_waiting( DTRT *p );
+IMPORT BOOL   dtrt_paused( DTRT *p );
+IMPORT void   dtrt_toggle( DTRT *p );
+IMPORT void   dtrt_stop( DTRT *p );
+IMPORT void   dtrt_restart( DTRT *p );
+IMPORT void   dtrt_seek_by( DTRT *p, INT ms );
+IMPORT INT    dtrt_tracks( DTRT *p, UB (*names)[WM_LABEL_MAX], INT *idx, INT max );
+IMPORT void   dtrt_play_track( DTRT *p, INT k );
+IMPORT INT    dtrt_playing( DTRT *p );
+IMPORT INT    dtrt_now_playing( DTRT *p, UB *buf, INT max );
+
+/* dtrtwin.c: 基本動画再生, a record of 実時間制御TAD played in a window of the desktop's (DTOWN) */
+IMPORT void   dt_rtwin_open( DTWIN *from, CONST T_VOBJ *v );
 
 /* dtcab.c: the cabinet's menu and what its own items do */
 IMPORT ER     dt_cab_menu_make( DTWIN *d, ID *p_mid );
@@ -369,6 +523,43 @@ typedef struct {
 #define DT_PAPER_HF	3		/* ヘッダ/フッタ, and back to the form after */
 IMPORT INT    dt_paper_form( DTWIN *d, T_DTPAPER *pp );
 
+/*
+ * dtprint.c: 印刷 (design 11.22). The pages of a document or a figure
+ * as the layer that writes the file asks for them; the panels, 画面表示
+ * and the file put on the desktop; the pages a process hands over.
+ */
+
+typedef struct {
+	UINT		kind;		/* TV_KIND_DOC, TV_KIND_FIG */
+	T_TVDOC		*doc;		/* what is drawn: the window's, or a copy without links */
+	T_TVFIG		*fig;
+	CONST T_TAD	*src;
+	UW		paper;
+	INT		cols, rows;	/* a figure's sheets across and down */
+	INT		pw, ph;		/* a figure's sheet, in its own pixels */
+	T_TVDOC		*own_doc;	/* the copies made, freed after */
+	T_TVFIG		*own_fig;
+	T_TVRUN		*own_run;
+	T_TVPARA	*own_para;
+	T_TVSHAPE	*own_sh;
+} DTPRSRC;
+
+IMPORT void   dt_print_src_doc( DTPRSRC *s, T_PRNJOB *job, T_TVDOC *d, CONST T_TAD *src,
+				UW paper, CONST UB *name, BOOL links );
+IMPORT void   dt_print_src_fig( DTPRSRC *s, T_PRNJOB *job, T_TVFIG *f, CONST T_TAD *src,
+				UW paper, CONST UB *name, BOOL links );
+IMPORT void   dt_print_src_free( DTPRSRC *s );
+IMPORT ER     dt_print( DTWIN *host, T_PRNJOB *job );
+IMPORT ER     dt_print_ask( DTWIN *host, CONST T_PRNJOB *job, T_PRNSET *set, BOOL show );
+IMPORT ER     dt_print_out( DTWIN *host, CONST T_PRNJOB *job, CONST T_PRNSET *set );
+IMPORT void   dt_place_on_desktop( CONST TS_UUID *u, CONST UB *name );
+IMPORT ER     dt_place_in( CONST TS_UUID *box, CONST TS_UUID *u, CONST UB *name );
+IMPORT void   dt_print_window( DTWIN *d );
+IMPORT void   dt_print_vobj( DTWIN *from, CONST T_VOBJ *v );	/* 基本印刷 */
+IMPORT ER     dt_print_spool( CONST T_DTREQ *rq, T_DTANS *an );
+IMPORT void  *dt_spool_open( CONST TS_UUID *obj, T_PRNJOB *job, CONST UB *name );
+IMPORT void   dt_spool_close( void *sp );
+
 /* 実身/仮身検索: what is asked */
 #define DQ_NAME		0		/* 実身名 */
 #define DQ_RELATION	1		/* 続柄 */
@@ -405,6 +596,12 @@ IMPORT void   dd_mark_follow( INT sx, INT sy );
 IMPORT void   dd_mark_release( void );
 IMPORT void   dd_press( DTWIN *d, INT x, INT y, BOOL extend );
 IMPORT void   dd_type_text( DTWIN *d, CONST UB *s, INT n );
+/* Selected letters carried (a press on the selection, the hand moved), copied with the second button, let go */
+IMPORT BOOL   dd_sel_carrying( void );
+IMPORT void   dd_sel_copy( void );
+IMPORT void   dd_sel_release( INT sx, INT sy );
+/* Letters put into a text at a place on the screen (letters a program carried out) */
+IMPORT ER     dd_text_drop( DTWIN *t, INT sx, INT sy, CONST UB *s, INT n );
 
 /* The text input port: かな漢字変換 in the text windows (dttip.c) */
 IMPORT BOOL   tip_mode_key( DTWIN *d, UINT key, UINT mods );
@@ -421,7 +618,10 @@ IMPORT BOOL   dd_dragging( void );
 IMPORT void   dd_release( void );
 IMPORT void   dd_draw( DTWIN *d, INT gid );
 IMPORT void   dd_show_caret( DTWIN *d );
+IMPORT BOOL   dd_caret_rect( DTWIN *d, T_DPRECT *r );	/* where it blinks, in the work area */
 IMPORT BOOL   dd_command( DTWIN *d, INT cmd );
+IMPORT void   dd_menu_state( DTWIN *d, BOOL *p_comb, BOOL *p_turned );	/* 縦中横, 回転 of what is picked */
+IMPORT INT    dd_caret_px( DTWIN *d );	/* how tall the letters at the caret are */
 IMPORT void   dd_link_after( DTWIN *d, CONST TS_UUID *orig );
 IMPORT ER     dd_link_drop( DTWIN *t, INT sx, INT sy, CONST T_VOBJ *v );
 IMPORT BOOL   dd_clip_has( void );
@@ -493,6 +693,7 @@ IMPORT void   df_forget( DTWIN *d );
 IMPORT BOOL   df_text_press( DTWIN *d, INT x, INT y, UD when );
 IMPORT void   df_text_end( DTWIN *d );
 IMPORT void   df_text_begin( DTWIN *d, T_TADNODE *node, INT x, INT y );
+IMPORT ER     df_text_drop( DTWIN *d, INT sx, INT sy, CONST UB *s, INT n );
 IMPORT INT    df_fill_pattern( void );
 IMPORT BOOL   df_end_press( DTWIN *d, INT x, INT y );
 IMPORT BOOL   df_end_carrying( void );
@@ -529,6 +730,68 @@ IMPORT BOOL   dt_align_form( DTWIN *d, INT *p_h, INT *p_v );
 
 /* dttool.c: the system's own tools */
 IMPORT void   dt_trash_open( void );
+IMPORT void   dt_winlist_open( void );
+IMPORT void   dt_winlist_poll( void );
+
+/*
+ * dtscr.c: 画面印刷. The screen, the window in front or a rectangle
+ * dragged out on it taken as pixels (DT_SCR_*), with the pointer or
+ * without it, and made a figure object, put in the tray or printed.
+ */
+#define DT_SCR_SCREEN	0		/* 全画面 */
+#define DT_SCR_FRONT	1		/* 最前面ウィンドウのみ */
+#define DT_SCR_RANGE	2		/* 範囲指定 */
+IMPORT void   dt_scr_open( void );
+IMPORT void   dt_scr_poll( void );
+IMPORT BOOL   dt_scr_event( CONST T_WMEV *ev );
+
+/* dttrayv.c: 小物のトレー, every level of the tray shown in a window of the desktop's (DTOWN) */
+IMPORT void   dt_trayv_open( void );
+
+/* dtnotify.c: 通知, notices of processes in small windows of the desktop's (DT_RQ_NOTIFY) */
+IMPORT ER     dt_note_req( CONST T_DTREQ *rq, T_DTANS *an );
+IMPORT INT    dt_note_wid( INT i );
+
+/*
+ * dtfix.c: ディスク修復, its window and that of 障害情報 windows of the
+ * desktop's (DTOWN); dt_fix_poll follows the check, window or none
+ */
+IMPORT void   dt_fix_open( void );
+IMPORT void   dt_fix_boot( void );
+IMPORT void   dt_fix_poll( void );
+IMPORT ER     dt_scr_grab( UINT area, BOOL pointer, CONST T_DPRECT *range, UW **p_px,
+			   T_DPRECT *p_at );
+IMPORT ER     dt_scr_save( CONST UW *px, INT w, INT h, CONST UB *name, CONST char *vol,
+			   TS_UUID *p_uuid );
+IMPORT ER     dt_scr_tray( CONST UW *px, INT w, INT h );
+typedef struct {
+	CONST UW	*px;		/* the picture, w by h */
+	INT		w, h;
+} DTSCRPIC;
+IMPORT void   dt_scr_job( T_PRNJOB *job, CONST DTSCRPIC *pic, CONST UB *name );
+
+/*
+ * What a rectangle being dragged out shows beside the pointer at (x, y):
+ * the DT_SCR_LOUPE_SRC square of pixels round it, without the pointer,
+ * each DT_SCR_LOUPE_ZOOM times as large in a frame, the pixel under the
+ * pointer outlined, into out (DT_SCR_LOUPE_SIDE squared), and where it
+ * goes on the screen, below and right of the pointer or on the side
+ * that has room.
+ */
+#define DT_SCR_LOUPE_SRC	21
+#define DT_SCR_LOUPE_ZOOM	6
+#define DT_SCR_LOUPE_SIDE	( DT_SCR_LOUPE_SRC * DT_SCR_LOUPE_ZOOM + 4 )
+#define DT_SCR_LOUPE_GAP	24
+IMPORT ER     dt_scr_loupe( INT x, INT y, UW *out, T_DPRECT *p_at );
+
+/* dttype.c: letters a program types into the window the keys went to before (DT_RQ_TYPE) */
+IMPORT void   dt_type_poll( void );
+IMPORT ER     dt_type_req( CONST T_DTREQ *rq, T_DTANS *an );
+
+/* The administrator's rights asked of the person for a process (dtadmin.c, DT_RQ_ADMIN) */
+IMPORT ER     dt_admin_ask( ID pid, CONST UB *what, CONST TS_UUID *win );
+IMPORT ER     dt_admin_req( CONST T_DTREQ *rq, ID pid );
+IMPORT void   dt_win_icon( INT wid, CONST char *prog );
 IMPORT void   dt_search_open( DTWIN *from );
 IMPORT void   dt_network_open( DTWIN *from, CONST T_VOBJ *v );
 IMPORT ER     dt_tool_menu_make( DTWIN *d, BOOL on_vobj, ID *p_mid );

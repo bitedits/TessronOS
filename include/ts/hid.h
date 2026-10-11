@@ -100,6 +100,9 @@ IMPORT ER  ts_hid_stat( T_HIDSTAT *st );
  */
 IMPORT ER  knl_hid_inject( UINT src, CONST T_HIDEV *ev );
 
+/* The key held let stop repeating (a window closing) */
+IMPORT void knl_hid_repeat_cut( void );
+
 /*
  * A keyboard or a pointer there is, as its object shows it. id names
  * the interface while it is plugged in; a new one is never given an id

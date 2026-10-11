@@ -52,6 +52,16 @@ extern "C" {
 #define FN_ST_BOLD	0x0001
 #define FN_ST_ITALIC	0x0002
 
+/*
+ * The forms of the letters for a line written downwards: each letter is
+ * taken in the form the face's table of substitutions ('vert' of GSUB)
+ * gives for vertical writing -- the comma and the full stop in the upper
+ * right of their box, the brackets, the long vowel and the dashes turned,
+ * the small kana moved up and to the right. A letter the table does not
+ * name is drawn as it is.
+ */
+#define FN_ST_VERT	0x0004
+
 /* What a face measures, in pixels at the size it is set to */
 typedef struct {
 	INT	ascent;			/* above the baseline */
@@ -134,6 +144,34 @@ IMPORT INT fn_draw( INT gid, ID fid, INT x, INT y, CONST UB *utf8, UW colour );
 
 /* The same walk without drawing: how wide the text would be */
 IMPORT INT fn_width( ID fid, CONST UB *utf8 );
+
+/*
+ * The same down a line written from the top: each letter stands in a box
+ * as wide and as tall as the size, its middle on the line x = cx, the
+ * first box's top at y, each box under the one before. A letter is
+ * centred across the box by its advance and set in it as the face's em
+ * square sets it (the em square's top is at the box's top). A face
+ * turned (fn_set_angle) puts each letter down turned in its own box,
+ * which then takes as much of the line as the turned box is tall: the
+ * letters of a word turned by ninety degrees read downwards. Answers how
+ * far down the pen moved; fn_vwidth answers that without drawing.
+ * Letters in FN_ST_VERT whose face has no vertical form of their own --
+ * the comma and full stop, the brackets, the long vowel, the dashes --
+ * are moved to the upper right or turned by the layer itself.
+ */
+IMPORT INT fn_vdraw( INT gid, ID fid, INT cx, INT y, CONST UB *utf8, UW colour );
+IMPORT INT fn_vwidth( ID fid, CONST UB *utf8 );
+
+/* Whether a letter has a vertical form of its own in the face */
+IMPORT BOOL fn_has_vert( ID fid, UW cp );
+
+/*
+ * A table of the face's file by its tag (four letters, the first the
+ * highest byte), copied into buf: what a file of pages needs to carry
+ * the face with it (design 11.22). With buf NULL only the length is
+ * said; *p_len is the room in buf, and the length on return.
+ */
+IMPORT ER  fn_sfnt_table( ID fid, UW tag, UB *buf, SZ *p_len );
 
 /*
  * How many bytes of a UTF-8 string fit in a given width. What a text

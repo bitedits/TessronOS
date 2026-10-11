@@ -134,6 +134,15 @@ extern __UINT64_TYPE__	knl_rp1_dma_offset;
 
 #define DBG_UART_PA		PL011_UART10_PA		/* console used by boot.S (before the MMU) */
 
+/*
+ * The processor this image is for (MIDR part number: Cortex-A76), and
+ * where boot.S says so when it finds another one: UART0 of the Raspberry
+ * Pi 4 (header pins 8 and 10)
+ */
+#define BOOT_MIDR_PART		0xD0B
+#define BOOT_OTHER_UART_PA	0xFE201000
+#define BOOT_IMAGE_FOR		"Raspberry Pi 5 and Compute Module 5 (BCM2712)"
+
 /* Kernel virtual addresses (device window) */
 #define GICD_BASE		DEV_BASE(GICD_PA)
 #define GICC_BASE		DEV_BASE(GICC_PA)

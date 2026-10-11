@@ -103,6 +103,102 @@ EXPORT INT tm_log_read( UD *p_pos, UB *buf, INT max )
 }
 
 /*
+ * Urgent output: what a processor says as the system stops -- an
+ * exception in the kernel, a processor that takes no interrupt, a lock
+ * nobody lets go of (lockup.c). It does not wait for the console's lock,
+ * which may be held by the very processor that stopped; it goes to the
+ * UART at once, a character at a time, polled. One processor says such
+ * a thing at a time; one that has been at it for a second is taken to
+ * have stopped saying it, and the next goes on. Ordinary output that
+ * meets it waits, at a character, until it is over (a second at most),
+ * so that the two do not run into each other.
+ */
+#define TM_FREE		(~(UW)0)
+
+LOCAL volatile UW	tm_urgent_cpu = TM_FREE;
+LOCAL UW		tm_urgent_depth = 0;
+
+Inline UD tm_now( void )
+{
+	UD	t;
+
+	Asm("isb; mrs %0, cntpct_el0" : "=r"(t) :: "memory");
+	return t;
+}
+
+Inline UD tm_frq( void )
+{
+	UD	f;
+
+	Asm("mrs %0, cntfrq_el0" : "=r"(f));
+	return ( f != 0 ) ? f : 1000000;
+}
+
+EXPORT UINT tm_urgent_begin( void )
+{
+	UINT	intsts = disint();
+	UW	me = tm_cpu();
+	UD	t0;
+
+	if ( tm_urgent_cpu == me ) {
+		tm_urgent_depth++;
+		return intsts;
+	}
+	t0 = tm_now();
+	for (;;) {
+		UW	exp = TM_FREE;
+
+		if ( __atomic_compare_exchange_n(&tm_urgent_cpu, &exp, me, FALSE,
+						 __ATOMIC_ACQUIRE, __ATOMIC_RELAXED) ) {
+			break;
+		}
+		if ( tm_now() - t0 > tm_frq() ) {
+			__atomic_store_n(&tm_urgent_cpu, me, __ATOMIC_RELEASE);
+			break;
+		}
+	}
+	tm_urgent_depth = 1;
+	return intsts;
+}
+
+EXPORT void tm_urgent_end( UINT intsts )
+{
+	if ( tm_urgent_cpu == tm_cpu() && --tm_urgent_depth == 0 ) {
+		__atomic_store_n(&tm_urgent_cpu, TM_FREE, __ATOMIC_RELEASE);
+	}
+	enaint(intsts);
+}
+
+EXPORT void tm_urgent_puts( const UB *s )
+{
+	static const UB	CR = CHR_CR;
+
+	for ( ; *s != '\0'; s++ ) {
+		if ( *s == CHR_LF ) {
+			tm_snd_dat(&CR, 1);
+		}
+		tm_snd_dat(s, 1);
+		tm_log[tm_log_end % TM_LOG_SIZE] = *s;
+		tm_log_end++;
+	}
+}
+
+/* Ordinary output waits while another processor says something urgent */
+LOCAL void tm_urgent_wait( void )
+{
+	UW	u = tm_urgent_cpu;
+	UD	t0;
+
+	if ( u == TM_FREE || u == tm_cpu() ) {
+		return;
+	}
+	t0 = tm_now();
+	while ( tm_urgent_cpu != TM_FREE && tm_now() - t0 < tm_frq() ) {
+		;
+	}
+}
+
+/*
  * libtm_init() - libtm Initialize
  * supported only on wait != 0 (polling not supported)
  */
@@ -183,6 +279,7 @@ EXPORT INT tm_putchar( INT c )
 	UINT imask;
 
 	imask = tm_out_lock();
+	tm_urgent_wait();
 	if (buf == CHR_LF) {
 		tm_snd_dat((const UB*)&CR, 1);
 	}

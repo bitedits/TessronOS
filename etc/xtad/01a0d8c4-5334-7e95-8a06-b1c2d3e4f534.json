@@ -1,0 +1,55 @@
+{
+  "name": "カード用紙",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2026-10-03T00:00:00Z",
+  "updateDate": "2026-10-03T00:00:00Z",
+  "accessDate": "2026-10-03T00:00:00Z",
+  "periodDate": null,
+  "refCount": 1,
+  "recordCount": 3,
+  "editable": true,
+  "deletable": true,
+  "readable": true,
+  "maker": "TRON User",
+  "window": {
+    "pos": {
+      "x": 120,
+      "y": 90
+    },
+    "width": 560,
+    "height": 440,
+    "minWidth": 360,
+    "minHeight": 240,
+    "resizable": true,
+    "scrollable": true,
+    "backgroundColor": "#ffffff"
+  },
+  "applist": {
+    "tessronos-microcard": {
+      "name": "マイクロカード",
+      "defaultOpen": true
+    },
+    "basic-text-editor": {
+      "name": "基本文章編集",
+      "defaultOpen": false
+    }
+  },
+  "records": [
+    {
+      "rid": 1,
+      "rt": 1,
+      "sub": 0
+    },
+    {
+      "rid": 2,
+      "rt": 31,
+      "sub": 1
+    },
+    {
+      "rid": 3,
+      "rt": 31,
+      "sub": 2
+    }
+  ]
+}

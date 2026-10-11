@@ -125,6 +125,40 @@ struct task_control_block {
 	volatile INT	svcdepth;
 	INT	svcin;
 
+	/*
+	 * The time the task has run, in counts of the system counter
+	 * (CNTPCT_EL0): from the dispatcher taking it until its processor
+	 * gives its context up again (smp.c, knl_acct_leave). Interrupts
+	 * taken while it runs are counted in it.
+	 */
+	UD	runcyc;
+
+	/*
+	 * Turns among the tasks of one priority (design 4.3.1): how long
+	 * the task may run while another of its priority waits (ms; 0: it
+	 * is not made to give way), whether that was set by tk_chg_slt
+	 * rather than taken from its band, and when it last began to run
+	 * (counts of the system counter, set as a processor takes it).
+	 */
+	UW	slicetime;
+	BOOL	slice_set;
+	UD	slice_at;
+
+#if CNF_STK_WATCH
+	/*
+	 * make STKWATCH=1: the return addresses of the task's frames when
+	 * its processor gave its context up, where each one lies and what
+	 * it was, and the processor and time of that; the dispatcher reads
+	 * them again before the task runs (smp.c, design 4.7.6).
+	 */
+#define STK_WATCH_N	12
+	UD	*swaddr[STK_WATCH_N];
+	UD	swval[STK_WATCH_N];
+	INT	swn;
+	UB	swprc;
+	UD	swat;
+#endif
+
 /* TCB System Dependent definition */
 	TCB_SYSDEPEND_INFO
 };
@@ -141,6 +175,10 @@ struct task_control_block {
 #define TaskStackFoot(tcb)	( (UD *)((VB *)(tcb)->isstack - (tcb)->sstksz) )
 
 IMPORT void knl_stack_broken( TCB *tcb );
+#if CNF_STK_WATCH
+IMPORT void knl_stk_snap( TCB *tcb );
+IMPORT void knl_stack_overwritten( TCB *tcb, UD *at, UD was, UB prc, UD since );
+#endif
 
 /*
  * Task dispatch disable state

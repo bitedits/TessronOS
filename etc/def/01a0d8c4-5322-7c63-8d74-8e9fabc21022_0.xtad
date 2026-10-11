@@ -1,0 +1,82 @@
+<tad version="1.0" encoding="UTF-8" filename="電卓のデータボックス">
+<document>
+<p>電卓のデータボックス</p>
+<p>電卓の窓のパネル。パネル1が標準の電卓、パネル2が関数電卓で、上の表示の欄はプログラムが描く。押しボタンの番号が電卓のキーの番号である。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,260,240" title="電卓" kind="bare">
+<button num="39" rect="8,68,52,96">MC</button>
+<button num="40" rect="58,68,102,96">MR</button>
+<button num="41" rect="108,68,152,96">M−</button>
+<button num="42" rect="158,68,202,96">M+</button>
+<button num="43" rect="208,68,252,96">C</button>
+<button num="27" rect="8,102,52,130">7</button>
+<button num="28" rect="58,102,102,130">8</button>
+<button num="29" rect="108,102,152,130">9</button>
+<button num="34" rect="158,102,202,130">÷</button>
+<button num="44" rect="208,102,252,130">CE</button>
+<button num="24" rect="8,136,52,164">4</button>
+<button num="25" rect="58,136,102,164">5</button>
+<button num="26" rect="108,136,152,164">6</button>
+<button num="33" rect="158,136,202,164">×</button>
+<button num="38" rect="208,136,252,164">√</button>
+<button num="21" rect="8,170,52,198">1</button>
+<button num="22" rect="58,170,102,198">2</button>
+<button num="23" rect="108,170,152,198">3</button>
+<button num="32" rect="158,170,202,198">−</button>
+<button num="36" rect="208,170,252,198">%</button>
+<button num="20" rect="8,204,52,232">0</button>
+<button num="30" rect="58,204,102,232">.</button>
+<button num="37" rect="108,204,152,232">±</button>
+<button num="31" rect="158,204,202,232">+</button>
+<button num="35" rect="208,204,252,232">=</button>
+</panel>
+<panel num="2" rect="0,0,468,240" title="電卓" kind="bare">
+<button num="50" rect="8,68,52,96">sin</button>
+<button num="51" rect="58,68,102,96">cos</button>
+<button num="52" rect="108,68,152,96">tan</button>
+<button num="67" rect="158,68,202,96">D/R</button>
+<button num="53" rect="8,102,52,130">asin</button>
+<button num="54" rect="58,102,102,130">acos</button>
+<button num="55" rect="108,102,152,130">atan</button>
+<button num="64" rect="158,102,202,130">π</button>
+<button num="56" rect="8,136,52,164">log</button>
+<button num="57" rect="58,136,102,164">ln</button>
+<button num="58" rect="108,136,152,164">10^x</button>
+<button num="59" rect="158,136,202,164">e^x</button>
+<button num="60" rect="8,170,52,198">x²</button>
+<button num="61" rect="58,170,102,198">x^y</button>
+<button num="62" rect="108,170,152,198">1/x</button>
+<button num="63" rect="158,170,202,198">n!</button>
+<button num="65" rect="8,204,52,232">(</button>
+<button num="66" rect="58,204,102,232">)</button>
+<button num="46" rect="108,204,152,232">00</button>
+<button num="45" rect="158,204,202,232">←</button>
+<button num="39" rect="216,68,260,96">MC</button>
+<button num="40" rect="266,68,310,96">MR</button>
+<button num="41" rect="316,68,360,96">M−</button>
+<button num="42" rect="366,68,410,96">M+</button>
+<button num="43" rect="416,68,460,96">C</button>
+<button num="27" rect="216,102,260,130">7</button>
+<button num="28" rect="266,102,310,130">8</button>
+<button num="29" rect="316,102,360,130">9</button>
+<button num="34" rect="366,102,410,130">÷</button>
+<button num="44" rect="416,102,460,130">CE</button>
+<button num="24" rect="216,136,260,164">4</button>
+<button num="25" rect="266,136,310,164">5</button>
+<button num="26" rect="316,136,360,164">6</button>
+<button num="33" rect="366,136,410,164">×</button>
+<button num="38" rect="416,136,460,164">√</button>
+<button num="21" rect="216,170,260,198">1</button>
+<button num="22" rect="266,170,310,198">2</button>
+<button num="23" rect="316,170,360,198">3</button>
+<button num="32" rect="366,170,410,198">−</button>
+<button num="36" rect="416,170,460,198">%</button>
+<button num="20" rect="216,204,260,232">0</button>
+<button num="30" rect="266,204,310,232">.</button>
+<button num="37" rect="316,204,360,232">±</button>
+<button num="31" rect="366,204,410,232">+</button>
+<button num="35" rect="416,204,460,232">=</button>
+</panel>
+</databox>
+</tad>

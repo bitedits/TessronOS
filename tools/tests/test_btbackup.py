@@ -371,6 +371,38 @@ class TestHostC(unittest.TestCase):
         self.assertEqual(out.count('overlayData="%s"' % words), 1, out)
         self.assertIn('chsz="14"', out)
 
+    def test_tad_loose_p(self):
+        # a </p> that closes no <p> ends a paragraph begun without one, and
+        # a <p> left open ends with its text
+        row = '<calcPos cell="A%d"/>\t<calcPos cell="B%d"/>\t<calcPos cell="C%d"/>\t<calcPos cell="D%d"/></p>\n'
+        xml = ('<tad version="1.0" filename="loose" encoding="UTF-8">\n<document>\n<p>\n'
+               + row % ((1,) * 4) + row % ((2,) * 4) + row % ((3,) * 4)
+               + '<p>\n</document>\n</tad>\n')
+        path = os.path.join(self.tmp, "loose.xtad")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(xml)
+        r = self.run_exe("tad", path)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        out = r.stdout.decode("utf-8")
+        self.assertIn(" check 0 ", out)
+        for row in (1, 2, 3):
+            self.assertIn('<p><calcPos cell="A%d"/>' % row, out)
+        self.assertEqual(out.count("<p>"), 4, out)
+
+    def test_tad_calc_template(self):
+        # 基本表計算's 原紙 holds one paragraph per row, each opened and closed
+        with open(os.path.join(XTAD, "019b54a4-6ccf-72f7-e320-c98e4a0bab4e_0.xtad"), encoding="utf-8") as f:
+            x = f.read()
+        self.assertEqual(x.count("<p>"), 3)
+        self.assertEqual(x.count("</p>"), 3)
+        r = self.run_exe("tad", os.path.join(XTAD, "019b54a4-6ccf-72f7-e320-c98e4a0bab4e_0.xtad"))
+        self.assertEqual(r.returncode, 0, r.stdout)
+        out = r.stdout.decode("utf-8")
+        self.assertIn(" check 0 ", out)
+        for row in (1, 2, 3):
+            self.assertIn('<p><calcPos cell="A%d"/>' % row, out)
+        self.assertEqual(out.count("<p>"), 3, out)
+
     def test_tad(self):
         # every record of etc/xtad is written as TAD that walks clean
         names = [f for f in os.listdir(XTAD) if f.endswith(".xtad")]

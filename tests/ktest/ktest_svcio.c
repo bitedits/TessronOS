@@ -141,7 +141,7 @@ LOCAL void test_media_path( void )
  */
 LOCAL CONST char *usb_fat( void )
 {
-#ifdef RPI5
+#if KT_BOARD
 	tm_printf((UB *)"  no USB disk is written on the Raspberry Pi 5: one there is the user's\n");
 	return NULL;
 #else
@@ -337,7 +337,6 @@ LOCAL void test_mount_dev( void )
 	/* refused: not a key, flags not known, not a disk, rights short of the mount */
 	KT_ASSERT_ER(fs_attach_dev(0, "fatfs", FS_MNT_RDONLY), EX_BADF);
 	KT_ASSERT_ER(fs_attach_dev(kr, "fatfs", 0x10), EX_INVAL);
-	KT_ASSERT_ER(fs_attach_dev(kr, NULL, FS_MNT_RDONLY), EX_INVAL);
 	KT_ASSERT_ER(fs_attach_dev(kc, "fatfs", FS_MNT_RDONLY), EX_NOTBLK);
 	KT_ASSERT_ER(fs_attach_dev(port, "fatfs", FS_MNT_RDONLY), EX_NOTBLK);
 	KT_ASSERT_ER(fs_attach_dev(ka, "fatfs", FS_MNT_RDONLY), EX_ACCES);
@@ -351,11 +350,17 @@ LOCAL void test_mount_dev( void )
 	KT_ASSERT(!notice(port, OB_E_CHANGE, &mobj, 0));
 	KT_ASSERT(shows_mount(kb, "\"mount\":{\"path\":\"/boot\",\"fs\":\"fatfs\""));
 
+	/* no fimp named: the kind on the disk chooses it (FAT here), and the mount is undone */
+	KT_ASSERT_ER(fs_attach_dev(kr, NULL, FS_MNT_RDONLY), EX_OK);
+	KT_ASSERT(notice(port, OB_E_CHANGE, &mobj, 0));
+	KT_ASSERT_ER(fs_detach_dev(kr), EX_OK);
+	KT_ASSERT(notice(port, OB_E_CHANGE, &mobj, 0));
+
 	/* read only: mounted, shown on the object, told, listed, read, and nothing written */
 	KT_ASSERT_ER(fs_attach_dev(kr, "fatfs", FS_MNT_RDONLY), EX_OK);
 	KT_ASSERT(notice(port, OB_E_CHANGE, &mobj, 0));
 	str_cat(want, "\"tessronos\":{\"mount\":{\"path\":\"", mpath);
-	str_cat(want, want, "\",\"fs\":\"fatfs\",\"readonly\":true}}");
+	str_cat(want, want, "\",\"fs\":\"fatfs\",\"readonly\":true}");
 	KT_ASSERT(shows_mount(ka, want));
 	KT_ASSERT_ER(fs_attach_dev(krw, "fatfs", 0), EX_BUSY);		/* the device */
 	KT_ASSERT_ER(fs_attach_dev(kw, "fatfs", FS_MNT_RDONLY), EX_BUSY);	/* the disk it is on */
@@ -1382,7 +1387,7 @@ LOCAL void test_prc_watch( void )
 	}
 	if ( key > 0 ) ob_cls_obj(key);
 	if ( t != NULL ) Kfree(t);
-#ifdef RPI5
+#if KT_BOARD
 	KT_SKIP("the rest takes a disk out (Raspberry Pi 5: only the QEMU monitor does that)");
 #endif
 	if ( ts_usb_stat(&st) < E_OK ) KT_SKIP("no USB");

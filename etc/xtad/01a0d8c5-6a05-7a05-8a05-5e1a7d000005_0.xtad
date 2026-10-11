@@ -1,0 +1,43 @@
+<tad version="1.0" encoding="UTF-8" filename="10.5 音声プレイリスト">
+<realtime autoplay="false" preload="metadata" loop="false">
+<figure>
+<figView top="0" left="0" right="1920" bottom="1080"/>
+<figDraw top="0" left="0" right="1920" bottom="1080"/>
+<figScale hunit="-72" vunit="-72"/>
+<rect lineType="0" lineWidth="0" f_pat="1" left="0" top="0" right="1920" bottom="1080" fillColor="#16213e" zIndex="0"/>
+<document>
+<docView viewleft="120" viewtop="400" viewright="1800" viewbottom="500"/>
+<docDraw drawleft="120" drawtop="400" drawright="1800" drawbottom="500"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="10"/>
+<font size="72"/>
+<font color="#FFFFFF"/>
+10.5 音声プレイリスト
+</document>
+<document>
+<docView viewleft="120" viewtop="540" viewright="1800" viewbottom="620"/>
+<docDraw drawleft="120" drawtop="540" drawright="1800" drawbottom="620"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="10"/>
+<font size="36"/>
+<font color="#A0B4D0"/>
+三曲を順に再生する(onended で次へ)
+</document>
+</figure>
+<realData autoplay="inherit" startDelay="0">
+<stream number="1">
+<deviceName>audio:</deviceName>
+</stream>
+<!-- 全体リピートのためのwhileループ -->
+<while>
+<do>
+<!-- track1 → track2 → track3 の順に再生 -->
+<audio id="track1" href="{realId}_0_0.mp3" format="mp3" title="Morning Glory" artist="Oasis" album="(What's the Story) Morning Glory?" trackNumber="1" autoplay="true" onended="play:track2"/>
+<audio id="track2" href="{realId}_0_1.mp3" format="mp3" title="Wonderwall" artist="Oasis" album="(What's the Story) Morning Glory?" trackNumber="2" trigger="manual" onended="play:track3"/>
+<audio id="track3" href="{realId}_0_2.mp3" format="mp3" title="Don't Look Back in Anger" artist="Oasis" album="(What's the Story) Morning Glory?" trackNumber="3" trigger="manual" onended="jump:loop_end"/>
+<label id="loop_end"/>
+</do>
+</while>
+</realData>
+</realtime>
+</tad>

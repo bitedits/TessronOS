@@ -1,12 +1,12 @@
 <tad version="1.0" encoding="UTF-8" filename="ネットワーク設定のデータボックス">
 <document>
 <p>ネットワーク設定のデータボックス</p>
-<p>ネットワーク設定の窓のパネルと、尋ねるパネルの定義。</p>
+<p>ネットワーク設定の窓のパネルと、尋ねるパネルの定義。窓はIPv4の〈ネットワーク〉とIPv6の〈ＩＰｖ６〉のタブを持ち、それぞれ設定と状態のページがある。</p>
 </document>
 <databox>
-<panel num="1" rect="0,0,435,324" title="ネットワーク設定" kind="bare">
-<tags num="100" rect="0,0,435,324" inner="4,28,431,320" value="1">
-<tag>＠ネットワーク</tag><tag>アドレス</tag><tag>＋状態</tag>
+<panel num="1" rect="0,0,520,344" title="ネットワーク設定" kind="bare">
+<tags num="100" rect="0,0,520,344" inner="4,28,516,340" value="1">
+<tag>＠ネットワーク</tag><tag>アドレス</tag><tag>＋状態</tag><tag>＠ＩＰｖ６</tag><tag>設定</tag><tag>＋状態</tag>
 </tags>
 <text sheet="1" x="8" y="80">自ホスト：</text>
 <box num="11" sheet="1" rect="136,58,264,88" max="79" ascii="true"/>
@@ -34,6 +34,35 @@
 <text sheet="2" x="8" y="182">ＤＮＳサーバ：</text>
 <box num="34" sheet="2" rect="136,160,408,190" off="true"/>
 <button num="35" sheet="2" rect="320,272,408,296">表示更新</button>
+<text sheet="3" x="8" y="80">ＩＰｖ６：</text>
+<switch num="41" sheet="3" rect="136,61,224,85">使用する</switch>
+<text sheet="3" x="8" y="114">アドレス：</text>
+<select num="42" sheet="3" rect="136,94,420,128" across="true" value="1"><name>自動</name><name>固定</name><name>使わない</name></select>
+<text sheet="3" x="8" y="152">一時アドレス：</text>
+<switch num="43" sheet="3" rect="136,133,224,157">使用する</switch>
+<text sheet="3" x="232" y="152">（プライバシー拡張）</text>
+<text sheet="3" x="8" y="186">固定アドレス：</text>
+<box num="44" sheet="3" rect="136,164,420,194" max="45" ascii="true"/>
+<text sheet="3" x="428" y="186">／</text>
+<serial num="45" sheet="3" rect="448,164,508,194"><f w="3" lo="1" hi="128"/></serial>
+<text sheet="3" x="8" y="220">ルータ：</text>
+<box num="46" sheet="3" rect="136,198,508,228" max="45" ascii="true"/>
+<text sheet="3" x="8" y="254">ＤＮＳサーバ１：</text>
+<box num="47" sheet="3" rect="136,232,508,262" max="45" ascii="true"/>
+<text sheet="3" x="8" y="288">ＤＮＳサーバ２：</text>
+<box num="48" sheet="3" rect="136,266,508,296" max="45" ascii="true"/>
+<text sheet="3" x="136" y="322">空欄のＤＮＳサーバはルータの通知を使用します</text>
+<text sheet="4" x="8" y="80">設定：</text>
+<box num="56" sheet="4" rect="136,58,508,88" off="true"/>
+<text sheet="4" x="8" y="114">リンクローカル：</text>
+<box num="51" sheet="4" rect="136,92,508,122" off="true"/>
+<text sheet="4" x="8" y="146">グローバル：</text>
+<list num="52" sheet="4" rect="136,126,508,226"/>
+<text sheet="4" x="8" y="252">ルータ：</text>
+<box num="53" sheet="4" rect="136,230,508,260" off="true"/>
+<text sheet="4" x="8" y="286">ＤＮＳサーバ：</text>
+<box num="54" sheet="4" rect="136,264,508,294" off="true"/>
+<button num="55" sheet="4" rect="420,306,508,330">表示更新</button>
 </panel>
 <panel num="10" rect="0,0,440,128" title="ネットワーク設定">
 <text num="1" x="24" y="40"> </text>

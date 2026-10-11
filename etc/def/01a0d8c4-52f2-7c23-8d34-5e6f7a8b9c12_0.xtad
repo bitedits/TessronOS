@@ -1,0 +1,26 @@
+<tad version="1.0" encoding="UTF-8" filename="かな入力練習のデータボックス">
+<document>
+<p>かな入力練習のデータボックス</p>
+<p>全問を打ち終えたときの結果のパネルと、先読みキー数を尋ねるパネルの定義。結果の文字はかな入力練習が書き換える。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,350,286" title="結果">
+<text num="1" x="128" y="34">全問完了!</text>
+<text num="2" x="40" y="66"> </text>
+<text num="3" x="40" y="90"> </text>
+<text num="4" x="40" y="114"> </text>
+<text num="5" x="40" y="138"> </text>
+<text num="6" x="40" y="162"> </text>
+<text num="7" x="40" y="186"> </text>
+<text num="8" x="40" y="210"> </text>
+<button num="101" rect="40,240,192,268" answer="ok" emph="true">最初からやり直す</button>
+<button num="102" rect="210,240,310,268" answer="cancel">閉じる</button>
+</panel>
+<panel num="2" rect="0,0,300,128" title="先読みキー数">
+<text x="20" y="42">先読みキー数(1〜8)：</text>
+<serial num="11" rect="196,20,252,50"><f w="1" lo="1" hi="8" value="4"/></serial>
+<button num="101" rect="104,88,192,114" answer="cancel">取消</button>
+<button num="102" rect="200,88,288,114" answer="ok" emph="true">設定</button>
+</panel>
+</databox>
+</tad>

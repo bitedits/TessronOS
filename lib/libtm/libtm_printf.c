@@ -329,6 +329,49 @@ EXPORT INT	tm_printf( const UB *format, ... )
 }
 
 /*
+ *	Urgent output to the console (libtm.c): a piece at a time, as
+ *	tm_vsprintf hands them over, without the console's lock
+ */
+#define TM_URGENT_PIECE	96
+
+LOCAL	void	out_urgent( UB *str, INT len, OutPar *par )
+{
+	if (str == NULL) {	/* Flush */
+		par->bufp[par->cnt] = '\0';
+		tm_urgent_puts(par->bufp);
+		par->cnt = 0;
+		return;
+	}
+	par->len += len;
+	while (--len >= 0) {
+		if (par->cnt >= TM_URGENT_PIECE - 1) {
+			par->bufp[par->cnt] = '\0';
+			tm_urgent_puts(par->bufp);
+			par->cnt = 0;
+		}
+		par->bufp[par->cnt++] = *str++;
+	}
+}
+
+EXPORT INT	tm_printf_urgent( const UB *format, ... )
+{
+	UB	obuf[TM_URGENT_PIECE];
+	OutPar	par;
+	va_list	ap;
+	UINT	intsts;
+
+	par.len = par.cnt = 0;
+	par.bufp = obuf;
+	intsts = tm_urgent_begin();
+	va_start(ap, format);
+	tm_vsprintf(out_urgent, &par, format, ap);
+	va_end(ap);
+	out_urgent(NULL, 0, &par);
+	tm_urgent_end(intsts);
+	return par.len;
+}
+
+/*
  *	Output to buffer
  */
 LOCAL	void	out_buf( UB *str, INT len, OutPar *par )
@@ -358,6 +401,11 @@ EXPORT INT	tm_printf( const UB *format, ... )
 }
 
 EXPORT INT	tm_sprintf( UB *str, const UB *format, ... )
+{
+	return (-1);
+}
+
+EXPORT INT	tm_printf_urgent( const UB *format, ... )
 {
 	return (-1);
 }

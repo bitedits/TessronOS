@@ -30,12 +30,13 @@
 #include <ts/fs.h>
 #include <ts/tsfs.h>
 #include <ts/tsfsobj.h>
+#include <ts/tsfsck.h>
 #include <ts/json.h>
 #include <ts/proc.h>
 #include <tk/smem.h>
 
-#define TSFS_MAX_VOL	4
-#define TSFS_MAX_OD	32
+#define TSFS_MAX_VOL	CNF_MAX_VOL	/* volumes at once: the disks times their partitions */
+#define TSFS_MAX_OD	1024		/* objects open at once, on every volume together */
 #define TSFS_JSON_MAX	16384		/* bytes of metadata handled at a time */
 #define TSFS_PATH_MAX	256		/* the store's own paths: its root and a UUID's names */
 
@@ -53,8 +54,16 @@ typedef struct {
 	UB	root[TSFS_PATH_MAX];	/* "/boot/TSFS" */
 	INT	rootlen;
 	UINT	flags;
+	ID	no;		/* its number, where it sits in the table */
+	TS_UUID	vuuid;		/* the FAT store's own UUID (TSFS_VOLID_FILE); the native one's is in its superblock */
 	BOOL	used;
 } TSFSVOL;
+
+/*
+ * The file a store on FAT keeps its own UUID in, beside its objects'
+ * files: the UUID as text. Made when the store is first opened.
+ */
+#define TSFS_VOLID_FILE	"TSFSVOL.ID"
 
 typedef struct {
 	TSFSVOL	*vol;
@@ -63,7 +72,15 @@ typedef struct {
 	BOOL	used;
 } TSFSOBJ;
 
-LOCAL TSFSVOL	tsfs_vol[TSFS_MAX_VOL];
+/*
+ * A volume's entry is made the first time one more volume is opened
+ * than there are entries, and is kept, free or in use, from then on: a
+ * number given out stays a number of this table, and what is looked up
+ * by it without the lock is never memory given back. tsfs_nvol is how
+ * many have been made.
+ */
+LOCAL TSFSVOL	*tsfs_vol[TSFS_MAX_VOL];
+LOCAL INT	tsfs_nvol = 0;
 LOCAL TSFSOBJ	tsfs_od[TSFS_MAX_OD];
 LOCAL ID	tsfs_mtxid = 0;		/* the two tables */
 
@@ -500,10 +517,13 @@ LOCAL INT rec_count( TSFSVOL *v, CONST TS_UUID *uuid )
 
 LOCAL TSFSVOL *vol_of( ID vol )
 {
-	if ( vol < 1 || vol > TSFS_MAX_VOL || !tsfs_vol[vol - 1].used ) {
+	TSFSVOL	*v;
+
+	if ( vol < 1 || vol > TSFS_MAX_VOL ) {
 		return NULL;
 	}
-	return &tsfs_vol[vol - 1];
+	v = __atomic_load_n(&tsfs_vol[vol - 1], __ATOMIC_ACQUIRE);
+	return ( v != NULL && v->used ) ? v : NULL;
 }
 
 LOCAL TSFSOBJ *od_of( ID od )
@@ -512,6 +532,36 @@ LOCAL TSFSOBJ *od_of( ID od )
 		return NULL;
 	}
 	return &tsfs_od[od - 1];
+}
+
+/* The FAT store's own UUID, read from its file, or made and written there */
+LOCAL void store_id( TSFSVOL *v )
+{
+	UB	p[TSFS_PATH_MAX], t[TS_UUID_STRLEN + 8];
+	INT	n, k;
+	TS_UUID	u;
+
+	k = s_put(p, 0, TSFS_PATH_MAX, (CONST char *)v->root);
+	k = s_put(p, k, TSFS_PATH_MAX, "/");
+	(void)s_put(p, k, TSFS_PATH_MAX, TSFS_VOLID_FILE);
+	n = read_file(p, t, sizeof(t) - 1);
+	if ( n >= TS_UUID_STRLEN ) {
+		t[TS_UUID_STRLEN] = 0;
+		if ( ts_str_to_uuid((CONST char *)t, &u) >= E_OK ) {
+			v->vuuid = u;
+			return;
+		}
+	}
+	if ( ts_gen_uuid(&u) < E_OK ) {
+		/* no clock yet: a random one (version 4) */
+		if ( ts_get_random(u.b, sizeof(u.b)) < E_OK ) return;
+		u.b[6] = (UB)( 0x40 | ( u.b[6] & 0x0F ) );
+		u.b[8] = (UB)( 0x80 | ( u.b[8] & 0x3F ) );
+	}
+	if ( ts_uuid_to_str(&u, (char *)t, sizeof(t)) >= E_OK
+	  && write_file(p, t, TS_UUID_STRLEN) >= EX_OK ) {
+		v->vuuid = u;
+	}
 }
 
 EXPORT ID ts_opn_vol( CONST char *path, UINT flags )
@@ -553,8 +603,17 @@ EXPORT ID ts_opn_vol( CONST char *path, UINT flags )
 	}
 
 	tk_loc_mtx(tsfs_mtxid, TMO_FEVR);
-	for ( i = 0; i < TSFS_MAX_VOL; i++ ) {
-		if ( !tsfs_vol[i].used ) { v = &tsfs_vol[i]; break; }
+	for ( i = 0; i < tsfs_nvol; i++ ) {
+		if ( !tsfs_vol[i]->used ) { v = tsfs_vol[i]; break; }
+	}
+	if ( v == NULL && tsfs_nvol < TSFS_MAX_VOL ) {
+		/* every entry is in use: one more, kept from now on */
+		v = (TSFSVOL *)Kcalloc(1, sizeof(TSFSVOL));
+		if ( v != NULL ) {
+			v->no = tsfs_nvol + 1;
+			__atomic_store_n(&tsfs_vol[tsfs_nvol], v, __ATOMIC_RELEASE);
+			tsfs_nvol++;
+		}
 	}
 	if ( v != NULL ) {
 		cmtx.exinf = NULL;
@@ -580,10 +639,14 @@ EXPORT ID ts_opn_vol( CONST char *path, UINT flags )
 	v->rootlen = len;
 	v->flags   = flags;
 	v->bvol    = bvol;
+	knl_memset(&v->vuuid, 0, sizeof(v->vuuid));
 	v->used    = TRUE;
 	tk_unl_mtx(tsfs_mtxid);
 
-	return (ID)(v - tsfs_vol) + 1;
+	if ( bvol <= 0 ) {
+		store_id(v);
+	}
+	return v->no;
 }
 
 EXPORT ER ts_cls_vol( ID vol )
@@ -610,6 +673,138 @@ EXPORT ER ts_cls_vol( ID vol )
 	tk_unl_mtx(tsfs_mtxid);
 
 	return ( bvol > 0 ) ? ts_obj_unmount(bvol) : E_OK;
+}
+
+EXPORT ER knl_tsfs_vol_info( ID vol, T_TSFSVINF *pk )
+{
+	TSFSVOL		*v = vol_of(vol);
+	T_TSFSBLK_SB	*sb;
+	INT		i, k;
+	ER		er = E_OK;
+
+	if ( v == NULL || pk == NULL ) {
+		return E_ID;
+	}
+	knl_memset(pk, 0, sizeof(*pk));
+	if ( v->bvol > 0 ) {
+		sb = (T_TSFSBLK_SB *)Kmalloc(sizeof(T_TSFSBLK_SB));
+		if ( sb == NULL ) {
+			return E_NOMEM;
+		}
+		er = ts_ref_vol_blk(v->bvol, sb);
+		if ( er >= E_OK ) {
+			pk->native = TRUE;
+			pk->rdonly = (BOOL)( ( sb->state & TSFSBLK_ST_ERROR ) != 0 );
+			pk->vuuid = sb->vol_uuid;
+			pk->top = sb->root_uuid;
+			for ( k = 0; k < TSFSBLK_LABEL_MAX && k < (INT)sizeof(pk->label) - 1
+				     && sb->label[k] != 0; k++ ) {
+				pk->label[k] = sb->label[k];
+			}
+			pk->label[k] = 0;
+		}
+		Kfree(sb);
+	} else {
+		pk->vuuid = v->vuuid;
+	}
+	tk_loc_mtx(tsfs_mtxid, TMO_FEVR);
+	for ( i = 0; i < TSFS_MAX_OD; i++ ) {
+		if ( tsfs_od[i].used && tsfs_od[i].vol == v ) pk->open++;
+	}
+	tk_unl_mtx(tsfs_mtxid);
+
+	return er;
+}
+
+EXPORT ER knl_tsfs_set_top( ID vol, CONST TS_UUID *uuid )
+{
+	TSFSVOL	*v = vol_of(vol);
+	ER	er;
+
+	if ( v == NULL ) {
+		return E_ID;
+	}
+	if ( v->bvol <= 0 ) {
+		return E_NOSPT;
+	}
+	vol_lock(v);
+	er = ts_set_top_blk(v->bvol, uuid);
+	vol_unlock(v);
+
+	return er;
+}
+
+EXPORT ER knl_tsfs_xref_obj( ID vol, TS_UUID *p_uuid )
+{
+	TSFSVOL		*v = vol_of(vol);
+	T_TSFSBLK_SB	*sb;
+	ER		er;
+
+	if ( v == NULL || p_uuid == NULL ) {
+		return E_ID;
+	}
+	if ( v->bvol <= 0 ) {
+		return E_NOSPT;
+	}
+	sb = (T_TSFSBLK_SB *)Kmalloc(sizeof(T_TSFSBLK_SB));
+	if ( sb == NULL ) {
+		return E_NOMEM;
+	}
+	er = ts_ref_vol_blk(v->bvol, sb);
+	if ( er >= E_OK ) {
+		*p_uuid = sb->xref_uuid;
+	}
+	Kfree(sb);
+	return er;
+}
+
+EXPORT ER knl_tsfs_set_xref( ID vol, CONST TS_UUID *uuid )
+{
+	TSFSVOL	*v = vol_of(vol);
+	ER	er;
+
+	if ( v == NULL ) {
+		return E_ID;
+	}
+	if ( v->bvol <= 0 ) {
+		return E_NOSPT;
+	}
+	vol_lock(v);
+	er = ts_set_xref_blk(v->bvol, uuid);
+	vol_unlock(v);
+
+	return er;
+}
+
+EXPORT ER knl_tsfs_lst_lnk( ID vol, CONST TS_UUID *uuid, T_RLNK *buf, INT n, INT *p_cnt )
+{
+	TSFSVOL	*v = vol_of(vol);
+	ER	er;
+
+	if ( v == NULL || uuid == NULL ) {
+		return E_ID;
+	}
+	if ( v->bvol <= 0 ) {
+		return E_NOSPT;			/* FAT keeps no link table */
+	}
+	vol_rlock(v);
+	er = ts_obj_lst_lnk(v->bvol, uuid, buf, n, p_cnt);
+	vol_runlock(v);
+	return er;
+}
+
+EXPORT INT knl_tsfs_slots( INT *p_used )
+{
+	INT	i, n, used = 0;
+
+	n = __atomic_load_n(&tsfs_nvol, __ATOMIC_ACQUIRE);
+	for ( i = 0; i < n; i++ ) {
+		TSFSVOL	*v = __atomic_load_n(&tsfs_vol[i], __ATOMIC_ACQUIRE);
+
+		if ( v != NULL && v->used ) used++;
+	}
+	if ( p_used != NULL ) *p_used = used;
+	return n;
 }
 
 EXPORT ER ts_ref_vol( ID vol, T_RVOL *pk_rvol )
@@ -823,6 +1018,8 @@ EXPORT ID ts_opn_obj( ID vol, CONST TS_UUID *uuid, UINT omode )
 
 		if ( !t->used ) { if ( o == NULL ) o = t; continue; }
 		if ( t->vol != v || ts_uuid_cmp(&t->uuid, uuid) != 0 ) continue;
+		/* one for the attributes alone keeps no writer out, and is not kept out by one */
+		if ( ((omode | t->omode) & TFO_SHARE) != 0 && ((omode | t->omode) & TFO_EXCL) == 0 ) continue;
 		/* writing is exclusive */
 		if ( ((omode | t->omode) & TFO_WRITE) != 0
 		  || ((omode | t->omode) & TFO_EXCL) != 0 ) {
@@ -1582,6 +1779,43 @@ EXPORT ER ts_scr_vol( ID vol, BOOL data, UD *p_checked, UD *p_bad )
 		if ( p_checked != NULL ) *p_checked = sc.checked;
 		if ( p_bad != NULL ) *p_bad = sc.bad;
 	}
+	return er;
+}
+
+/*
+ * The check of a native volume (ts/tsfsck.h): every writer kept away,
+ * as for the patrol. A transaction a caller holds open across its calls
+ * is waited for, since the check would see it half done and the repair
+ * would join it.
+ */
+#define CHK_WAIT_MS	50
+#define CHK_WAIT_TRIES	200
+
+EXPORT ER ts_chk_vol( ID vol, UINT mode, T_TSFSCK *res, FP_TSFSCK fn, void *ctx )
+{
+	TSFSVOL	*v = vol_of(vol);
+	INT	i;
+	ER	er;
+
+	if ( v == NULL ) {
+		return E_ID;
+	}
+	if ( v->bvol <= 0 ) {
+		return E_NOSPT;
+	}
+	for ( i = 0; ; i++ ) {
+		vol_lock(v);
+		if ( !ts_obj_trx_open(v->bvol) ) {
+			break;
+		}
+		vol_unlock(v);
+		if ( i >= CHK_WAIT_TRIES ) {
+			return E_BUSY;
+		}
+		tk_dly_tsk(CHK_WAIT_MS);
+	}
+	er = ts_obj_check(v->bvol, mode, res, fn, ctx);
+	vol_unlock(v);
 	return er;
 }
 
@@ -2360,11 +2594,11 @@ EXPORT BOOL knl_tsfs_guards( CONST char *path )
 	if ( path == NULL ) {
 		return FALSE;
 	}
-	for ( i = 0; i < TSFS_MAX_VOL; i++ ) {
-		TSFSVOL	*v = &tsfs_vol[i];
-		INT	n = v->rootlen;
+	for ( i = 0; i < __atomic_load_n(&tsfs_nvol, __ATOMIC_ACQUIRE); i++ ) {
+		TSFSVOL	*v = __atomic_load_n(&tsfs_vol[i], __ATOMIC_ACQUIRE);
+		INT	n = ( v != NULL ) ? v->rootlen : 0;
 
-		if ( !v->used || v->bvol != 0 || n <= 0 ) {
+		if ( v == NULL || !v->used || v->bvol != 0 || n <= 0 ) {
 			continue;
 		}
 		if ( n == 1 && v->root[0] == '/' ) {

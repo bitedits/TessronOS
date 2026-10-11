@@ -578,25 +578,96 @@ int pthread_attr_setinheritsched( pthread_attr_t *a, int inh )
 	return 0;
 }
 
-/* Every thread runs at the priority the process started at */
+/*
+ * A policy and a priority asked for a thread to be made: taken and not
+ * kept, as every thread runs at the priority the process started at
+ */
+int pthread_attr_setschedpolicy( pthread_attr_t *a, int policy )
+{
+	(void)a; (void)policy;
+	return 0;
+}
+
+int pthread_attr_getschedpolicy( const pthread_attr_t *a, int *policy )
+{
+	(void)a;
+	*policy = SCHED_OTHER;
+	return 0;
+}
+
+int pthread_attr_setschedparam( pthread_attr_t *a, const struct sched_param *param )
+{
+	(void)a; (void)param;
+	return 0;
+}
+
+int pthread_attr_getschedparam( const pthread_attr_t *a, struct sched_param *param )
+{
+	(void)a;
+	param->sched_priority = 0;
+	return 0;
+}
+
+/*
+ * The POSIX policies over the kernel's two bands (design 4.3.1).
+ * SCHED_OTHER is the time-shared band at the process's own priority,
+ * where the threads take turns. SCHED_FIFO and SCHED_RR with
+ * sched_priority 1..CNF_RT_PRI_LAST are the real-time band, at priority
+ * CNF_RT_PRI_LAST + 1 - sched_priority (the higher sched_priority, the
+ * higher), FIFO without a turn and RR with one of CNF_SLICE_MS. A
+ * process the kernel does not let into that band gets EPERM.
+ */
+static ID pth_tid_of( pthread_t th )
+{
+	return ( th != 0 ) ? ((PTH *)th)->tid : tk_get_tid();
+}
+
+static int pth_sched_err( ER er )
+{
+	return ( er >= E_OK ) ? 0 : ( er == E_PAR || er == E_OACV || er == E_ID ) ? EPERM : ESRCH;
+}
+
+static int pth_sched_set( ID tid, int policy, int prio )
+{
+	ER	er;
+
+	if ( policy == SCHED_OTHER ) {
+		if ( prio != 0 ) return EINVAL;
+		er = tk_chg_pri(tid, TPRI_INI);
+		if ( er >= E_OK ) er = tk_chg_slt(tid, 0);	/* the turn of the band */
+	} else if ( policy == SCHED_FIFO || policy == SCHED_RR ) {
+		if ( prio < 1 || prio > CNF_RT_PRI_LAST ) return EINVAL;
+		er = tk_chg_pri(tid, (PRI)( CNF_RT_PRI_LAST + 1 - prio ));
+		if ( er >= E_OK ) er = tk_chg_slt(tid, ( policy == SCHED_RR ) ? CNF_SLICE_MS : 0);
+	} else {
+		return EINVAL;
+	}
+	return pth_sched_err(er);
+}
+
 int pthread_getschedparam( pthread_t th, int *policy, struct sched_param *param )
 {
-	(void)th;
-	if ( policy != NULL ) *policy = SCHED_OTHER;
-	if ( param != NULL ) param->sched_priority = 0;
+	T_RTSK	r;
+	BOOL	rt;
+
+	if ( tk_ref_tsk(pth_tid_of(th), &r) < E_OK ) {
+		return ESRCH;
+	}
+	rt = ( r.tskpri <= CNF_RT_PRI_LAST );
+	if ( policy != NULL ) *policy = rt ? SCHED_FIFO : SCHED_OTHER;
+	if ( param != NULL ) param->sched_priority = rt ? CNF_RT_PRI_LAST + 1 - r.tskpri : 0;
 	return 0;
 }
 
 int pthread_setschedparam( pthread_t th, int policy, const struct sched_param *param )
 {
-	(void)th; (void)policy; (void)param;
-	return 0;
+	if ( param == NULL ) return EINVAL;
+	return pth_sched_set(pth_tid_of(th), policy, param->sched_priority);
 }
 
 int pthread_setschedprio( pthread_t th, int prio )
 {
-	(void)th; (void)prio;
-	return 0;
+	return pth_sched_set(pth_tid_of(th), ( prio > 0 ) ? SCHED_FIFO : SCHED_OTHER, prio);
 }
 
 int sched_yield( void )

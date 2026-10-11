@@ -13,7 +13,26 @@ INCPATH := -I$(TOP)/include -I$(TOP)/config -I$(TOP)/kernel/knlinc \
 	-I$(TOP)/outer_kernel/font/port \
 	-I$(TOP)/outer_kernel/font/freetype/include
 
-ARCHFLAGS := -march=armv8.2-a
+# 命令セットの基準。Raspberry Pi 4 系の Cortex-A72 は ARMv8.0-A で、CRC32 の命令はあるが、
+# LSE のアトミック命令(ldadd、cas など)も暗号拡張(AES、SHA)も持たない。そのターゲットだけ
+# ARMv8.0-A に CRC32 を足したもので作り、ほかは ARMv8.2-A のまま(docs/tessronos/03-platform.md 3.6)
+# アトミック操作は、ARMv8.0-A では関数(libgcc の __aarch64_cas4_acq_rel など)を呼ぶ形が
+# 既定になる。ライブラリを結ばない小物もあるので、排他ロードとストアの命令で直に作らせる
+ifeq ($(TARGET),_RPI4_)
+ARCH_MARCH := armv8-a+crc
+ARCHFLAGS := -march=$(ARCH_MARCH) -mno-outline-atomics
+else
+ARCH_MARCH := armv8.2-a
+ARCHFLAGS := -march=$(ARCH_MARCH)
+endif
+
+# 利用者のプログラムと実身のレコード、それらが結ぶライブラリの置き場。命令セットの基準が
+# 違うターゲットのものは混ぜない
+ifeq ($(TARGET),_RPI4_)
+UOBJ := obj/v80
+else
+UOBJ := obj
+endif
 
 CFLAGS_COMMON := $(ARCHFLAGS) -mgeneral-regs-only -mstrict-align \
 	-ffreestanding -fno-builtin -fno-common -fno-pic -fno-stack-protector \
@@ -39,6 +58,14 @@ ifeq ($(KTEST),1)
   ifneq ($(KTONLY),)
     CFLAGS_COMMON += -DKT_ONE='"$(KTONLY)"'
   endif
+  # KT_RUMP_S=<秒> で、rump の群の負荷を掛ける時間を変える(既定は 20 秒)
+  ifneq ($(KT_RUMP_S),)
+    CFLAGS_COMMON += -DKT_RUMP_S=$(KT_RUMP_S)
+  endif
+  # KT_CHURN_N=<回数> で、プロセスやタスクを作っては終える試験の回数を変える(既定は 1000 回)
+  ifneq ($(KT_CHURN_N),)
+    CFLAGS_COMMON += -DKT_CHURN_N=$(KT_CHURN_N)
+  endif
   ifneq ($(KTGROUP),)
     ifneq ($(KTGROUP),all)
       CFLAGS_COMMON += -DKT_ONLY_$(shell echo $(KTGROUP) | tr a-z A-Z)=1
@@ -58,20 +85,39 @@ ifeq ($(KLOCKSTAT),1)
   CFLAGS_COMMON += -DCNF_KLOCK_STAT=1
 endif
 
+# make STKWATCH=1 で、走っていないタスクのスタックの戻り番地が書き換えられたら、
+# ディスパッチャがそのタスクを走らせる前に見つけて止まる(設計書 4.7.6)
+ifeq ($(STKWATCH),1)
+  CFLAGS_COMMON += -DCNF_STK_WATCH=1
+  ASFLAGS_COMMON += -DCNF_STK_WATCH=1
+endif
+
 # make DESKTOP=1 で、試験ではなくデスクトップが立ち上がる版を作る
 ifeq ($(DESKTOP),1)
   CFLAGS_COMMON += -DUSE_DESKTOP=1
   # make DESKTOP=1 UITEST=1: 二つ目のシリアルから画面を操作できる(tools/ui_run.py)
   ifeq ($(UITEST),1)
-    CFLAGS_COMMON += -DUSE_UITEST=1
+    CFLAGS_COMMON += -DUSE_UITEST=1 -DOB_DENY_LOG=1
   endif
+endif
+
+# make OACVLOG=1 で、プロセスの呼出しが権限の不足(E_OACV)で断られるたびに、
+# どのプロセスがどの実身に何を求めたかをコンソールに「!OACV!」で出す(設計書 8.7.4)。
+# UITEST=1 では常に出す
+ifeq ($(OACVLOG),1)
+  CFLAGS_COMMON += -DOB_DENY_LOG=1
 endif
 
 # make NETSTACK=netbsd(既定)で、TCP/IP スタックは NetBSD のもの(rump カーネルとして
 # tools/netbsd/build.sh が作る一つのオブジェクト)。NETSTACK=lwip で以前の lwIP に戻す
 # (設計書 12.6)。オブジェクトが無ければ、リンクの前に tools/netbsd/build.sh が作る
 NETSTACK ?= netbsd
+# 命令セットの基準ごとに別の置き場に作る(Raspberry Pi 4 系は ARMv8.0-A の版)
+ifeq ($(TARGET),_RPI4_)
+NETBSD_OBJ ?= $(HOME)/tessronos-netbsd-v80/rumpnet.o
+else
 NETBSD_OBJ ?= $(HOME)/tessronos-netbsd/rumpnet.o
+endif
 ifeq ($(NETSTACK),netbsd)
   CFLAGS_COMMON += -DTS_NETSTACK_NETBSD=1
   EXTRA_OBJS += $(NETBSD_OBJ)
@@ -85,7 +131,12 @@ endif
 
 # make MOZC=1 で、かな漢字変換器 mozc(tools/mozc/build.sh で作る一つのオブジェクト)
 # を組み込む。無ければ application/kconv のローマ字かな変換だけで入力する
+# Raspberry Pi 4 系は ARMv8.0-A で作ったもの(OUT=~/tessronos-mozc-v80 MARCH=armv8-a+crc)
+ifeq ($(TARGET),_RPI4_)
+MOZC_OBJ ?= $(HOME)/tessronos-mozc-v80/tsmozc.o
+else
 MOZC_OBJ ?= $(HOME)/tessronos-mozc/tsmozc.o
+endif
 ifeq ($(MOZC),1)
   CFLAGS_COMMON += -DUSE_MOZC=1
   EXTRA_OBJS += $(MOZC_OBJ)

@@ -1,4 +1,4 @@
-# TessronOS (Raspberry Pi 5) — 設計書 4.9
+# TessronOS (Raspberry Pi 5, Compute Module 5) — docs/tessronos/03-platform.md 3.2・3.5
 kernel=tessronos.img
 kernel_address=0x200000
 device_tree=bcm2712-rpi-5-b.dtb
@@ -9,3 +9,23 @@ pciex4_reset=0
 # 上の1バイトを不透明度として読ませない
 framebuffer_depth=32
 framebuffer_ignore_alpha=1
+# 画面を2面にして切り替えるため(設計書 10.2.1)、ファームウェアの画面のバッファを
+# 表示の大きさより高く取れるようにする。4K の画面の2面まで
+max_framebuffer_width=3840
+max_framebuffer_height=4320
+
+# Compute Module 5(CM5IO): eMMC 付きの版のデバイスツリー。IO ボードには
+# デバッグ用 UART の口が無いので、コンソールを 40 ピンヘッダの 8 番・10 番
+# (RP1 の UART0)に移す。ファームウェアがその口にクロックを入れるのは
+# enable_rp1_uart=1 のときだけなので、コンソールを移す指示(cmdline-cm5.txt の
+# tessronos.console=rp1)と必ず組にする
+[cm5]
+device_tree=bcm2712-rpi-cm5-cm5io.dtb
+enable_rp1_uart=1
+cmdline=cmdline-cm5.txt
+[all]
+# Compute Module 5 Lite(ボードの種類 0x1a): eMMC の無い版のデバイスツリー。
+# 上の [cm5] の設定も読んだうえで、デバイスツリーだけを差し替える
+[board-type=0x1a]
+device_tree=bcm2712-rpi-cm5l-cm5io.dtb
+[all]

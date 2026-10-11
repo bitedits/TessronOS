@@ -1,0 +1,21 @@
+<tad version="1.0" encoding="UTF-8" filename="基本表計算の罫線">
+<document>
+<p>基本表計算の罫線</p>
+<p>基本表計算の罫線。引く場所と、線種、線幅、線の色。メニューの定義。</p>
+</document>
+<menu>
+<item code="frame.all">格子</item>
+<item code="frame.outline">外枠</item>
+<item code="frame.top">上罫線</item>
+<item code="frame.bottom">下罫線</item>
+<item code="frame.left">左罫線</item>
+<item code="frame.right">右罫線</item>
+<item code="frame.none">罫線なし</item>
+<line/>
+<include><link id="01a0d889-46f2-7c23-8d34-5e6f7c8d9e23_0.xtad" vobjid="01a0d8c3-2003-7013-9a10-c1d2e3f40b13"/></include>
+<line/>
+<include><link id="01a0d889-46f3-7d34-9e45-6f7c8d9eaf34_0.xtad" vobjid="01a0d8c3-2003-7014-9a10-c1d2e3f40b14"/></include>
+<line/>
+<item>線の色<link id="01a0d889-46dc-76cd-8bde-f203142536cd_0.xtad" vobjid="01a0d8c3-2003-700c-9a10-c1d2e3f40b0c"/></item>
+</menu>
+</tad>

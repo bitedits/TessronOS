@@ -18,7 +18,7 @@
  */
 
 /* built into the kernel, the machine's own types; into a process, the process's */
-#if defined(_QEMU_VIRT_) || defined(_RPI5_)
+#if defined(_QEMU_VIRT_) || defined(_RPI5_) || defined(_RPI4_)
 #include <sys/machine.h>
 #include <tk/tkernel.h>
 #endif
@@ -357,6 +357,193 @@ EXPORT INT cf_net_write( UB *text, INT len, INT max, CONST T_CFNET *net )
 	return len;
 }
 
+/* ---------------------------------------------------------------- IPv6 */
+
+LOCAL INT hexd( char c )
+{
+	if ( c >= '0' && c <= '9' ) return c - '0';
+	if ( c >= 'a' && c <= 'f' ) return c - 'a' + 10;
+	if ( c >= 'A' && c <= 'F' ) return c - 'A' + 10;
+	return -1;
+}
+
+EXPORT BOOL cf_ip6zero( CONST UB *addr )
+{
+	INT	i;
+
+	for ( i = 0; i < 16 && addr[i] == 0; i++ ) ;
+	return (BOOL)( i == 16 );
+}
+
+/*
+ * Groups of up to four hexadecimal digits parted by colons, one run of
+ * them left out as "::", and the last 32 bits perhaps as a dotted IPv4
+ * address.
+ */
+EXPORT BOOL cf_ip6( CONST char *s, UB *addr )
+{
+	UW	g[8], v4;
+	INT	n = 0, gap = -1, i = 0, d, k, j;
+	UW	v;
+
+	if ( s == NULL ) return FALSE;
+	if ( s[0] == ':' ) {
+		if ( s[1] != ':' ) return FALSE;
+		gap = 0;
+		i = 2;
+	}
+	while ( s[i] != 0 ) {
+		/* a dotted IPv4 address ends it */
+		for ( j = i; s[j] != 0 && s[j] != ':' && s[j] != '.'; j++ ) ;
+		if ( s[j] == '.' ) {
+			if ( n > 6 || !cf_ip(s + i, &v4) ) return FALSE;
+			g[n++] = ( ( v4 & 0xFF ) << 8 ) | ( ( v4 >> 8 ) & 0xFF );
+			g[n++] = ( ( ( v4 >> 16 ) & 0xFF ) << 8 ) | ( ( v4 >> 24 ) & 0xFF );
+			break;
+		}
+		for ( v = 0, d = 0; ( k = hexd(s[i]) ) >= 0; i++, d++ ) {
+			if ( d >= 4 ) return FALSE;
+			v = v * 16 + (UW)k;
+		}
+		if ( d == 0 || n >= 8 ) return FALSE;
+		g[n++] = v;
+		if ( s[i] == 0 ) break;
+		if ( s[i] != ':' ) return FALSE;
+		i++;
+		if ( s[i] == ':' ) {
+			if ( gap >= 0 ) return FALSE;
+			gap = n;
+			i++;
+		} else if ( s[i] == 0 ) {
+			return FALSE;		/* a colon at the end */
+		}
+	}
+	if ( gap < 0 ? n != 8 : n > 7 ) return FALSE;
+	for ( i = 0; i < 16; i++ ) addr[i] = 0;
+	for ( j = 0; j < n; j++ ) {
+		k = ( gap >= 0 && j >= gap ) ? 8 - n + j : j;
+		addr[k * 2] = (UB)( g[j] >> 8 );
+		addr[k * 2 + 1] = (UB)g[j];
+	}
+	return TRUE;
+}
+
+/* The groups in hexadecimal, the longest run of two or more zero groups (the first of equals) as "::" */
+EXPORT void cf_ip6str( CONST UB *addr, char *out )
+{
+	static CONST char hx[] = "0123456789abcdef";
+	UW	g[8];
+	INT	i, at = 0, best = -1, blen = 0, run, k, sh;
+
+	for ( i = 0; i < 8; i++ ) g[i] = ( (UW)addr[i * 2] << 8 ) | addr[i * 2 + 1];
+	for ( i = 0; i < 8; i += ( run > 0 ) ? run : 1 ) {
+		for ( run = 0; i + run < 8 && g[i + run] == 0; run++ ) ;
+		if ( run >= 2 && run > blen ) {
+			best = i;
+			blen = run;
+		}
+	}
+	/* ::ffff:a.b.c.d, an IPv4 address mapped */
+	if ( best == 0 && blen == 5 && g[5] == 0xFFFF ) {
+		out[at++] = ':';
+		out[at++] = ':';
+		for ( k = 0; k < 4; k++ ) out[at++] = "ffff"[k];
+		out[at++] = ':';
+		cf_ipstr((UW)addr[12] | ( (UW)addr[13] << 8 ) | ( (UW)addr[14] << 16 ) | ( (UW)addr[15] << 24 ), out + at);
+		return;
+	}
+	for ( i = 0; i < 8; i++ ) {
+		if ( i == best ) {
+			out[at++] = ':';
+			out[at++] = ':';
+			i += blen - 1;
+			continue;
+		}
+		if ( i > 0 && i != best + blen ) out[at++] = ':';
+		for ( sh = 12; sh > 0 && ( ( g[i] >> sh ) & 0xF ) == 0; sh -= 4 ) ;
+		for ( ; sh >= 0; sh -= 4 ) out[at++] = hx[( g[i] >> sh ) & 0xF];
+	}
+	out[at] = 0;
+}
+
+EXPORT void cf_net6_read( CONST UB *text, INT len, T_CFNET6 *net )
+{
+	char	v[CF_VAL_MAX], w[64];
+	UB	a[16];
+	INT	i, j;
+
+	for ( i = 0; i < (INT)sizeof(*net); i++ ) ((UB *)net)[i] = 0;
+	net->on = TRUE;
+	net->how = CF_IP6_AUTO;
+	net->plen = 64;
+
+	if ( cf_get(text, len, "$$IPV6", 0, v, sizeof(v)) ) {
+		if ( cf_word(v, 0, w, sizeof(w)) && seq(w, "off") ) net->on = FALSE;
+		if ( cf_word(v, 1, w, sizeof(w)) ) {
+			if ( seq(w, "fixed") ) net->how = CF_IP6_FIXED;
+			else if ( seq(w, "none") ) net->how = CF_IP6_NONE;
+		}
+		for ( i = 2; cf_word(v, i, w, sizeof(w)); i++ ) {
+			if ( seq(w, "temp") ) net->temp = TRUE;
+		}
+	}
+	if ( cf_get(text, len, "$$IPV6ADDR", 0, v, sizeof(v)) && cf_word(v, 0, w, sizeof(w)) ) {
+		for ( i = 0; w[i] != 0 && w[i] != '/'; i++ ) ;
+		if ( w[i] == '/' ) {
+			w[i] = 0;
+			j = cf_num(w + i + 1, 64);
+			net->plen = ( j >= 1 && j <= 128 ) ? j : 64;
+		}
+		if ( cf_ip6(w, a) ) for ( i = 0; i < 16; i++ ) net->addr[i] = a[i];
+	}
+	if ( cf_get(text, len, "$$IPV6GW", 0, v, sizeof(v)) && cf_word(v, 0, w, sizeof(w)) && cf_ip6(w, a) ) {
+		for ( i = 0; i < 16; i++ ) net->gw[i] = a[i];
+	}
+	for ( j = 0; j < 2; j++ ) {
+		if ( cf_get(text, len, "$$IPV6DNS", j, v, sizeof(v)) && cf_word(v, 0, w, sizeof(w)) && cf_ip6(w, a) ) {
+			for ( i = 0; i < 16; i++ ) net->dns[j][i] = a[i];
+		}
+	}
+}
+
+/* An address on its own line, or the key alone for none */
+LOCAL INT put6( UB *text, INT len, INT max, CONST char *key, INT nth, CONST UB *a, INT plen )
+{
+	char	v[CF_IP6_STRLEN + 8];
+	INT	at;
+
+	if ( len < 0 ) return len;
+	if ( cf_ip6zero(a) ) return cf_put(text, len, max, key, nth, NULL);
+	cf_ip6str(a, v);
+	if ( plen > 0 ) {
+		at = slen(v);
+		v[at++] = '/';
+		(void)cf_itoa(plen, v + at);
+	}
+	return cf_put(text, len, max, key, nth, v);
+}
+
+EXPORT INT cf_net6_write( UB *text, INT len, INT max, CONST T_CFNET6 *net )
+{
+	char	v[32];
+	INT	at;
+
+	scopy(v, net->on ? "on " : "off ", sizeof(v));
+	at = slen(v);
+	scopy(v + at, ( net->how == CF_IP6_FIXED ) ? "fixed" : ( net->how == CF_IP6_NONE ) ? "none" : "auto",
+	      (INT)sizeof(v) - at);
+	if ( net->temp ) {
+		at = slen(v);
+		scopy(v + at, " temp", (INT)sizeof(v) - at);
+	}
+	len = cf_put(text, len, max, "$$IPV6", 0, v);
+	len = put6(text, len, max, "$$IPV6ADDR", 0, net->addr, net->plen);
+	len = put6(text, len, max, "$$IPV6GW", 0, net->gw, 0);
+	len = put6(text, len, max, "$$IPV6DNS", 0, net->dns[0], 0);
+	len = put6(text, len, max, "$$IPV6DNS", 1, net->dns[1], 0);
+	return len;
+}
+
 /* ---------------------------------------------------------------- the person */
 
 /*
@@ -424,6 +611,47 @@ EXPORT CONST CF_ITEM *cf_user_look( UINT look )
 
 	for ( i = 0; i < cf_user_nitem; i++ ) {
 		if ( cf_user_items[i].look == look ) return &cf_user_items[i];
+	}
+	return NULL;
+}
+
+/* ---------------------------------------------------------------- the windows' look */
+
+/*
+ * What システム環境設定〈ウィンドウ〉 sets, lines of the machine's
+ * settings (SYSDEF_CONF_DEV). Colours are 0xRRGGBB, strengths and how
+ * solid a frame is 0..255, lengths in dots, the motion in milliseconds.
+ * What nothing says gives is how the windows look with no look set:
+ * solid and square, with no shadow and no motion.
+ */
+EXPORT CONST CF_ITEM cf_look_items[] = {
+	{ "WIN_LOOK",		LK_LOOK,	0, 1, 1 },
+	{ "WIN_OPACITY",	LK_OPACITY,	0, 255, 255 },
+	{ "WIN_OPACITY_WHOLE",	LK_OPA_WHOLE,	0, 1, 0 },
+	{ "WIN_WASH",		LK_WASH,	0, 0xFFFFFF, 0x202838 },
+	{ "WIN_WASH_STRENGTH",	LK_WASH_STR,	0, 255, 0 },
+	{ "WIN_BAR_WASH",	LK_BAR_WASH,	0, 0xFFFFFF, 0x405878 },
+	{ "WIN_BAR_STRENGTH",	LK_BAR_STR,	0, 255, 0 },
+	{ "WIN_FROM_SCHEME",	LK_FROM,	0, 3, 1 },
+	{ "WIN_ROUND",		LK_ROUND,	0, 32, 0 },
+	{ "WIN_SHADOW_DX",	LK_SHD_DX,	-32, 32, 4 },
+	{ "WIN_SHADOW_DY",	LK_SHD_DY,	-32, 32, 4 },
+	{ "WIN_SHADOW_SIZE",	LK_SHD_SIZE,	0, 32, 2 },
+	{ "WIN_SHADOW_DARK",	LK_SHD_DARK,	0, 255, 0 },
+	{ "WIN_BLUR",		LK_BLUR,	0, 16, 0 },
+	{ "WIN_MOTION",		LK_MOTION,	0, 2000, 0 },
+	{ "WIN_LIVE_MOVE",	LK_LIVE,	0, 1, 1 },
+	{ "WIN_GPU",		LK_GPU,		0, 1, 1 },
+};
+
+EXPORT CONST INT cf_look_nitem = (INT)( sizeof(cf_look_items) / sizeof(cf_look_items[0]) );
+
+EXPORT CONST CF_ITEM *cf_look_look( UINT look )
+{
+	INT	i;
+
+	for ( i = 0; i < cf_look_nitem; i++ ) {
+		if ( cf_look_items[i].look == look ) return &cf_look_items[i];
 	}
 	return NULL;
 }

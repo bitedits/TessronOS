@@ -27,6 +27,7 @@
 #include <ts/wm.h>
 #include <ts/hid.h>
 #include <ts/snd.h>
+#include <ts/cam.h>
 #include <ts/so.h>
 #include <ts/ob.h>
 #include <ts/ser.h>
@@ -53,6 +54,7 @@ EXPORT ER knl_start_device( void )
 	knl_wm_init();	/* and windows (design 16.5.5) */
 	knl_hid_init();	/* keyboard and pointer (design 10.4) */
 	knl_snd_init();	/* the sound device (design 10.15) */
+	knl_cam_init();	/* the camera device (design 10.16) */
 	knl_usb_init();	/* and the USB devices behind them (design 10.14) */
 	so_main();		/* the protocol stack on top of it (design 12.6) */
 
@@ -66,6 +68,7 @@ EXPORT ER knl_start_device( void )
 	knl_proc_init();	/* process management (design 9.4) */
 	knl_ob_init();		/* real objects of every kind (design 18) */
 	knl_wmobj_init();	/* and windows among them (design 18.13) */
+	knl_fs_posix_mounts();	/* "/", /dev and /tmp for the POSIX programs (design 5.8.1) */
 	knl_start_init(CNF_INIT_PATH);	/* the first program, when there is one */
 	return E_OK;
 }

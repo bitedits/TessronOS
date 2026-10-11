@@ -9,14 +9,16 @@
 
 /*
  *	ktest_smp.c
- *	Multiprocessor: processor IDs, parallel execution, TA_ASSPRC,
- *	cross-processor wake-up, and a synchronisation stress run.
+ *	Multiprocessor: processor IDs, parallel execution, the processors'
+ *	load (ts_ref_cpu), TA_ASSPRC, cross-processor wake-up, and a
+ *	synchronisation stress run.
  *	Tests that need more than one processor are skipped on a single
  *	core.
  */
 
 #include "ktest.h"
 #include "kernel.h"			/* T_PCPU statistics */
+#include <ts/time.h>
 
 #define MAX_PRC		8
 #define SPIN_NS		(50 * 1000000ULL)
@@ -91,6 +93,47 @@ LOCAL void test_parallel( void )
 	}
 	tm_printf((UB*)"  processors used: mask=0x%x\n", all);
 	KT_ASSERT(all != 0 && (all & (all - 1)) != 0);	/* at least two processors */
+}
+
+/*
+ * ts_ref_cpu: the processors online, the timer's frequency, and the time
+ * each spends running tasks, which grows on every processor while
+ * spinners keep them all busy and never by more than the time that went
+ * by
+ */
+LOCAL void test_ref_cpu( void )
+{
+	T_TSCPU	a, b;
+	ID	id[MAX_PRC];
+	INT	n = knl_num_prc, i, loaded = 0;
+
+	KT_ASSERT_ER(ts_ref_cpu(&a), E_OK);
+	KT_ASSERT_EQ(a.ncpu, knl_num_prc);
+	KT_ASSERT(a.freq > 0);
+	if ( n > MAX_PRC ) n = MAX_PRC;
+	done_cnt = 0;
+	for ( i = 0; i < n; i++ ) {
+		id[i] = kt_cre_tsk_any((FP)spinner, KT_PRI_LOW, NULL);
+		KT_ASSERT(id[i] > 0);
+		KT_ASSERT_ER(tk_sta_tsk(id[i], i), E_OK);
+	}
+	for ( i = 0; i < 400 && done_cnt < (UW)n; i++ ) {
+		KT_ASSERT_ER(tk_dly_tsk(1), E_OK);
+	}
+	KT_ASSERT_ER(ts_ref_cpu(&b), E_OK);
+	for ( i = 0; i < n; i++ ) {
+		KT_ASSERT_ER(tk_del_tsk(id[i]), E_OK);
+	}
+	KT_ASSERT(b.now > a.now);
+	for ( i = 0; i < b.ncpu && i < TS_CPU_MAX; i++ ) {
+		UD	grew = b.busy[i] - a.busy[i];
+
+		tm_printf((UB*)"  processor %d: %d%% busy\n", i + 1, (INT)( grew * 100 / ( b.now - a.now ) ));
+		KT_ASSERT(b.busy[i] >= a.busy[i]);
+		KT_ASSERT(grew <= b.now - a.now + b.freq / 1000);
+		if ( grew * 4 >= b.now - a.now ) loaded++;
+	}
+	KT_ASSERT(loaded >= ( n < 2 ? 1 : 2 ));
 }
 
 LOCAL void pinned( INT stacd, void *exinf )
@@ -321,12 +364,276 @@ LOCAL void test_stress( void )
 	KT_ASSERT(total > 1000);
 }
 
+/*
+ * A wait ended from another processor returns what that processor gave
+ * it, and nothing writes into the waiter's stack after it has returned
+ * (design 4.3). The waiter waits without a limit, so anything but E_OK
+ * is wrong; E_TMOUT is what the wait had been given to begin with. The
+ * other side signals just as the waiter goes into its wait, at a moment
+ * that moves a little each round, so that the signal comes while the
+ * waiter is still on its processor after letting go of the kernel lock.
+ *
+ * As the processors run, the moment in which that goes wrong is a few
+ * instructions long and is met once in a great many rounds. The second
+ * run makes it long with the kernel's hooks for the tests (smp.c): a
+ * pause after each critical section lets go of the lock, and a longer
+ * one between a wait being ended and its result being written. A waiter
+ * that decided after letting go of the lock whether to give up its
+ * processor would find itself made ready again in the first pause, and
+ * read its result in the second, before it was written.
+ */
+#define WR_PAIRS	2
+#define WR_MS		2000
+#define WR_UNLOCK_SPIN	4000
+#define WR_RELEASE_SPIN	40000
+
+LOCAL ID		wr_sem[WR_PAIRS];
+LOCAL volatile UD	wr_at[WR_PAIRS];	/* the round the waiter is in */
+LOCAL volatile UD	wr_rounds[WR_PAIRS];
+LOCAL volatile UW	wr_bad;
+LOCAL volatile ER	wr_bad_er;
+LOCAL volatile BOOL	wr_stop;
+
+LOCAL void wr_waiter( INT p, void *exinf )
+{
+	UD	k;
+	ER	er;
+
+	for ( k = 1; !wr_stop; k++ ) {
+		wr_at[p] = k;
+		er = tk_wai_sem(wr_sem[p], 1, TMO_FEVR);
+		if ( er != E_OK ) {
+			wr_bad_er = er;
+			atomic_inc((UW *)&wr_bad);
+		}
+		wr_rounds[p] = k;
+	}
+	atomic_inc((UW *)&done_cnt);
+	tk_ext_tsk();
+}
+
+LOCAL void wr_signaller( INT p, void *exinf )
+{
+	UD	k;
+	UW	d = (UW)p * 37;
+	INT	i;
+
+	for ( k = 1; !wr_stop; k++ ) {
+		while ( wr_at[p] != k && !wr_stop ) ;
+		for ( i = 0; i < (INT)d; i++ ) Asm("nop");
+		d = ( d + 7 ) % 400;
+		tk_sig_sem(wr_sem[p], 1);
+	}
+	atomic_inc((UW *)&done_cnt);
+	tk_ext_tsk();
+}
+
+LOCAL ID wr_task( FP fn, PRI pri, INT prc )
+{
+	T_CTSK	ctsk;
+
+	ctsk.exinf   = NULL;
+	ctsk.tskatr  = TA_HLNG | TA_RNG0 | TA_ASSPRC;
+	ctsk.task    = fn;
+	ctsk.itskpri = pri;
+	ctsk.stksz   = 4096;
+	ctsk.assprc  = 1U << ( prc - 1 );
+	return tk_cre_tsk(&ctsk);
+}
+
+/* One run of the pairs for ms, the hooks set as given; the waits ended */
+LOCAL UD wr_run( INT ms, UW unlock_spin, UW release_spin )
+{
+	T_CSEM	csem;
+	ID	wid[WR_PAIRS], sid[WR_PAIRS];
+	INT	me = tk_get_prc(), other[3], n = 0, i, p;
+	UD	total = 0;
+
+	for ( i = 1; i <= knl_num_prc && n < 3; i++ ) {
+		if ( i != me ) other[n++] = i;
+	}
+	csem.exinf = NULL;
+	csem.sematr = TA_TFIFO | TA_FIRST;
+	csem.isemcnt = 0;
+	csem.maxsem = 1;
+	wr_stop = FALSE;
+	done_cnt = 0;
+	for ( i = 0; i < WR_PAIRS; i++ ) {
+		wr_sem[i] = tk_cre_sem(&csem);
+		KT_ASSERT(wr_sem[i] > 0);
+		wr_at[i] = 0;
+		wr_rounds[i] = 0;
+	}
+	/* the waiters on processors of their own, the signallers beside them; one shares the test's */
+	wid[0] = wr_task((FP)wr_waiter, KT_PRI_HIGH, other[0]);
+	sid[0] = wr_task((FP)wr_signaller, KT_PRI_LOW, other[1]);
+	wid[1] = wr_task((FP)wr_waiter, KT_PRI_HIGH, other[2]);
+	sid[1] = wr_task((FP)wr_signaller, KT_PRI_LOW, me);
+	knl_kt_unlock_spin = unlock_spin;
+	knl_kt_release_spin = release_spin;
+	for ( i = 0; i < WR_PAIRS; i++ ) {
+		KT_ASSERT(wid[i] > 0 && sid[i] > 0);
+		KT_ASSERT_ER(tk_sta_tsk(wid[i], i), E_OK);
+		KT_ASSERT_ER(tk_sta_tsk(sid[i], i), E_OK);
+	}
+	KT_ASSERT_ER(tk_dly_tsk(ms), E_OK);
+
+	wr_stop = TRUE;
+	knl_kt_unlock_spin = 0;
+	knl_kt_release_spin = 0;
+	for ( i = 0; i < 100 && done_cnt < WR_PAIRS * 2; i++ ) {
+		for ( p = 0; p < WR_PAIRS; p++ ) (void)tk_sig_sem(wr_sem[p], 1);
+		KT_ASSERT_ER(tk_dly_tsk(10), E_OK);
+	}
+	KT_ASSERT_EQ(done_cnt, WR_PAIRS * 2);
+	for ( i = 0; i < WR_PAIRS; i++ ) {
+		total += wr_rounds[i];
+		KT_ASSERT_ER(tk_del_tsk(wid[i]), E_OK);
+		KT_ASSERT_ER(tk_del_tsk(sid[i]), E_OK);
+		KT_ASSERT_ER(tk_del_sem(wr_sem[i]), E_OK);
+	}
+	return total;
+}
+
+LOCAL void test_wait_result( void )
+{
+	UD	total;
+
+	if ( knl_num_prc < 4 ) KT_SKIP("fewer than four processors");
+
+	wr_bad = 0;
+	wr_bad_er = E_OK;
+	total = wr_run(WR_MS, 0, 0);
+	tm_printf((UB*)"  waits ended from another processor: %d, wrong results: %d (last %d)\n",
+		  (INT)total, (INT)wr_bad, (INT)wr_bad_er);
+	KT_ASSERT_EQ(wr_bad, 0);
+	KT_ASSERT(total > 1000);
+
+	wr_bad = 0;
+	wr_bad_er = E_OK;
+	total = wr_run(WR_MS, WR_UNLOCK_SPIN, WR_RELEASE_SPIN);
+	tm_printf((UB*)"  the same with the moments made long: %d, wrong results: %d (last %d)\n",
+		  (INT)total, (INT)wr_bad, (INT)wr_bad_er);
+	KT_ASSERT_EQ(wr_bad, 0);
+	KT_ASSERT(total > 100);
+}
+
+/*
+ * A task's stack is given back only once its processor has left it
+ * (design 4.3). A task that ends goes on running on its stack for a
+ * moment after it has let go of the kernel lock: it pushes its frame
+ * for the dispatcher and only then moves to the dispatcher's own stack.
+ * Another processor that deleted it meanwhile (tk_del_tsk of a dormant
+ * task), or the allocator that had been given the stack back by the
+ * task itself (tk_exd_tsk), would hand out memory that is still being
+ * written. The hook of the tests (smp.c) makes that moment long; the
+ * control block says whether a processor still holds the task's
+ * context (runprc), the allocator whether the stack is free.
+ */
+#define EX_ROUNDS	20
+#define EX_SPIN		200000
+
+IMPORT BOOL	knl_Iinuse( void *ptr );
+IMPORT TCB	knl_tcb_table[];
+
+LOCAL volatile BOOL	ex_going;
+
+LOCAL void ex_ext( INT stacd, void *exinf )
+{
+	ex_going = TRUE;
+	tk_ext_tsk();
+}
+
+LOCAL void ex_exd( INT stacd, void *exinf )
+{
+	ex_going = TRUE;
+	tk_exd_tsk();
+}
+
+LOCAL ID ex_start( FP fn, INT prc, void **p_stack )
+{
+	ID	tid = wr_task(fn, KT_PRI_HIGH, prc);
+	TCB	*t;
+
+	if ( tid <= 0 ) {
+		return tid;
+	}
+	t = &knl_tcb_table[tid - 1];
+	*p_stack = (VB *)t->isstack - t->sstksz;
+	ex_going = FALSE;
+	if ( tk_sta_tsk(tid, 0) < E_OK ) {
+		tk_del_tsk(tid);
+		return E_SYS;
+	}
+	while ( !ex_going ) ;
+	return tid;
+}
+
+/* Deleted by another processor as soon as it is dormant */
+LOCAL void test_del_ended( void )
+{
+	INT	me = tk_get_prc(), prc = ( me == 1 ) ? 2 : 1, i, held = 0;
+	void	*stk;
+	ER	er;
+	ID	tid;
+
+	if ( knl_num_prc < 2 ) KT_SKIP("single processor");
+	knl_kt_exit_spin = EX_SPIN;
+	for ( i = 0; i < EX_ROUNDS; i++ ) {
+		tid = ex_start((FP)ex_ext, prc, &stk);
+		KT_ASSERT(tid > 0);
+		if ( tid <= 0 ) break;
+		while ( ( er = tk_del_tsk(tid) ) == E_OBJ ) ;	/* not dormant yet */
+		KT_ASSERT_ER(er, E_OK);
+		if ( knl_tcb_table[tid - 1].runprc != 0 ) {
+			held++;
+		}
+	}
+	knl_kt_exit_spin = 0;
+	tm_printf((UB*)"  deleted while their processor still held them: %d of %d\n", held, EX_ROUNDS);
+	KT_ASSERT_EQ(held, 0);
+}
+
+/* Deleting itself: its stack is not free while its processor is on it */
+LOCAL void test_exd_stack( void )
+{
+	INT	me = tk_get_prc(), prc = ( me == 1 ) ? 2 : 1, i, early = 0;
+	void	*stk;
+	TCB	*t;
+	ID	tid;
+
+	if ( knl_num_prc < 2 ) KT_SKIP("single processor");
+	knl_kt_exit_spin = EX_SPIN;
+	for ( i = 0; i < EX_ROUNDS; i++ ) {
+		tid = ex_start((FP)ex_exd, prc, &stk);
+		KT_ASSERT(tid > 0);
+		if ( tid <= 0 ) break;
+		t = &knl_tcb_table[tid - 1];
+		while ( t->runprc != 0 ) {
+			if ( !knl_Iinuse(stk) ) {
+				/* free: wrong only if its processor still held it after that */
+				Asm("dmb ish" ::: "memory");
+				if ( t->runprc != 0 ) early++;
+				break;
+			}
+		}
+		while ( t->state != 0 ) tk_dly_tsk(1);	/* TS_NONEXIST */
+	}
+	knl_kt_exit_spin = 0;
+	tm_printf((UB*)"  stacks free while their processor was still on them: %d of %d\n", early, EX_ROUNDS);
+	KT_ASSERT_EQ(early, 0);
+}
+
 EXPORT void ktest_smp( void )
 {
 	KT_RUN(test_get_prc);
 	KT_RUN(test_parallel);
+	KT_RUN(test_ref_cpu);
 	KT_RUN(test_assprc);
 	KT_RUN(test_cross_wakeup);
 	KT_RUN(test_timer_other_prc);
 	KT_RUN(test_stress);
+	KT_RUN(test_wait_result);
+	KT_RUN(test_del_ended);
+	KT_RUN(test_exd_stack);
 }

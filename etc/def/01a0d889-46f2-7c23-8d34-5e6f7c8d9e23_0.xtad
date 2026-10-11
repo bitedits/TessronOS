@@ -1,0 +1,12 @@
+<tad version="1.0" encoding="UTF-8" filename="基本表計算の線種">
+<document>
+<p>基本表計算の線種</p>
+<p>基本表計算の次に引く罫線の種類。メニューの定義。</p>
+</document>
+<menu>
+<item code="line.solid">実線</item>
+<item code="line.dashed">破線</item>
+<item code="line.dotted">点線</item>
+<item code="line.double">二重線</item>
+</menu>
+</tad>

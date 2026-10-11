@@ -307,6 +307,15 @@ LOCAL void rc_dump( void )
 	tm_printf((UB *)"TessronOS: pcie2 rev %08x misc %08x ubus %08x inbound %08x %08x\n",
 		  in_w(RC_REVISION), in_w(RC_MISC_CTRL), in_w(RC_REG(0x40a4)),
 		  in_w(RC_BAR2_CONFIG_LO), in_w(RC_BAR2_CONFIG_HI));
+	/*
+	 * How long the bridge waits for an access the far end does not
+	 * answer before it gives up on it, as the firmware left it: an
+	 * access that is never given up on stalls the processor that made
+	 * it for good, with nothing said (the lockup report, lockup.c,
+	 * then says it did not take the interrupt sent to it).
+	 */
+	tm_printf((UB *)"TessronOS: pcie2 ubus timeout %08x, config retry timeout %08x\n",
+		  in_w(RC_REG(0x40a8)), in_w(RC_REG(0x405c)));
 	tm_printf((UB *)"TessronOS: pcie2 outbound to %08x%08x, from %08x (hi %08x %08x)\n",
 		  in_w(RC_MEM_WIN0_HI), in_w(RC_MEM_WIN0_LO), in_w(RC_MEM_WIN0_BASE_LIMIT),
 		  in_w(RC_MEM_WIN0_BASE_HI), in_w(RC_MEM_WIN0_LIMIT_HI));

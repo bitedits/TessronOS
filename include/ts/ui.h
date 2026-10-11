@@ -115,6 +115,25 @@ IMPORT INT  ui_ask( UI *u, INT num, CONST char *const *lines, INT nline );
  * takes it away. u need only have its box, kw, port, w and h.
  */
 #define UI_EV_OTHER	8
+
+/*
+ * A window that can be made larger and smaller and has a scroll bar
+ * down its right side: ui_attr(WM_ATTR_RESIZE | WM_ATTR_RBAR) before
+ * ui_open. The bar is the program's, as a window's own bars are
+ * (OB_WR_BARS): it says with ui_bar what there is and what of it the
+ * panel shows, and hears the bar worked (UI_EV_SCROLL, *p_num where the
+ * start of what is shown is asked to go), the wheel turned over the
+ * window (UI_EV_WHEEL, *p_num the notches, away from the person
+ * positive) and the window's size changed (UI_EV_SIZE; ui_work reads
+ * the work area's size). The panel stays where it is: the program
+ * shows in it what the bar says is shown.
+ */
+#define UI_EV_WHEEL	9
+#define UI_EV_SCROLL	10
+#define UI_EV_SIZE	11
+IMPORT void ui_attr( UINT attr );
+IMPORT void ui_bar( UI *u, INT lo, INT hi, INT clo, INT chi );
+IMPORT void ui_work( UI *u, INT *p_w, INT *p_h );
 IMPORT ER   ui_dlg_open( UI *u, INT num, UI *q );
 IMPORT INT  ui_dlg_next( UI *u, UI *q, T_OBNTM *m, INT *p_num );
 IMPORT void ui_dlg_close( UI *q );

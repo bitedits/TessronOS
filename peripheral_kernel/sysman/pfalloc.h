@@ -31,13 +31,13 @@
 #define PF_HEAD			0x0020		/* first page of an allocated block */
 
 /* zones */
-#define ZONE_DMA32		0		/* PA < 4GB */
+#define ZONE_DMA32		0		/* PA < 4GB, or the board's DMA_ZONE_LIMIT */
 #define ZONE_NORMAL		1		/* PA >= 4GB */
 #define ZONE_NUM		2
 
 /* knl_alloc_pages flags */
 #define KAF_ZERO		0x01		/* zero-fill */
-#define KAF_DMA32		0x02		/* must be below 4GB */
+#define KAF_DMA32		0x02		/* must be in ZONE_DMA32 */
 #define KAF_NOWAIT		0x04		/* never blocks (always the case for now) */
 
 typedef struct pframe {

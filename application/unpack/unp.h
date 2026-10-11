@@ -23,6 +23,7 @@
 typedef struct {
 	TS_UUID		archive;
 	char		name[128];		/* the archive object's name */
+	char		maker[64];		/* who took them out, for the metadata's "maker"; "" 書庫解凍 */
 	BOOL		autoref;		/* the store taken out into counts links itself */
 	UB		*raw;
 	UINT		rawlen;

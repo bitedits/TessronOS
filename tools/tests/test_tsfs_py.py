@@ -325,7 +325,9 @@ class TestBasics(unittest.TestCase):
         self.assertIsNone(metamod.order_parse(b'{"records":[1]}'))
         self.assertIsNone(metamod.order_parse(b'[{"rid":1}]'))
         self.assertIsNone(metamod.order_parse(
-            b'{"records":[%s]}' % b",".join([b'{"rid":1}'] * 65)))
+            b'{"records":[%s]}' % b",".join([b'{"rid":1}'] * (objmod.MAX_REC + 1))))
+        self.assertEqual(len(metamod.order_parse(
+            b'{"records":[%s]}' % b",".join([b'{"rid":1}'] * objmod.MAX_REC))), objmod.MAX_REC)
         self.assertEqual(metamod.order_parse(
             b'{"records":[{"rid":3}],"records":[{"rid":4}]}'), [(3, 1, 0)])
 

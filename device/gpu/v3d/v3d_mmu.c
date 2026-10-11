@@ -167,7 +167,12 @@ EXPORT void v3d_mmu_free( T_V3DMMU *m, UW va, UD npages )
 	ISpinLock(&m->lock, &imask);
 	used_set(m, i, npages, FALSE);
 	m->nfree += npages;
-	if ( i < m->hint ) m->hint = i;
+	/*
+	 * The search goes on from where it was, not back to what was just
+	 * freed: an address given out again at once could still be held, with
+	 * what was there before, in a cache of the GPU's that is looked up by
+	 * address. Freed addresses come round again when the search wraps.
+	 */
 	ISpinUnlock(&m->lock, &imask);
 }
 

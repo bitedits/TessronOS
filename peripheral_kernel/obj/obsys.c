@@ -29,16 +29,33 @@
  *			    written a number, that one is used
  *	  6 OB_SYS_WALL     the wallpaper, as the object its picture is;
  *			    written a UUID (and how it is laid), that one
- *	  7 OB_SYS_NET      the network: the card, its link, the address
- *			    the interface has, and how many sockets other
- *			    programs hold open
- *	  8 OB_SYS_SOUND    what plays sound, and how
+ *	  7 OB_SYS_NET      the network: the stack's host name, the card's
+ *			    interface's number, the card, its link, the address
+ *			    the interface has, its IPv6 addresses with their
+ *			    lifetimes, router and name servers, and how many
+ *			    sockets other programs hold open
+ *	  8 OB_SYS_SOUND    what plays sound, and how: the output playing,
+ *			    the one chosen, and every output with its kind,
+ *			    flags and name (OUT, OUT_KIND, OUT_FLAGS,
+ *			    OUT_NAME, a set for each); written "SELECT id",
+ *			    that output is chosen (include/ts/snd.h);
+ *			    written "PLAY what" (buzzer, press, release,
+ *			    tick, long, test; "tone" after it for an
+ *			    object's tone), that sound is played on it and
+ *			    the write answers whether it sounds (beep.c);
+ *			    KEEP says whether the stream is kept going in
+ *			    silence, and "KEEP 1" or "KEEP 0" written sets it
  *	  9 OB_SYS_HW       ハードウェアの状態: the temperature of the chip and
  *			    the rates of the ARM and V3D clocks, which the
- *			    Raspberry Pi's firmware tells; unknown on QEMU
+ *			    Raspberry Pi's firmware tells, unknown on QEMU;
+ *			    the limit of the processors' clock (CPU_MHZ) and
+ *			    the range the firmware allows, the fan's slowing,
+ *			    what the firmware says of the supply, and the
+ *			    watchdog's seconds
  *
- *	Reading is everyone's; writing is the administrators' (the
- *	object's protection, rw-rw-r-- with their group).
+ *	Reading is everyone's; writing is the administrators' and the
+ *	ordinary users' (the object's protection, rw-rw-r-- with the
+ *	administrators' group, and the ordinary users' group let write).
  */
 
 #include <sys/machine.h>
@@ -54,6 +71,9 @@
 #include <ts/wm.h>
 #include <ts/xf.h>
 #include <ts/conf.h>
+#include <ts/board.h>
+#include <ts/cpuclk.h>
+#include <ts/lockup.h>
 #include "sysman/pfalloc.h"
 #include "obj.h"
 
@@ -105,7 +125,7 @@ LOCAL INT hex( UB *t, INT n, INT max, UW v, INT digits )
 
 /* The system's version, R and a number, a point and three digits (make TS_VERSION=) */
 #ifndef TS_VERSION
-#define TS_VERSION	"R1.000"
+#define TS_VERSION	"R1.100"
 #endif
 
 /* ---------------------------------------------------------------- the records */
@@ -123,11 +143,13 @@ LOCAL INT info_text( UB *t, INT max )
 	n = knl_oj_put_num(t, n, max, VER_MINOR);
 	n = knl_oj_put(t, n, max, "\n");
 	n = put(t, n, max, "BUILD", __DATE__ " " __TIME__);
-#ifdef RPI5
-	n = put(t, n, max, "BOARD", "Raspberry Pi 5");
-#else
-	n = put(t, n, max, "BOARD", "QEMU virt");
-#endif
+	/* the board as the device tree and the firmware's revision name it (board.c) */
+	n = put(t, n, max, "BOARD", ( knl_board.name != NULL ) ? knl_board.name : "unknown");
+	if ( knl_board.rev != 0 ) {
+		n = knl_oj_put(t, n, max, "BOARD_REV\t");
+		n = hex(t, n, max, knl_board.rev, 6);
+		n = knl_oj_put(t, n, max, "\n");
+	}
 	n = put(t, n, max, "CPU", "Arm Cortex-A76 (AArch64)");
 	n = put_num(t, n, max, "CPUS", knl_num_prc);
 	n = put_num(t, n, max, "MEMORY_MB", (D)( knl_pf_total_count(-1) >> 8 ));
@@ -138,20 +160,38 @@ LOCAL INT info_text( UB *t, INT max )
 }
 
 /* The state of the hardware, as the firmware tells it (the property tags) */
+#ifdef RPI_VCFW
+IMPORT ER knl_fw_value( UW tag, UW id, UW *p_val );	/* kernel/sysdepend/rpi/mbox.c */
 #ifdef RPI5
-IMPORT ER knl_fw_value( UW tag, UW id, UW *p_val );	/* kernel/sysdepend/rpi5/mbox.c */
+IMPORT ER knl_fan_state( INT *p_level, INT *p_speed, BOOL *p_pwm );	/* kernel/sysdepend/rpi5/fan.c */
+#endif
 #define TAG_GET_TEMPERATURE	0x00030006U
 #define TAG_GET_CLOCK_RATE	0x00030002U
 #define CLOCK_ARM		3
 #define CLOCK_V3D		5
 #endif
 
+/*
+ * What the firmware says of the supply: low now, low at some time since
+ * the start, or never
+ */
+LOCAL CONST char *undervolt( UW thr )
+{
+	return ( thr == 0xFFFFFFFFU ) ? "unknown" : ( thr & CPU_THR_UNDERVOLT ) ? "now"
+		: ( thr & CPU_THR_UNDERVOLT_SEEN ) ? "before" : "no";
+}
+
 LOCAL INT hw_text( UB *t, INT max )
 {
-	INT	n = 0;
-#ifdef RPI5
+	INT		n = 0, wd;
+	BOOL		hw = FALSE;
+	T_CPUCLK	clk;
+#ifdef RPI_VCFW
 	UW	v = 0;
+#endif
 
+	knl_cpu_clock(&clk);
+#ifdef RPI_VCFW
 	if ( knl_fw_value(TAG_GET_TEMPERATURE, 0, &v) >= E_OK ) {
 		n = knl_oj_put(t, n, max, "TEMPERATURE\t");
 		n = knl_oj_put_num(t, n, max, v / 1000);
@@ -162,8 +202,8 @@ LOCAL INT hw_text( UB *t, INT max )
 	} else {
 		n = put(t, n, max, "TEMPERATURE", "unknown");
 	}
-	if ( knl_fw_value(TAG_GET_CLOCK_RATE, CLOCK_ARM, &v) >= E_OK ) {
-		n = put_num(t, n, max, "ARM_HZ", v);
+	if ( clk.hz != 0 ) {
+		n = put_num(t, n, max, "ARM_HZ", clk.hz);
 	} else {
 		n = put(t, n, max, "ARM_HZ", "unknown");
 	}
@@ -172,12 +212,43 @@ LOCAL INT hw_text( UB *t, INT max )
 	} else {
 		n = put(t, n, max, "V3D_HZ", "unknown");
 	}
+#ifdef RPI5
+	{
+		INT	level = 0, speed = 0;
+		BOOL	pwm = FALSE;
+
+		if ( knl_fan_state(&level, &speed, &pwm) >= E_OK ) {
+			n = put_num(t, n, max, "FAN_LEVEL", level);
+			n = put(t, n, max, "FAN_DRIVE", pwm ? "pwm" : "onoff");
+			if ( speed >= 0 ) {
+				n = put_num(t, n, max, "FAN_SPEED", speed);
+			}
+		}
+	}
+#endif
 #else
 	/* QEMU has no sensor and no firmware to ask */
 	n = put(t, n, max, "TEMPERATURE", "unknown");
 	n = put(t, n, max, "ARM_HZ", "unknown");
 	n = put(t, n, max, "V3D_HZ", "unknown");
 #endif
+	/* the processors' clock as the settings limit it (cpuclk.c), and the supply */
+	n = put_num(t, n, max, "ARM_LIMIT_MHZ", clk.limit_mhz);
+	if ( clk.max_hz != 0 ) {
+		n = put_num(t, n, max, "ARM_MIN_HZ", clk.min_hz);
+		n = put_num(t, n, max, "ARM_MAX_HZ", clk.max_hz);
+	}
+	n = put_num(t, n, max, "ARM_HEAT_HZ", clk.heat_hz);
+	if ( clk.throttled != 0xFFFFFFFFU ) {
+		n = knl_oj_put(t, n, max, "THROTTLED\t0x");
+		n = hex(t, n, max, clk.throttled, 8);
+		n = knl_oj_put(t, n, max, "\n");
+	}
+	n = put(t, n, max, "UNDERVOLT", undervolt(clk.throttled));
+	/* the watchdog: seconds from a stopped machine found to its reset, 0 off (lockup.c) */
+	wd = knl_wdog_get(&hw);
+	n = put_num(t, n, max, "WATCHDOG_S", wd);
+	n = put(t, n, max, "WATCHDOG_HW", hw ? "yes" : "no");
 	return n;
 }
 
@@ -210,6 +281,71 @@ LOCAL INT wall_text( UB *t, INT max )
 	return put_num(t, n, max, "MODE", sys_wall_mode);
 }
 
+/* A lifetime in seconds, or "infinite" */
+LOCAL INT life_word( char *s, INT at, UINT life )
+{
+	CONST char *inf = "infinite";
+
+	s[at++] = ' ';
+	if ( life == 0xffffffffU ) {
+		while ( *inf != 0 ) s[at++] = *inf++;
+		s[at] = 0;
+		return at;
+	}
+	return at + cf_itoa((INT)life, s + at);
+}
+
+/*
+ * IPv6: how the settings have it, then a line for each address of the
+ * card's interface -- the address and its prefix length, what kind it
+ * is, the seconds left of its valid and preferred lifetimes, and what
+ * is wrong with it if anything -- the router of the default route and
+ * the name servers asked.
+ */
+LOCAL INT net6_text( UB *t, INT n, INT max )
+{
+	T_SOIF6	l[8];
+	UB	gw[16];
+	char	s[CF_IP6_STRLEN + 64];
+	UINT	mode = so_getip6();
+	INT	k, i, at;
+
+	switch ( mode & SO_IP6_MODE ) {
+	case SO_IP6_OFF:	n = put(t, n, max, "IPV6", "off");	break;
+	case SO_IP6_LINK:	n = put(t, n, max, "IPV6", "none");	break;
+	case SO_IP6_FIXED:	n = put(t, n, max, "IPV6", "fixed");	break;
+	default:		n = put(t, n, max, "IPV6", ( mode & SO_IP6_TEMP ) ? "auto temp" : "auto"); break;
+	}
+	k = so_getifaddr6(l, 8, gw);
+	for ( i = 0; i < k; i++ ) {
+		CONST UB	*a = l[i].addr;
+
+		cf_ip6str(a, s);
+		at = (INT)knl_strlen(s);
+		s[at++] = '/';
+		at += cf_itoa(l[i].plen, s + at);
+		knl_strcpy(s + at, ( a[0] == 0xfe && ( a[1] & 0xc0 ) == 0x80 ) ? " link"
+				 : ( l[i].flags & SO_IF6_TEMPORARY ) ? " temp"
+				 : ( l[i].flags & SO_IF6_AUTOCONF ) ? " auto" : " fixed");
+		at = (INT)knl_strlen(s);
+		at = life_word(s, at, l[i].vltime);
+		at = life_word(s, at, l[i].pltime);
+		if ( l[i].flags & SO_IF6_TENTATIVE ) at += (INT)knl_strlen(knl_strcpy(s + at, " tentative"));
+		if ( l[i].flags & SO_IF6_DUPLICATED ) at += (INT)knl_strlen(knl_strcpy(s + at, " duplicated"));
+		if ( l[i].flags & SO_IF6_DEPRECATED ) at += (INT)knl_strlen(knl_strcpy(s + at, " deprecated"));
+		n = put(t, n, max, "ADDRESS6", s);
+	}
+	if ( k >= 0 && !cf_ip6zero(gw) ) {
+		cf_ip6str(gw, s);
+		n = put(t, n, max, "GATEWAY6", s);
+	}
+	for ( i = 0; i < 4 && so_getdns6(i, gw) == E_OK; i++ ) {
+		cf_ip6str(gw, s);
+		n = put(t, n, max, "DNS6", s);
+	}
+	return n;
+}
+
 LOCAL INT net_text( UB *t, INT max )
 {
 	T_NETSTAT	st;
@@ -217,11 +353,20 @@ LOCAL INT net_text( UB *t, INT max )
 	UINT		a = 0, m = 0, g = 0, d = 0;
 	INT		n = 0, i;
 
-#ifdef RPI5
+#if defined(RPI5)
 	n = put(t, n, max, "ADAPTER", "RP1 Gigabit Ethernet (GEM)");
+#elif defined(RPI4)
+	n = put(t, n, max, "ADAPTER", "BCM2711 Gigabit Ethernet (GENET)");
 #else
 	n = put(t, n, max, "ADAPTER", "virtio-net");
 #endif
+	{
+		char	h[32];
+
+		/* the stack's host name, and the number of the card's interface (a link-local address's scope) */
+		if ( so_gethostname(h, sizeof(h)) >= E_OK ) n = put(t, n, max, "HOSTNAME", h);
+		n = put_num(t, n, max, "IFINDEX", (D)so_ifnametoindex("neta0"));
+	}
 	if ( net_get_mac(mac) >= E_OK ) {
 		n = knl_oj_put(t, n, max, "MAC\t");
 		for ( i = 0; i < 6; i++ ) {
@@ -242,6 +387,7 @@ LOCAL INT net_text( UB *t, INT max )
 		if ( so_getdns((UW *)&d) >= E_OK ) n = put_ip(t, n, max, "DNS", d);
 		n = put(t, n, max, "DHCP", so_dhcp_on() ? "on" : "off");
 	}
+	n = net6_text(t, n, max);
 	/* the sockets of programs other than the one reading this */
 	n = put_num(t, n, max, "BUSY", so_busy(ts_get_pid()));
 	{
@@ -264,12 +410,34 @@ LOCAL INT sound_text( UB *t, INT max )
 	}
 	n = put(t, n, max, "DEVICE", SND_DEVNM);
 	if ( tk_srea_dev(dd, DN_SDSTAT, &st, sizeof(st), &asz) >= E_OK ) {
-		n = put(t, n, max, "OUTPUT", ( st.backend == SND_BE_USB ) ? "USB audio"
-				     : ( st.backend == SND_BE_I2S ) ? "I2S" : "none now");
 		n = put_num(t, n, max, "RATE", st.out_rate);
 		n = put_num(t, n, max, "CHANNELS", st.out_channels);
 	}
 	tk_cls_dev(dd, 0);
+	{
+		SDOutSel	s;
+		SDOut		o[SND_OUT_MAX];
+		INT		k, m;
+		LOCAL CONST char *CONST kind[] = { "none", "usb", "i2s", "hdmi" };
+
+		dd = tk_opn_dev((UB *)SND_DEVNM, TD_READ);
+		knl_memset(&s, 0, sizeof(s));
+		if ( dd >= E_OK ) {
+			(void)tk_srea_dev(dd, DN_SDOUTSEL, &s, sizeof(s), &asz);
+			tk_cls_dev(dd, 0);
+		}
+		n = put(t, n, max, "OUTPUT", ( s.now[0] != 0 ) ? (CONST char *)s.now : "none");
+		n = put(t, n, max, "SELECT", ( s.id[0] != 0 ) ? (CONST char *)s.id : SND_ID_AUTO);
+		n = put(t, n, max, "KEEP", knl_snd_keeping() ? "1" : "0");
+		/* every output: its id, kind, flags (SND_OF_*) and name, a line of each */
+		m = knl_snd_outputs(o, SND_OUT_MAX);
+		for ( k = 0; k < m; k++ ) {
+			n = put(t, n, max, "OUT", (CONST char *)o[k].id);
+			n = put(t, n, max, "OUT_KIND", kind[( o[k].kind <= SND_BE_HDMI ) ? o[k].kind : 0]);
+			n = put_num(t, n, max, "OUT_FLAGS", (D)o[k].flags);
+			n = put(t, n, max, "OUT_NAME", (CONST char *)o[k].name);
+		}
+	}
 	return n;
 }
 
@@ -336,6 +504,46 @@ EXPORT ER knl_obsys_write( INT recno, CONST UB *buf, SZ size )
 			sys_wall_mode = mode;
 			knl_obsys_changed(OB_SYS_WALL);
 		}
+		return er;
+	}
+	case OB_SYS_SOUND:
+	{
+		char	id[SND_ID_MAX];
+
+		/* "PLAY what [tone]": one of the system's sounds, on the output chosen */
+		if ( knl_strcmp(w, "PLAY") == 0 ) {
+			LOCAL CONST char *CONST what[] = { "buzzer", "press", "release", "tick", "long", "test" };
+			char	t[16];
+			UINT	k;
+
+			first_word(buf, size, 1, id, sizeof(id));
+			first_word(buf, size, 2, t, sizeof(t));
+			for ( k = 0; k < sizeof(what) / sizeof(what[0]) && knl_strcmp(id, what[k]) != 0; k++ ) {
+				;
+			}
+			if ( k >= sizeof(what) / sizeof(what[0]) ) {
+				return E_PAR;
+			}
+			return wm_beep_try(k | ( ( knl_strcmp(t, "tone") == 0 ) ? WM_BEEP_TONE : 0 ));
+		}
+		/* "KEEP 1" or "KEEP 0": the stream kept going, or let stop */
+		if ( knl_strcmp(w, "KEEP") == 0 ) {
+			first_word(buf, size, 1, id, sizeof(id));
+			if ( knl_strcmp(id, "1") != 0 && knl_strcmp(id, "0") != 0 ) {
+				return E_PAR;
+			}
+			er = knl_snd_keep(knl_strcmp(id, "1") == 0);
+			if ( er >= E_OK ) knl_obsys_changed(OB_SYS_SOUND);
+			return er;
+		}
+		/* "SELECT id", or the id alone */
+		if ( knl_strcmp(w, "SELECT") == 0 ) {
+			first_word(buf, size, 1, id, sizeof(id));
+		} else {
+			first_word(buf, size, 0, id, sizeof(id));
+		}
+		er = knl_snd_select((CONST UB *)id);
+		if ( er >= E_OK ) knl_obsys_changed(OB_SYS_SOUND);
 		return er;
 	}
 	default:

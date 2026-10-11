@@ -424,39 +424,13 @@ LOCAL SZ chunk( UB *out, CONST char *kind, CONST UB *data, SZ n )
 	return n + 12;
 }
 
-EXPORT ER img_png_encode( CONST UW *px, INT w, INT h, UB **p_out, SZ *p_len )
+/* A zlib stream of stored blocks of at most 65535 bytes, and the sum: the caller's to Kfree */
+LOCAL UB *stored( CONST UB *raw, SZ rawlen, SZ *p_len )
 {
-	UB	*raw, *z, *out, hd[13];
-	SZ	rawlen, zlen, nblk, at, i, o;
+	UB	*z;
+	SZ	zlen, nblk, i, o;
 	UW	a = 1, b = 0;
-	INT	x, y;
 
-	if ( px == NULL || w <= 0 || h <= 0 || p_out == NULL || p_len == NULL ) {
-		return E_PAR;
-	}
-	/* each row: its filter, none, then its pixels */
-	rawlen = (SZ)h * ( 1 + (SZ)w * 4 );
-	raw = (UB *)Kmalloc(rawlen);
-	if ( raw == NULL ) {
-		return E_NOMEM;
-	}
-	at = 0;
-	for ( y = 0; y < h; y++ ) {
-		raw[at++] = 0;
-		for ( x = 0; x < w; x++ ) {
-			UW	v = px[(SZ)y * w + x];
-
-			if ( v == IMG_CLEAR ) {
-				raw[at++] = 0;  raw[at++] = 0;  raw[at++] = 0;  raw[at++] = 0;
-			} else {
-				raw[at++] = (UB)( v >> 16 );
-				raw[at++] = (UB)( v >> 8 );
-				raw[at++] = (UB)v;
-				raw[at++] = 0xFF;
-			}
-		}
-	}
-	/* zlib: its head, stored blocks of at most 65535, and the sum */
 	nblk = ( rawlen + 65534 ) / 65535;
 	if ( nblk == 0 ) {
 		nblk = 1;
@@ -464,8 +438,7 @@ EXPORT ER img_png_encode( CONST UW *px, INT w, INT h, UB **p_out, SZ *p_len )
 	zlen = 2 + nblk * 5 + rawlen + 4;
 	z = (UB *)Kmalloc(zlen);
 	if ( z == NULL ) {
-		Kfree(raw);
-		return E_NOMEM;
+		return NULL;
 	}
 	o = 0;
 	z[o++] = 0x78;
@@ -494,7 +467,50 @@ EXPORT ER img_png_encode( CONST UW *px, INT w, INT h, UB **p_out, SZ *p_len )
 	}
 	put32(z + o, ( b << 16 ) | a);
 	o += 4;
+	*p_len = o;
+
+	return z;
+}
+
+EXPORT ER img_png_encode( CONST UW *px, INT w, INT h, UB **p_out, SZ *p_len )
+{
+	UB	*raw, *z = NULL, *out, hd[13];
+	SZ	rawlen, at, o = 0;
+	INT	x, y;
+
+	if ( px == NULL || w <= 0 || h <= 0 || p_out == NULL || p_len == NULL ) {
+		return E_PAR;
+	}
+	/* each row: its filter, none, then its pixels */
+	rawlen = (SZ)h * ( 1 + (SZ)w * 4 );
+	raw = (UB *)Kmalloc(rawlen);
+	if ( raw == NULL ) {
+		return E_NOMEM;
+	}
+	at = 0;
+	for ( y = 0; y < h; y++ ) {
+		raw[at++] = 0;
+		for ( x = 0; x < w; x++ ) {
+			UW	v = px[(SZ)y * w + x];
+
+			if ( v == IMG_CLEAR ) {
+				raw[at++] = 0;  raw[at++] = 0;  raw[at++] = 0;  raw[at++] = 0;
+			} else {
+				raw[at++] = (UB)( v >> 16 );
+				raw[at++] = (UB)( v >> 8 );
+				raw[at++] = (UB)v;
+				raw[at++] = 0xFF;
+			}
+		}
+	}
+	/* packed by deflate (deflate.c), or kept in stored blocks when that cannot be done */
+	if ( ts_zlib_deflate(raw, rawlen, &z, &o, 6) < E_OK ) {
+		z = stored(raw, rawlen, &o);
+	}
 	Kfree(raw);
+	if ( z == NULL ) {
+		return E_NOMEM;
+	}
 
 	out = (UB *)Kmalloc(8 + 25 + ( o + 12 ) + 12);
 	if ( out == NULL ) {

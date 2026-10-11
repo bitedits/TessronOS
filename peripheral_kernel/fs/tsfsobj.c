@@ -22,64 +22,7 @@
  *	which is what ordered mode means.
  */
 
-/* ---------------------------------------------------------------- layout */
-/*
- *	The object block, 4096 bytes, little endian throughout.
- *
- *	   0	the common head: kind "TFOB", its own block number, the
- *		volume, the object (low 64 bits of its UUID) as owner, the
- *		transaction, the CRC
- *	  64	UUID of the object
- *	  80	flags (TSFSO_F_*)
- *	  84	reference count
- *	  88	entries of the placement table, of the resource table, of
- *		the link table (32 bits each), and the next rid
- *	 104	made, updated, read	64 bit ns since 1985-01-01 UTC
- *	 128	where the metadata text is (a place, 32 bytes)
- *	 160	where the placement table is
- *	 192	where the resource table is
- *	 224	where the link table is
- *	 256	which units of the inline area are taken (56 bits)
- *	 264	holds: the part of the count no link of the volume makes
- *	 288	where the icon is (a place, 32 bytes); all 0 when it has none
- *	 512	the inline area, 56 units of 64 bytes
- *
- *	A place (32 bytes) is one of
- *	   0	form: none, inline, a run, an extent tree
- *	   8	bytes
- *	  16	inline: offset (16 bits) and units (16 bits)
- *		a run: first block; its length at 24
- *		an extent tree: the block of its leaf; extents at 24
- *
- *	The metadata text, the icon and the tables are management parts:
- *	inline, or a run of blocks each with the common head (kind "TFTB")
- *	that goes through the journal. A volume written before the icon had
- *	a place of its own kept it as a resource of the owner all ones; it
- *	is read from there until it is next written. The bytes of a record or a resource are data:
- *	inline while they are small, else a run of plain blocks, else an
- *	extent tree, whose one leaf (kind "TFTB") lists up to 165 runs.
- *
- *	A placement table entry, 48 bytes, in the order of the rids:
- *	   0	rid
- *	   4	kind (TSFS_REC_XTAD or TSFS_REC_BIN)
- *	   8	bytes
- *	  16	where the bytes are (a place)
- *
- *	A resource table entry, 64 bytes:
- *	   0	rid of the record it belongs to; all ones for the icon; the
- *		top bit and a place for one written before its record was
- *	   4	its number within that record
- *	   8	file name extension, 16 bytes padded with NUL
- *	  24	bytes
- *	  32	where the bytes are (a place)
- *
- *	A link table entry, 48 bytes, in the order of the whole entry:
- *	   0	the link's own identity (vobjid), all 0 when it has none
- *	  16	the object it points at
- *	  32	rid of the record it is in
- *	  36	flags: 1 it points off the volume and is not counted
- *	  40	reserved
- */
+/* The layout of the object block is in tsfsfmt.h. */
 
 #include <sys/machine.h>
 #include "kernel.h"
@@ -90,75 +33,13 @@
 #include <ts/tsfsbtree.h>
 #include <ts/tsfsjrnl.h>
 #include <ts/tsfsobj.h>
+#include <ts/tsfsck.h>
 #include <ts/json.h>
 #include "tstdlib.h"
+#include "tsfsfmt.h"
 
-#define OB_UUID		64
-#define OB_FLAGS	80
-#define OB_REFCNT	84
-#define OB_NPLACE	88
-#define OB_NRES		92
-#define OB_NLINK	96
-#define OB_NEXTRID	100
-#define OB_MADE		104
-#define OB_UPDATED	112
-#define OB_READ		120
-#define OB_META		128
-#define OB_PLACE	160
-#define OB_RES		192
-#define OB_LINK		224
-#define OB_INLMAP	256
-#define OB_PINS		264
-#define OB_ICON		288
-#define OB_INLINE	TSFSO_HEAD_SIZE
-#define INL_UNITS	( TSFSO_INLINE_BYTES / TSFSO_INLINE_UNIT )
-
-/* a place */
-#define PL_SIZE		32
-#define PL_FORM		0
-#define PL_BYTES	8
-#define PL_A		16
-#define PL_B		24
-#define F_NONE		0
-#define F_INLINE	1
-#define F_RUN		2
-#define F_TREE		3
-
-/* a placement table entry */
-#define PE_SIZE		48
-#define PE_RID		0
-#define PE_KIND		4
-#define PE_BYTES	8
-#define PE_PLACE	16
-
-/* a resource table entry */
-#define RS_SIZE		64
-#define RS_OWNER	0
-#define RS_RESNO	4
-#define RS_EXT		8
-#define RS_BYTES	24
-#define RS_PLACE	32
-#define RID_ICON	0xFFFFFFFFU
-
-/* a link table entry */
-#define LK_SIZE		48
-#define LK_VOBJ		0
-#define LK_TARGET	16
-#define LK_RID		32
-#define LK_FLAGS	36
-#define LK_KEY		40		/* the bytes entries are ordered by */
-#define LK_F_EXTERNAL	1
 #define RELINK_STEP	64		/* links one transaction changes the counts of */
 #define RELINK_GUARD	1000		/* steps one object may take */
-#define RID_PLACE	0x80000000U	/* owner by place: its record was not there yet */
-
-/* a block of a management part: the common head, then the bytes */
-#define MB_PAY		( TSFSBLK_BLOCK_SIZE - TSFSBLK_HDR_SIZE )
-
-/* the leaf of an extent tree */
-#define XL_N		64
-#define XL_ENT		128
-#define XL_ESZ		24
 
 #define TSFSO_META_MAX	65536		/* CNF_TSFS_META_MAX (design 11.5) */
 #define TSFSO_ICON_MAX	TSFS_ICON_MAX	/* bytes of an icon */
@@ -170,9 +51,17 @@
 LOCAL INT	obj_trx[TSFSBLK_MAX_VOL];
 
 /* Runs a replacement gave up, to be given back once it is real */
-LOCAL UD	pend_start[TSFSBLK_MAX_VOL][PEND_MAX];
-LOCAL UD	pend_count[TSFSBLK_MAX_VOL][PEND_MAX];
-LOCAL INT	pend_n[TSFSBLK_MAX_VOL];
+/*
+ * The runs a volume's open transaction gave up, made the first time
+ * the volume's number has any and kept for that number after.
+ */
+typedef struct {
+	UD	start[PEND_MAX];
+	UD	count[PEND_MAX];
+	INT	n;
+} PEND;
+
+LOCAL PEND	*pend_tbl[TSFSBLK_MAX_VOL];
 
 /* ---------------------------------------------------------------- bytes */
 
@@ -416,16 +305,44 @@ LOCAL void inl_give( UB *hdr, INT off, INT units )
 
 /* ---------------------------------------------------------------- runs given back later */
 
+/* What a volume's number has waiting, NULL for nothing */
+LOCAL PEND *pend_of( ID vol )
+{
+	return ( vol >= 1 && vol <= TSFSBLK_MAX_VOL )
+	       ? __atomic_load_n(&pend_tbl[vol - 1], __ATOMIC_ACQUIRE) : NULL;
+}
+
+LOCAL void pend_clear( ID vol )
+{
+	PEND	*p = pend_of(vol);
+
+	if ( p != NULL ) p->n = 0;
+}
+
 LOCAL ER pend_add( ID vol, UD start, UD count )
 {
-	INT	v = vol - 1;
+	PEND	*p = pend_of(vol), *none = NULL;
 
-	if ( pend_n[v] >= PEND_MAX ) {
+	if ( p == NULL ) {
+		if ( vol < 1 || vol > TSFSBLK_MAX_VOL ) {
+			return E_ID;
+		}
+		p = (PEND *)Kcalloc(1, sizeof(PEND));
+		if ( p == NULL ) {
+			return E_NOMEM;
+		}
+		if ( !__atomic_compare_exchange_n(&pend_tbl[vol - 1], &none, p, FALSE,
+						  __ATOMIC_RELEASE, __ATOMIC_ACQUIRE) ) {
+			Kfree(p);
+			p = none;
+		}
+	}
+	if ( p->n >= PEND_MAX ) {
 		return E_LIMIT;
 	}
-	pend_start[v][pend_n[v]] = start;
-	pend_count[v][pend_n[v]] = count;
-	pend_n[v]++;
+	p->start[p->n] = start;
+	p->count[p->n] = count;
+	p->n++;
 	return E_OK;
 }
 
@@ -437,18 +354,19 @@ LOCAL ER pend_add( ID vol, UD start, UD count )
  */
 LOCAL void pend_apply( ID vol )
 {
-	INT	v = vol - 1, i;
+	PEND	*p = pend_of(vol);
+	INT	i;
 
-	if ( pend_n[v] == 0 ) {
+	if ( p == NULL || p->n == 0 ) {
 		return;
 	}
 	if ( ts_jrnl_begin(vol) >= E_OK ) {
-		for ( i = 0; i < pend_n[v]; i++ ) {
-			ts_free_ext(vol, pend_start[v][i], pend_count[v][i]);
+		for ( i = 0; i < p->n; i++ ) {
+			ts_free_ext(vol, p->start[i], p->count[i]);
 		}
 		ts_jrnl_commit(vol);
 	}
-	pend_n[v] = 0;
+	p->n = 0;
 }
 
 /* ---------------------------------------------------------------- management parts */
@@ -1528,14 +1446,14 @@ LOCAL ER txn_end( ID vol, ER er )
 	ts_btree_jrnl(vol, FALSE);
 	if ( er < E_OK ) {
 		ts_jrnl_abort(vol);
-		pend_n[vol - 1] = 0;		/* the old places are still in use */
+		pend_clear(vol);		/* the old places are still in use */
 		return er;
 	}
 	er = ts_jrnl_commit(vol);
 	if ( er >= E_OK ) {
 		pend_apply(vol);
 	} else {
-		pend_n[vol - 1] = 0;
+		pend_clear(vol);
 	}
 	return er;
 }
@@ -1560,6 +1478,12 @@ EXPORT ER ts_obj_begin( ID vol )
 	return E_OK;
 }
 
+/* Whether a caller holds a transaction of its own open on the volume */
+EXPORT BOOL ts_obj_trx_open( ID vol )
+{
+	return (BOOL)( vol_ok(vol) && obj_trx[vol - 1] > 0 );
+}
+
 EXPORT ER ts_obj_end( ID vol, BOOL commit )
 {
 	ER	er;
@@ -1573,14 +1497,14 @@ EXPORT ER ts_obj_end( ID vol, BOOL commit )
 	obj_trx[vol - 1] = 0;
 	ts_btree_jrnl(vol, FALSE);
 	if ( !commit ) {
-		pend_n[vol - 1] = 0;
+		pend_clear(vol);
 		return ts_jrnl_abort(vol);
 	}
 	er = ts_jrnl_commit(vol);
 	if ( er >= E_OK ) {
 		pend_apply(vol);
 	} else {
-		pend_n[vol - 1] = 0;
+		pend_clear(vol);
 	}
 	return er;
 }
@@ -1593,7 +1517,7 @@ EXPORT ID ts_obj_mount( CONST char *devnm )
 
 	if ( vol > 0 && vol_ok(vol) ) {
 		obj_trx[vol - 1] = 0;
-		pend_n[vol - 1] = 0;
+		pend_clear(vol);
 		ts_btree_jrnl(vol, FALSE);
 		(void)ts_obj_tidy(vol, NULL);	/* what a cut in the power left */
 	}
@@ -1819,6 +1743,156 @@ LOCAL ER obj_free( OBJ *o, CONST TS_UUID *uuid )
 }
 
 
+/* ---------------------------------------------------------------- what is left of a damaged object */
+
+#define SALV_REC_MAX	( 64UL * 1024 * 1024 )	/* bytes of one record saved */
+#define SALV_NAME	"救出: "
+
+/* A place as a damaged object block gives it, looked at before anything is read through it */
+LOCAL BOOL salv_place( CONST UB *pl, UD total, UD max )
+{
+	UD	bytes = rd64(pl + PL_BYTES), a = rd64(pl + PL_A), b = rd64(pl + PL_B);
+	UW	off = rd16(pl + PL_A), units = rd16(pl + PL_A + 2);
+
+	if ( bytes > max ) {
+		return FALSE;
+	}
+	switch ( pl[PL_FORM] ) {
+	case F_NONE:
+		return (BOOL)( bytes == 0 );
+	case F_INLINE:
+		return (BOOL)( off >= OB_INLINE && (UD)off + bytes <= TSFSBLK_BLOCK_SIZE
+			       && (UD)units * TSFSO_INLINE_UNIT >= bytes );
+	case F_RUN:
+		return (BOOL)( a > 0 && b > 0 && a < total && b <= total - a
+			       && b * TSFSBLK_BLOCK_SIZE >= bytes );
+	case F_TREE:
+		return (BOOL)( a > 0 && a < total );
+	default:
+		return FALSE;
+	}
+}
+
+/*
+ * An object block that does not pass its check, read for what can still
+ * be had (design 7.5): where its metadata and its placement table are
+ * is taken from the block as it is, each place looked at before it is
+ * followed, and every record that reads whole is written into a new
+ * object named after the old one (救出: ...). The management parts in
+ * blocks of their own still have to pass their own checks. The resources
+ * and the links of the old object are not carried over. Answers the new
+ * object and how many records it got; E_OBJ when nothing could be read.
+ */
+EXPORT ER ts_obj_salvage( ID vol, UD blk, TS_UUID *p_new, INT *p_recs )
+{
+	T_TSFSBLK_SB	*sb;
+	OBJ		o;
+	RECE		*ord = NULL;
+	UB		*tab = NULL, *j = NULL, *json = NULL, *data, name[256];
+	SZ		jlen = 0, asz;
+	TS_UUID		u;
+	INT		ntab = 0, nord = 0, i, k, got = 0, pos, nl = 0, at;
+	UD		total;
+	ER		er;
+
+	*p_recs = 0;
+	sb = (T_TSFSBLK_SB *)Kmalloc(sizeof(T_TSFSBLK_SB));
+	o.hdr = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	ord = (RECE *)Kmalloc(sizeof(RECE) * ( TSFSO_MAX_REC + 1 ));
+	json = (UB *)Kmalloc(512);
+	if ( sb == NULL || o.hdr == NULL || ord == NULL || json == NULL ) {
+		er = E_NOMEM;
+		goto exit;
+	}
+	er = ts_ref_vol_blk(vol, sb);
+	if ( er >= E_OK ) er = ts_jrnl_read(vol, blk, o.hdr);
+	if ( er < E_OK ) {
+		goto exit;
+	}
+	total = sb->total_blocks;
+	o.vol = vol;
+	o.blk = blk;
+	o.owner = rd64(o.hdr + OB_UUID + 8);
+
+	/* the name, when the metadata still reads */
+	name[0] = 0;
+	if ( salv_place(o.hdr + OB_META, total, TSFSO_META_MAX) ) {
+		j = meta_all(&o, 0, &jlen);
+		if ( j != NULL ) {
+			T_JSON	root;
+
+			if ( js_span(j, (INT)jlen, 0, &root) >= E_OK && js_type(&root) == JS_OBJECT ) {
+				nl = js_get_str(&root, "name", name, (INT)sizeof(name) - 1);
+				if ( nl < 0 ) nl = 0;
+				name[nl] = 0;
+			}
+		}
+	}
+	/* the records, as the placement table says */
+	if ( rd32(o.hdr + OB_NPLACE) <= TSFSO_MAX_REC
+	  && salv_place(o.hdr + OB_PLACE, total, (UD)TSFSO_MAX_REC * PE_SIZE)
+	  && PLACE_LOAD(&o, &tab, &ntab) >= E_OK && ntab > 0 ) {
+		nord = order_of(&o, tab, ntab, ord);
+	}
+
+	at = 0;
+	knl_memcpy(json, "{\"name\":\"" SALV_NAME, 9 + sizeof(SALV_NAME) - 1);
+	at = 9 + (INT)sizeof(SALV_NAME) - 1;
+	for ( i = 0; i < nl && at < 400; i++ ) {
+		if ( name[i] == '"' || name[i] == '\\' || name[i] < 0x20 ) continue;
+		json[at++] = name[i];
+	}
+	if ( nl == 0 ) {
+		knl_memcpy(json + at, "実身", 6);
+		at += 6;
+	}
+	knl_memcpy(json + at, "\",\"refCount\":0}", 15);
+	at += 15;
+	if ( nord == 0 && j == NULL ) {
+		er = E_OBJ;			/* nothing of it reads */
+		goto exit;
+	}
+	er = ts_gen_uuid(&u);
+	if ( er >= E_OK ) er = obj_make(vol, &u, json, at, NULL, 0);
+	if ( er < E_OK ) {
+		goto exit;
+	}
+	for ( i = 0; i < nord; i++ ) {
+		UB	*e;
+		UD	bytes;
+
+		for ( k = 0; k < ntab && rd32(tab + k * PE_SIZE + PE_RID) != ord[i].rid; k++ ) ;
+		if ( k == ntab ) continue;
+		e = tab + k * PE_SIZE;
+		bytes = rd64(e + PE_BYTES);
+		if ( !salv_place(e + PE_PLACE, total, SALV_REC_MAX) || rd64(e + PE_PLACE + PL_BYTES) != bytes ) {
+			continue;
+		}
+		data = (UB *)Kmalloc((SZ)bytes + 1);
+		if ( data == NULL ) continue;
+		asz = 0;
+		if ( ( bytes == 0 || ( dseg_read(&o, e + PE_PLACE, 0, data, (SZ)bytes, &asz) >= E_OK
+				       && (UD)asz == bytes ) )
+		  && ts_obj_ins_rec(vol, &u, -1, ord[i].rt, ord[i].sub, &pos) >= E_OK
+		  && ( bytes == 0 || ts_obj_rpl_rec(vol, &u, pos, data, (SZ)bytes) >= E_OK ) ) {
+			got++;
+		}
+		Kfree(data);
+	}
+	*p_new = u;
+	*p_recs = got;
+	er = E_OK;
+
+    exit:
+	if ( j != NULL ) Kfree(j);
+	if ( tab != NULL ) Kfree(tab);
+	if ( json != NULL ) Kfree(json);
+	if ( ord != NULL ) Kfree(ord);
+	if ( o.hdr != NULL ) Kfree(o.hdr);
+	if ( sb != NULL ) Kfree(sb);
+	return er;
+}
+
 EXPORT ER ts_obj_exists( ID vol, CONST TS_UUID *uuid )
 {
 	UD	blk = 0;
@@ -1980,6 +2054,79 @@ EXPORT ER ts_obj_unlink( ID vol, CONST TS_UUID *uuid )
 	return refcnt_add(vol, uuid, -1);
 }
 
+/*
+ * The count put right by the check of a volume: set to what the link
+ * tables and the holds make it (never below the holds), the garbage
+ * list and the object's mark made to agree with it. One transaction.
+ */
+EXPORT ER ts_obj_set_ref( ID vol, CONST TS_UUID *uuid, INT cnt )
+{
+	OBJ	o;
+	UINT	flags;
+	INT	pins;
+	UD	blk = 0;
+	ER	er;
+
+	er = txn_begin(vol);
+	if ( er < E_OK ) {
+		return er;
+	}
+	er = obj_load(vol, uuid, &o);
+	if ( er < E_OK ) {
+		return txn_end(vol, er);
+	}
+	pins = (INT)rd32(o.hdr + OB_PINS);
+	if ( cnt < pins ) {
+		cnt = pins;
+	}
+	flags = (UINT)rd32(o.hdr + OB_FLAGS);
+	if ( ( flags & TSFSO_F_ORPHAN ) != 0 ) {
+		er = E_OBJ;			/* deleted while open: it goes when it is closed */
+	} else if ( cnt == 0 ) {
+		er = ts_btree_lookup_t(vol, TSFSBT_GC, uuid, &blk);
+		if ( er == E_NOEXS ) {
+			er = ts_btree_insert_t(vol, TSFSBT_GC, uuid, o.blk);
+		} else if ( er >= E_OK && blk != o.blk ) {
+			er = ts_btree_update_t(vol, TSFSBT_GC, uuid, o.blk);
+		}
+		flags |= TSFSO_F_GARBAGE;
+	} else {
+		er = ts_btree_delete_t(vol, TSFSBT_GC, uuid);
+		if ( er == E_NOEXS ) er = E_OK;
+		flags &= ~(UINT)TSFSO_F_GARBAGE;
+	}
+	if ( er >= E_OK ) {
+		wr32(o.hdr + OB_REFCNT, (UW)cnt);
+		wr32(o.hdr + OB_FLAGS, (UW)flags);
+		er = obj_store(&o);
+	}
+	obj_drop(&o);
+	return txn_end(vol, er);
+}
+
+LOCAL ER mark_relink( OBJ *o );
+
+/*
+ * The object marked for its link table to be made from its records
+ * again, as a change to an xmlTAD record marks it; ts_obj_relink then
+ * does the work.
+ */
+EXPORT ER ts_obj_mark_relink( ID vol, CONST TS_UUID *uuid )
+{
+	OBJ	o;
+	ER	er;
+
+	er = txn_begin(vol);
+	if ( er < E_OK ) {
+		return er;
+	}
+	er = obj_load(vol, uuid, &o);
+	if ( er >= E_OK ) er = mark_relink(&o);
+	if ( er >= E_OK ) er = obj_store(&o);
+	obj_drop(&o);
+	return txn_end(vol, er);
+}
+
 /* ---------------------------------------------------------------- links */
 
 LOCAL void uuid_of( OBJ *o, TS_UUID *u )
@@ -2086,6 +2233,9 @@ LOCAL INT lk_scan( CONST UB *t, SZ len, UW rid, UB *out, INT n, INT max )
 			break;
 		}
 		v = lk_attr(t, i + 5, j, "id");
+		if ( v >= 0 ) {
+			v += ts_lnk_split(t + v, (INT)( j - v ), NULL, NULL);	/* past a volume it names */
+		}
 		if ( v >= 0 && lk_uuid(t + v, j - v, &target) ) {
 			if ( n >= max ) {
 				return -1;
@@ -2189,20 +2339,134 @@ LOCAL ER lk_build( OBJ *o, UB *out, INT *p_n )
 	return er;
 }
 
-/* The counts one step moves, applied once the object block is stored */
+/*
+ * The counts one step moves, applied once the object block is stored;
+ * and the links to objects of other volumes that came or went, told to
+ * the object layer afterwards (ts_obj_xq_take).
+ */
 typedef struct {
 	TS_UUID	t[RELINK_STEP];
 	INT	d[RELINK_STEP];
 	INT	n;
+	TS_UUID	xt[RELINK_STEP];
+	INT	xd[RELINK_STEP];
+	INT	xn;
 } DELTAS;
 
 LOCAL void delta_add( DELTAS *dl, CONST UB *e, INT d )
 {
-	if ( ( rd32(e + LK_FLAGS) & LK_F_EXTERNAL ) == 0 && dl->n < RELINK_STEP ) {
-		knl_memcpy(dl->t[dl->n].b, e + LK_TARGET, 16);
-		dl->d[dl->n] = d;
-		dl->n++;
+	if ( ( rd32(e + LK_FLAGS) & LK_F_EXTERNAL ) == 0 ) {
+		if ( dl->n < RELINK_STEP ) {
+			knl_memcpy(dl->t[dl->n].b, e + LK_TARGET, 16);
+			dl->d[dl->n] = d;
+			dl->n++;
+		}
+	} else if ( dl->xn < RELINK_STEP ) {
+		knl_memcpy(dl->xt[dl->xn].b, e + LK_TARGET, 16);
+		dl->xd[dl->xn] = d;
+		dl->xn++;
 	}
+}
+
+/* ---------------------------------------------------------------- links to other volumes */
+
+/*
+ * The links to objects of other volumes that came and went, waiting for
+ * the object layer, which keeps the record of them on the volume they
+ * point at (design 8.3). Kept in memory only: what is lost -- the queue
+ * full, the power cut -- is found again when the volumes are next
+ * matched against one another, at attaching.
+ */
+#define XQ_MAX		1024
+
+LOCAL T_TSXQ	*xq_tbl = NULL;
+LOCAL INT	xq_n = 0;
+LOCAL BOOL	xq_lost = FALSE;
+LOCAL T_SPLOCK	xq_lock;
+LOCAL UW	xq_init = 0;
+
+LOCAL void xq_ready( void )
+{
+	UW	was = 0;
+
+	if ( __atomic_load_n(&xq_init, __ATOMIC_ACQUIRE) == 2 ) {
+		return;
+	}
+	if ( __atomic_compare_exchange_n(&xq_init, &was, 1, FALSE, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) ) {
+		InitSpinLock(&xq_lock);
+		__atomic_store_n(&xq_init, 2, __ATOMIC_RELEASE);
+		return;
+	}
+	while ( __atomic_load_n(&xq_init, __ATOMIC_ACQUIRE) != 2 ) ;
+}
+
+LOCAL void xq_push( ID vol, CONST TS_UUID *host, DELTAS *dl )
+{
+	T_TSFSBLK_SB	*sb;
+	T_TSXQ		*fresh = NULL;
+	UINT		imask;
+	INT		i;
+
+	if ( dl->xn == 0 ) {
+		return;
+	}
+	xq_ready();
+	sb = (T_TSFSBLK_SB *)Kmalloc(sizeof(T_TSFSBLK_SB));
+	if ( sb == NULL || ts_ref_vol_blk(vol, sb) < E_OK ) {
+		if ( sb != NULL ) Kfree(sb);
+		xq_lost = TRUE;
+		return;
+	}
+	if ( __atomic_load_n(&xq_tbl, __ATOMIC_ACQUIRE) == NULL ) {
+		fresh = (T_TSXQ *)Kmalloc(sizeof(T_TSXQ) * XQ_MAX);
+	}
+	ISpinLock(&xq_lock, &imask);
+	if ( xq_tbl == NULL && fresh != NULL ) {
+		xq_tbl = fresh;
+		fresh = NULL;
+	}
+	for ( i = 0; i < dl->xn; i++ ) {
+		if ( xq_tbl == NULL || xq_n >= XQ_MAX ) {
+			xq_lost = TRUE;
+			break;
+		}
+		xq_tbl[xq_n].hvol = sb->vol_uuid;
+		xq_tbl[xq_n].host = *host;
+		xq_tbl[xq_n].target = dl->xt[i];
+		xq_tbl[xq_n].d = dl->xd[i];
+		xq_n++;
+	}
+	ISpinUnlock(&xq_lock, &imask);
+	if ( fresh != NULL ) Kfree(fresh);
+	Kfree(sb);
+}
+
+/* Whether anything waits, looked at without the lock: a quick look for one who polls */
+EXPORT BOOL ts_obj_xq_any( void )
+{
+	return (BOOL)( __atomic_load_n(&xq_n, __ATOMIC_RELAXED) > 0
+		       || __atomic_load_n(&xq_lost, __ATOMIC_RELAXED) );
+}
+
+EXPORT INT ts_obj_xq_take( T_TSXQ *buf, INT max, BOOL *p_lost )
+{
+	UINT	imask;
+	INT	n = 0, i;
+
+	xq_ready();
+	ISpinLock(&xq_lock, &imask);
+	if ( xq_tbl != NULL && buf != NULL && max > 0 ) {
+		n = ( xq_n < max ) ? xq_n : max;
+		for ( i = 0; i < n; i++ ) buf[i] = xq_tbl[i];
+		for ( i = n; i < xq_n; i++ ) xq_tbl[i - n] = xq_tbl[i];
+		xq_n -= n;
+	}
+	if ( p_lost != NULL ) {
+		*p_lost = xq_lost;
+		xq_lost = FALSE;
+	}
+	ISpinUnlock(&xq_lock, &imask);
+	return n;
 }
 
 LOCAL void delta_apply( ID vol, DELTAS *dl )
@@ -2237,6 +2501,7 @@ LOCAL ER relink_step( ID vol, CONST TS_UUID *uuid, BOOL *p_done )
 		return E_NOMEM;
 	}
 	dl->n = 0;
+	dl->xn = 0;
 	er = txn_begin(vol);
 	if ( er < E_OK ) {
 		Kfree(dl);
@@ -2306,8 +2571,12 @@ LOCAL ER relink_step( ID vol, CONST TS_UUID *uuid, BOOL *p_done )
 	if ( old != NULL ) Kfree(old);
 	if ( now != NULL ) Kfree(now);
 	if ( next != NULL ) Kfree(next);
+	er = txn_end(vol, er);
+	if ( er >= E_OK ) {
+		xq_push(vol, uuid, dl);
+	}
 	Kfree(dl);
-	return txn_end(vol, er);
+	return er;
 }
 
 EXPORT ER ts_obj_relink( ID vol, CONST TS_UUID *uuid )
@@ -2341,6 +2610,7 @@ LOCAL ER links_release( ID vol, CONST TS_UUID *uuid )
 	}
 	for ( g = 0; g < RELINK_GUARD && er >= E_OK; g++ ) {
 		dl->n = 0;
+		dl->xn = 0;
 		er = txn_begin(vol);
 		if ( er < E_OK ) {
 			break;
@@ -2368,6 +2638,9 @@ LOCAL ER links_release( ID vol, CONST TS_UUID *uuid )
 			delta_apply(vol, dl);
 		}
 		er = txn_end(vol, er);
+		if ( er >= E_OK ) {
+			xq_push(vol, uuid, dl);
+		}
 	}
 	Kfree(dl);
 	return er;
@@ -2460,21 +2733,62 @@ LOCAL ER go_check( ID vol, CONST TS_UUID *uuid, INT how )
 }
 
 /*
+ * What a TRASH links to, the caller's to Kfree, before its links are
+ * given up: *p_n is 0 for any other object.
+ */
+LOCAL ER trash_reach( ID vol, CONST TS_UUID *uuid, TS_UUID **p_to, INT *p_n )
+{
+	OBJ	o;
+	UB	*tab = NULL;
+	INT	n = 0, i, k = 0;
+	ER	er;
+
+	*p_to = NULL;
+	*p_n = 0;
+	er = obj_load(vol, uuid, &o);
+	if ( er >= E_OK && ( rd32(o.hdr + OB_FLAGS) & TSFSO_F_TRASH ) != 0 ) {
+		er = LINK_LOAD(&o, &tab, &n);
+		if ( er >= E_OK && n > 0 ) {
+			*p_to = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)n);
+			if ( *p_to == NULL ) {
+				er = E_NOMEM;
+			}
+			for ( i = 0; i < n && *p_to != NULL; i++ ) {
+				if ( ( rd32(tab + i * LK_SIZE + LK_FLAGS) & LK_F_EXTERNAL ) == 0 ) {
+					knl_memcpy((*p_to)[k++].b, tab + i * LK_SIZE + LK_TARGET, 16);
+				}
+			}
+			*p_n = k;
+		}
+		if ( tab != NULL ) Kfree(tab);
+	}
+	obj_drop(&o);
+	return ( er == E_NOMEM ) ? er : E_OK;
+}
+
+/*
  * An object that goes: its links given up first, a step at a time, then
  * everything else in one transaction, which looks again whether it may.
+ * When it is a TRASH, what only it reached goes after it, groups of
+ * objects linking only to one another included (ts_obj_drop_cycles).
  */
 LOCAL ER obj_go( ID vol, CONST TS_UUID *uuid, INT how )
 {
 	OBJ	o;
+	TS_UUID	*gone = NULL;
+	INT	ngone = 0;
 	ER	er;
 
 	er = go_check(vol, uuid, how);
+	if ( er >= E_OK && how != GO_REAP ) er = trash_reach(vol, uuid, &gone, &ngone);
 	if ( er >= E_OK ) er = links_release(vol, uuid);
 	if ( er < E_OK ) {
+		if ( gone != NULL ) Kfree(gone);
 		return er;
 	}
 	er = txn_begin(vol);
 	if ( er < E_OK ) {
+		if ( gone != NULL ) Kfree(gone);
 		return er;
 	}
 	er = obj_load(vol, uuid, &o);
@@ -2485,6 +2799,10 @@ LOCAL ER obj_go( ID vol, CONST TS_UUID *uuid, INT how )
 	if ( er == E_OBJ || er == E_RONLY ) {
 		(void)ts_obj_relink(vol, uuid);	/* it stays: its links count again */
 	}
+	if ( er >= E_OK && ngone > 0 ) {
+		(void)ts_obj_drop_cycles(vol, gone, ngone);
+	}
+	if ( gone != NULL ) Kfree(gone);
 	return er;
 }
 
@@ -2781,7 +3099,7 @@ EXPORT ER ts_obj_set_meta( ID vol, CONST TS_UUID *uuid, CONST UB *json,
 {
 	OBJ	o;
 	UB	*j, *tab = NULL, *txt;
-	RECE	ord[TSFSO_MAX_REC + 1];
+	RECE	*ord;
 	INT	n = (INT)size, cap, ntab = 0, nord, tl;
 	ER	er;
 
@@ -2797,7 +3115,8 @@ EXPORT ER ts_obj_set_meta( ID vol, CONST TS_UUID *uuid, CONST UB *json,
 		cap = n + ORDER_TEXT_MAX(TSFSO_MAX_REC) + 32;
 		j = (UB *)Kmalloc(cap);
 		txt = (UB *)Kmalloc(ORDER_TEXT_MAX(TSFSO_MAX_REC));
-		if ( j == NULL || txt == NULL ) {
+		ord = (RECE *)Kmalloc(sizeof(RECE) * ( TSFSO_MAX_REC + 1 ));
+		if ( j == NULL || txt == NULL || ord == NULL ) {
 			er = E_NOMEM;
 		} else {
 			knl_memcpy(j, json, n);
@@ -2816,6 +3135,7 @@ EXPORT ER ts_obj_set_meta( ID vol, CONST TS_UUID *uuid, CONST UB *json,
 		}
 		if ( j != NULL ) Kfree(j);
 		if ( txt != NULL ) Kfree(txt);
+		if ( ord != NULL ) Kfree(ord);
 		if ( tab != NULL ) Kfree(tab);
 		obj_touch(&o);
 		if ( er >= E_OK ) er = obj_store(&o);
@@ -3459,7 +3779,7 @@ EXPORT ER ts_obj_set_rtp( ID vol, CONST TS_UUID *uuid, INT recno, UINT rt, UINT 
 /* The rid of the record at `recno`, the icon's, or the place of one not made yet */
 LOCAL ER rid_of( OBJ *o, INT recno, UW *p_rid )
 {
-	RECE	ord[TSFSO_MAX_REC + 1];
+	RECE	*ord;
 	UB	*tab = NULL;
 	INT	n = 0, nord;
 	ER	er;
@@ -3471,19 +3791,24 @@ LOCAL ER rid_of( OBJ *o, INT recno, UW *p_rid )
 	if ( recno < 0 ) {
 		return E_PAR;
 	}
+	ord = (RECE *)Kmalloc(sizeof(RECE) * ( TSFSO_MAX_REC + 1 ));
+	if ( ord == NULL ) {
+		return E_NOMEM;
+	}
 	er = PLACE_LOAD(o, &tab, &n);
 	if ( er >= E_OK ) {
 		nord = order_of(o, tab, n, ord);
 		*p_rid = ( recno < nord ) ? ord[recno].rid : ( RID_PLACE | (UW)recno );
 	}
 	if ( tab != NULL ) Kfree(tab);
+	Kfree(ord);
 	return er;
 }
 
 /* The place of a record's rid among the records, or TSFSO_ICON_REC */
 LOCAL INT recno_of( OBJ *o, UW rid )
 {
-	RECE	ord[TSFSO_MAX_REC + 1];
+	RECE	*ord;
 	UB	*tab = NULL;
 	INT	n = 0, nord, i, at = -2;
 
@@ -3492,6 +3817,10 @@ LOCAL INT recno_of( OBJ *o, UW rid )
 	}
 	if ( ( rid & RID_PLACE ) != 0 ) {
 		return (INT)( rid & ~RID_PLACE );
+	}
+	ord = (RECE *)Kmalloc(sizeof(RECE) * ( TSFSO_MAX_REC + 1 ));
+	if ( ord == NULL ) {
+		return at;
 	}
 	if ( PLACE_LOAD(o, &tab, &n) >= E_OK ) {
 		nord = order_of(o, tab, n, ord);
@@ -3503,6 +3832,7 @@ LOCAL INT recno_of( OBJ *o, UW rid )
 		}
 		Kfree(tab);
 	}
+	Kfree(ord);
 	return at;
 }
 

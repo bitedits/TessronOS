@@ -24,6 +24,8 @@
 #define PSR_Z		0x40000000		/* zero */
 #define PSR_C		0x20000000		/* carry */
 #define PSR_V		0x10000000		/* overflow */
+#define PSR_NZCV	(PSR_N|PSR_Z|PSR_C|PSR_V)
+#define PSR_PAN		0x00400000		/* privileged access never (ARMv8.1) */
 #define PSR_SS		0x00200000		/* software step */
 #define PSR_IL		0x00100000		/* illegal execution state */
 #define PSR_D		0x00000200		/* debug exception mask */
@@ -61,8 +63,11 @@
 #define SCTLR_nTWI	(1 << 16)		/* do not trap WFI from EL0 */
 #define SCTLR_nTWE	(1 << 18)		/* do not trap WFE from EL0 */
 #define SCTLR_WXN	(1 << 19)		/* write permission implies XN */
+#define SCTLR_SPAN	(1 << 23)		/* 0: an exception taken to EL1 sets PSTATE.PAN */
 #define SCTLR_UCI	(1 << 26)		/* cache maintenance at EL0 */
 #define SCTLR_EL1_RES1	(0x30d00800)		/* RES1 bits: 11,20,22,23,28,29 */
+
+#define ID_MMFR1_PAN_SHIFT	20		/* ID_AA64MMFR1_EL1.PAN: 0 when there is none */
 
 #define HCR_RW		(1UL << 31)		/* EL1 is AArch64 */
 #define HCR_SWIO	(1UL << 1)
@@ -72,6 +77,10 @@
 #define CPTR_EL2_TFP	(1 << 10)
 #define CPACR_FPEN	(3 << 20)		/* FP/SIMD not trapped at EL0/EL1 */
 #define CNTKCTL_EL0VCTEN (1 << 1)		/* EL0 reads the virtual counter (cntvct_el0) */
+#define CNTKCTL_EVNTEN	(1 << 2)		/* event stream: an event for WFE each time bit EVNTI of the counter turns 1 */
+#define CNTKCTL_EVNTI(n) ((n) << 4)
+/* bit 15: an event every 2^16 counts, about a millisecond at 54MHz or 62.5MHz */
+#define CNTKCTL_INIT	(CNTKCTL_EL0VCTEN | CNTKCTL_EVNTEN | CNTKCTL_EVNTI(15))
 
 /* ------------------------------------------------------------------------ */
 /*
@@ -246,6 +255,7 @@
 #define SGI_TIMER		1	/* per-CPU timer reprogramming (reserved) */
 #define SGI_CALL		2	/* function call request (reserved) */
 #define SGI_STOP		3	/* stop request */
+#define SGI_LOCKUP		4	/* say where you are: a processor found stopped (lockup.c) */
 
 
 /* Task system stack: the exception frame (272) + FP context (528) + C frames */

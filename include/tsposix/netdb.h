@@ -9,8 +9,9 @@
 
 /*
  *	netdb.h
- *	Names of hosts: getaddrinfo asks the system's resolver (so_resolve)
- *	for the first IPv4 address of a name.
+ *	Names of hosts: getaddrinfo asks the system's resolver (so_resolveall)
+ *	for the IPv4 and IPv6 addresses of a name, in the order to try them;
+ *	gethostbyname for the first IPv4 address.
  */
 
 #ifndef __TSPOSIX_NETDB_H__

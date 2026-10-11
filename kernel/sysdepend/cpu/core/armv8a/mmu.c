@@ -43,9 +43,69 @@ EXPORT void knl_tlb_flush_va( UBINT va )
 }
 
 /*
- * Map every RAM range from the DTB into the linear map with 1GB blocks.
- *	Blocks are Normal write-back memory. Only RAM is mapped this way:
- *	peripherals are reached through the device window (DEV_BASE).
+ * Instructions written as data in [va, va + size) made visible to the
+ * instruction fetch of every processor of the inner shareable domain:
+ * the data cache lines cleaned to the point of unification, then the
+ * instruction cache lines of the range invalidated. 'va' may be any
+ * mapping of the memory (the linear map). CTR_EL0 says what is needed:
+ * IDC and DIC drop the clean and the invalidation; an instruction cache
+ * that is not physically indexed and tagged may hold the lines under
+ * another address than the one given, and is invalidated whole. Both
+ * kinds of maintenance by address reach the caches of all processors;
+ * a processor that may have fetched the old instructions still needs a
+ * context synchronization event of its own (knl_sync_cores).
+ */
+#define CTR_IDC			( 1UL << 28 )
+#define CTR_DIC			( 1UL << 29 )
+#define CTR_L1IP(c)		( ( (c) >> 14 ) & 3 )
+#define CTR_L1IP_PIPT		3
+
+EXPORT void knl_icache_sync( UBINT va, UD size )
+{
+	UD	ctr, dline, iline;
+	UBINT	p, end = va + size;
+
+	Asm("mrs %0, ctr_el0" : "=r"(ctr));
+	dline = 4UL << ( ( ctr >> 16 ) & 0xf );
+	iline = 4UL << ( ctr & 0xf );
+	if ( ( ctr & CTR_IDC ) == 0 ) {
+		for ( p = va & ~( dline - 1 ); p < end; p += dline ) {
+			Asm("dc cvau, %0" :: "r"(p) : "memory");
+		}
+	}
+	Asm("dsb ish" ::: "memory");
+	if ( ( ctr & CTR_DIC ) == 0 ) {
+		if ( CTR_L1IP(ctr) == CTR_L1IP_PIPT ) {
+			for ( p = va & ~( iline - 1 ); p < end; p += iline ) {
+				Asm("ic ivau, %0" :: "r"(p) : "memory");
+			}
+		} else {
+			Asm("ic ialluis" ::: "memory");
+		}
+	}
+	Asm("dsb ish; isb" ::: "memory");
+}
+
+/*
+ * Tables of 2MB blocks for the gigabytes that RAM fills only in part. A
+ * 1GB block there would map what follows RAM in that gigabyte as memory
+ * too -- on the Raspberry Pi 4 the peripherals from 0xFC00_0000 -- and
+ * the processor may read ahead into memory it holds as such, registers
+ * included. A range has at most two such ends. They are taken before
+ * the page allocator exists, so they are part of the image.
+ */
+#define EDGE_TABLES		(2 * KNL_MAX_MEMRANGE)
+#define L1_BLOCK		(1ULL << L1_SHIFT)
+#define L2_BLOCK		(1ULL << L2_SHIFT)
+
+LOCAL UD	edge_l2[EDGE_TABLES][PT_ENTRIES] __attribute__((aligned(PAGE_SIZE)));
+LOCAL INT	edge_n = 0;
+
+/*
+ * Map every RAM range from the DTB into the linear map: 1GB blocks where
+ * a range fills the whole gigabyte, 2MB blocks where it does not. Blocks
+ * are Normal write-back memory. Only RAM is mapped this way: peripherals
+ * are reached through the device window (DEV_BASE).
  */
 EXPORT void knl_mmu_map_ram( void )
 {
@@ -53,17 +113,43 @@ EXPORT void knl_mmu_map_ram( void )
 	INT	i;
 
 	for ( i = 0; i < knl_mem_range_n; i++ ) {
-		UD	pa  = knl_mem_range[i].start & ~((1ULL << L1_SHIFT) - 1);
+		UD	s   = knl_mem_range[i].start;
 		UD	end = knl_mem_range[i].start + knl_mem_range[i].size;
+		UD	pa  = s & ~(L1_BLOCK - 1);
 
-		for ( ; pa < end; pa += (1ULL << L1_SHIFT) ) {
+		for ( ; pa < end; pa += L1_BLOCK ) {
 			UD	idx = pa >> L1_SHIFT;
+			UD	lo = ( s > pa ) ? s : pa;
+			UD	hi = ( end < pa + L1_BLOCK ) ? end : pa + L1_BLOCK;
+			UD	*l2, a;
+
 			if ( idx >= PT_ENTRIES ) break;		/* linear map covers 512GB */
+			if ( lo == pa && hi == pa + L1_BLOCK ) {
+				if ( l1[idx] == 0 ) {
+					l1[idx] = pa | PTE_BLOCK_NORMAL_XN;	/* data only: never executed */
+				}
+				continue;
+			}
 			if ( l1[idx] == 0 ) {
-				l1[idx] = pa | PTE_BLOCK_NORMAL_XN;	/* data only: never executed */
+				if ( edge_n >= EDGE_TABLES ) continue;
+				l2 = edge_l2[edge_n++];
+				l1[idx] = VA2PA(l2) | PTE_TABLE_DESC;
+			} else if ( PTE_IS_TABLE(l1[idx]) ) {
+				/* the kernel's own gigabyte, or an end another range made */
+				l2 = (UD *)PA2VA(PTE_PA(l1[idx]));
+			} else {
+				continue;			/* already one block */
+			}
+			for ( a = lo & ~(L2_BLOCK - 1); a < hi; a += L2_BLOCK ) {
+				UD	j = ( a >> L2_SHIFT ) & ( PT_ENTRIES - 1 );
+
+				if ( l2[j] == 0 ) {
+					l2[j] = a | PTE_BLOCK_NORMAL_XN;
+				}
 			}
 		}
 	}
+	Asm("dsb ishst" ::: "memory");
 	tlb_flush_all();
 }
 
@@ -174,16 +260,149 @@ EXPORT ER knl_pt_unmap( UD l0_pa, UBINT va, UD size )
 }
 
 /*
+ * The tables under [va, va + size) of the user half that map nothing
+ * any more taken out of the space at l0_pa: an L3 table that has no
+ * entry left, and the L2 table above it when that has none left either
+ * (design 4.6.2). A stack given back leaves them so, and without this the
+ * tables of a space that makes and ends tasks would only grow. Each one
+ * is unhooked and its translations dropped from every processor's TLB
+ * here, under the lock; the page itself is given back later
+ * (knl_pt_reclaim), once every other processor has been seen past any
+ * walk of the tables it may have begun without the lock before.
+ */
+#define PT_DEAD_MAX	64
+
+LOCAL struct {
+	UD	pa;			/* the table's page */
+	UD	seen[CNF_MAX_PRCID];	/* each processor's ctxsw_cnt when it was unhooked */
+}		pt_dead[PT_DEAD_MAX];
+LOCAL INT	pt_ndead = 0;
+LOCAL UW	pt_pruned = 0;		/* tables taken out, for the tests */
+
+LOCAL BOOL pt_empty( CONST UD *tbl )
+{
+	INT	i;
+
+	for ( i = 0; i < PT_ENTRIES; i++ ) {
+		if ( tbl[i] != 0 ) return FALSE;
+	}
+	return TRUE;
+}
+
+/* Under pt_lock: the table at pa to be given back once no walk can be in it */
+LOCAL BOOL pt_bury( UD pa )
+{
+	INT	i;
+
+	if ( pt_ndead >= PT_DEAD_MAX ) {
+		return FALSE;
+	}
+	pt_dead[pt_ndead].pa = pa;
+	for ( i = 0; i < CNF_MAX_PRCID; i++ ) {
+		pt_dead[pt_ndead].seen[i] = knl_pcpu_tbl[i].ctxsw_cnt;
+	}
+	pt_ndead++;
+	return TRUE;
+}
+
+EXPORT void knl_pt_prune( UD l0_pa, UBINT va, UD size )
+{
+	UBINT	end = va + size, r;
+	UINT	imask;
+
+	if ( size == 0 || va >= ( (UBINT)1 << 48 ) ) return;
+	ISpinLock(&pt_lock, &imask);
+	for ( r = va & ~(((UBINT)1 << L2_SHIFT) - 1); r < end; r += (UBINT)1 << L2_SHIFT ) {
+		UD	*l0 = (UD *)PA2VA(l0_pa), *l1, *l2, *l3;
+		UD	*e0, *e1, *e2;
+
+		e0 = &l0[PT_IDX(r, L0_SHIFT)];
+		if ( !PTE_IS_TABLE(*e0) ) continue;
+		l1 = (UD *)PA2VA(PTE_PA(*e0));
+		e1 = &l1[PT_IDX(r, L1_SHIFT)];
+		if ( !PTE_IS_TABLE(*e1) ) continue;
+		l2 = (UD *)PA2VA(PTE_PA(*e1));
+		e2 = &l2[PT_IDX(r, L2_SHIFT)];
+		if ( !PTE_IS_TABLE(*e2) ) continue;
+		l3 = (UD *)PA2VA(PTE_PA(*e2));
+		if ( !pt_empty(l3) || pt_ndead >= PT_DEAD_MAX - 1 ) continue;
+
+		*e2 = 0;
+		Asm("dsb ishst; tlbi vaae1is, %0; dsb ish" :: "r"(r >> PAGE_SHIFT) : "memory");
+		(void)pt_bury(VA2PA(l3));
+		pt_pruned++;
+		if ( pt_empty(l2) ) {
+			*e1 = 0;
+			Asm("dsb ishst; tlbi vaae1is, %0; dsb ish" :: "r"(r >> PAGE_SHIFT) : "memory");
+			(void)pt_bury(VA2PA(l2));
+			pt_pruned++;
+		}
+	}
+	Asm("isb" ::: "memory");
+	ISpinUnlock(&pt_lock, &imask);
+}
+
+/*
+ * The tables knl_pt_prune took out given back, those that every other
+ * online processor has gone through the dispatcher since, or is idle
+ * in it: a walk without the lock is made with interrupts disabled, so
+ * one that had begun before has ended by then. TRUE while some still
+ * wait. Called wherever tables come and go, and by the reaper of the
+ * processes (proc.c).
+ */
+EXPORT BOOL knl_pt_reclaim( void )
+{
+	UD	free_pa[PT_DEAD_MAX];
+	INT	nfree = 0, i, k, me = knl_pcpu()->prcid - 1;
+	UINT	imask;
+	BOOL	left;
+
+	ISpinLock(&pt_lock, &imask);
+	for ( i = 0; i < pt_ndead; ) {
+		BOOL	past = TRUE;
+
+		for ( k = 0; k < knl_num_prc && k < CNF_MAX_PRCID; k++ ) {
+			T_PCPU	*p = &knl_pcpu_tbl[k];
+
+			if ( k == me || p->state != PC_ONLINE ) continue;
+			if ( p->ctxsw_cnt == pt_dead[i].seen[k] && p->ctxtsk != NULL ) {
+				past = FALSE;
+				break;
+			}
+		}
+		if ( past ) {
+			free_pa[nfree++] = pt_dead[i].pa;
+			pt_dead[i] = pt_dead[--pt_ndead];
+		} else {
+			i++;
+		}
+	}
+	left = (BOOL)( pt_ndead > 0 );
+	ISpinUnlock(&pt_lock, &imask);
+	for ( i = 0; i < nfree; i++ ) {
+		knl_free_pages(knl_pa_to_pf(free_pa[i]), 0);
+	}
+	return left;
+}
+
+/* Tables taken out so far, and those not yet given back (the tests) */
+EXPORT UW knl_pt_pruned( INT *p_waiting )
+{
+	if ( p_waiting != NULL ) *p_waiting = pt_ndead;
+	return pt_pruned;
+}
+
+/*
  * Physical address of a 4KB-mapped 'va' (page granularity). ~0 if unmapped
  * or mapped by a block.
  */
 EXPORT UD knl_pt_lookup( UD l0_pa, UBINT va )
 {
+	UINT	s = disint();			/* a walk without the lock (knl_pt_prune) */
 	UD	*l3 = pt_l3_of(l0_pa, va, FALSE);
-	UD	e;
+	UD	e = ( l3 != NULL ) ? l3[PT_IDX(va, L3_SHIFT)] : 0;
 
-	if ( l3 == NULL ) return ~(UD)0;
-	e = l3[PT_IDX(va, L3_SHIFT)];
+	enaint(s);
 	if ( (e & PTE_VALID) == 0 ) return ~(UD)0;
 	return PTE_PA(e) | (va & (PAGE_SIZE - 1));
 }
@@ -191,11 +410,11 @@ EXPORT UD knl_pt_lookup( UD l0_pa, UBINT va )
 /* The entry that maps a page, with its access bits; 0 when there is none */
 EXPORT UD knl_pt_entry( UD l0_pa, UBINT va )
 {
+	UINT	s = disint();			/* a walk without the lock (knl_pt_prune) */
 	UD	*l3 = pt_l3_of(l0_pa, va, FALSE);
-	UD	e;
+	UD	e = ( l3 != NULL ) ? l3[PT_IDX(va, L3_SHIFT)] : 0;
 
-	if ( l3 == NULL ) return 0;
-	e = l3[PT_IDX(va, L3_SHIFT)];
+	enaint(s);
 	return ( (e & PTE_VALID) != 0 ) ? e : 0;
 }
 
@@ -203,33 +422,39 @@ EXPORT UD knl_pt_entry( UD l0_pa, UBINT va )
  * The first page address in [va, end) that the tables at l0_pa map, or
  * end when none does. A table that is not there is stepped over whole,
  * so a large stretch that was only reserved (design 9.8.1) is crossed
- * in a few steps. Tables are only ever added while a space lives, so
- * they are read here without the lock; the caller keeps the space.
+ * in a few steps. The tables are read without the lock, each walk with
+ * interrupts disabled, so that a table knl_pt_prune takes out is not
+ * given back while it is being read; the caller keeps the space.
  */
 EXPORT UBINT knl_pt_next( UD l0_pa, UBINT va, UBINT end )
 {
+	UINT	s;
+	BOOL	found = FALSE;
+
 	va &= ~(UBINT)(PAGE_SIZE - 1);
-	while ( va < end ) {
+	while ( va < end && !found ) {
 		UD	*tbl = (UD *)PA2VA(l0_pa);
 		UINT	shift;
 
+		s = disint();
 		for ( shift = L0_SHIFT; ; shift -= 9 ) {
 			UD	e = tbl[PT_IDX(va, shift)];
 
 			if ( (e & PTE_VALID) == 0 ) {
 				UBINT	next = ( va | ( ((UBINT)1 << shift) - 1 ) ) + 1;
 
-				if ( next <= va ) return end;
-				va = next;
+				va = ( next <= va ) ? end : next;
 				break;
 			}
 			if ( shift == L3_SHIFT || !PTE_IS_TABLE(e) ) {
-				return ( va < end ) ? va : end;
+				found = TRUE;
+				break;
 			}
 			tbl = (UD *)PA2VA(PTE_PA(e));
 		}
+		enaint(s);
 	}
-	return end;
+	return ( va < end ) ? va : end;
 }
 
 /*

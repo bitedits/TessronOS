@@ -23,6 +23,10 @@
  *	    to, given out the same way, as deep as the depth allows; an
  *	    object already being given out further up is not gone into again;
  *	  - a document: its text, in UTF-8 or the encoding asked for;
+ *	  - a figure asked for as a picture (XFU_F_IMAGE): the first picture
+ *	    in it (<image> or <pixelmap>) as a PNG file named <name>.png,
+ *	    its other shapes left out; a figure with no picture is given out
+ *	    as it would be otherwise;
  *	  - anything else: its record 0 as <name>.xtad.
  *
  *	Or, as TADjs file sets, the object and everything it links to:
@@ -37,6 +41,9 @@
 #define M_TEXT		2		/* the text of record 0 */
 #define M_DIR		3
 #define M_XTAD		4		/* record 0 as xmlTAD */
+#define M_IMAGE		5		/* the first picture of a figure, as PNG */
+
+#define PIC_MAX		( 64 * 1024 * 1024 )	/* bytes of a picture read */
 
 /* What an object's "tessronos.file" says */
 typedef struct {
@@ -255,6 +262,93 @@ LOCAL ER put_file( XFU *x, CONST UB *path, CONST UB *b, SZ n )
 	return ( er >= E_OK ) ? e2 : er;
 }
 
+/* ---------------------------------------------------------------- a figure's picture */
+
+/*
+ * The bytes of the first picture a figure shows: the href of its first
+ * <image> or <pixelmap>, "<UUID>_<rest>" or "{realId}<rest>" for the
+ * figure's own object, read as the resource <rest> of that object.
+ * NULL when it has none or it cannot be read; the caller frees it.
+ */
+LOCAL UB *first_picture( CONST TS_UUID *self, CONST UB *r0, SZ n0, SZ *p_len )
+{
+	INT	a = xfu_find(r0, n0, "<image ", 0), b = xfu_find(r0, n0, "<pixelmap ", 0), at, e, k;
+	UB	href[OB_RES_NAME + 48];
+	TS_UUID	u;
+	CONST UB *rest;
+	UB	*buf = NULL, *nb;
+	SZ	cap = 0, got = 0, asz;
+	ID	key;
+
+	*p_len = 0;
+	if ( xfu_find(r0, n0, "<figure", 0) < 0 ) return NULL;
+	at = ( a < 0 ) ? b : ( b < 0 ) ? a : ( a < b ) ? a : b;
+	if ( at < 0 ) return NULL;
+	for ( e = at; e < (INT)n0 && r0[e] != '>'; e++ ) ;
+	k = xfu_find(r0, (SZ)e, " href=\"", (SZ)at);
+	if ( k < 0 ) return NULL;
+	k += 7;
+	for ( a = 0; k < e && r0[k] != '"' && a < (INT)sizeof(href) - 1; k++ ) href[a++] = r0[k];
+	href[a] = 0;
+	if ( a > 8 && href[0] == '{' && xfu_find(href, (SZ)a, "{realId}", 0) == 0 ) {
+		u = *self;
+		rest = href + 8;
+	} else if ( a > 36 && xfu_str_uuid(href, &u) ) {
+		rest = href + 36;
+	} else {
+		return NULL;
+	}
+	key = ob_opn_obj(&u, OB_OP_R);
+	if ( key < E_OK ) return NULL;
+	for (;;) {
+		if ( got == cap ) {
+			cap = ( cap == 0 ) ? 65536 : cap * 2;
+			if ( cap > PIC_MAX ) break;
+			nb = (UB *)xfu_sys_alloc(cap);
+			if ( nb == NULL ) break;
+			if ( buf != NULL ) {
+				xfu_mcpy(nb, buf, got);
+				xfu_sys_free(buf);
+			}
+			buf = nb;
+		}
+		asz = 0;
+		if ( ob_rea_res(key, rest, (D)got, buf + got, cap - got, &asz) < E_OK || asz <= 0 ) break;
+		got += asz;
+	}
+	ob_cls_obj(key);
+	if ( got == 0 && buf != NULL ) {
+		xfu_sys_free(buf);
+		buf = NULL;
+	}
+	*p_len = got;
+	return buf;
+}
+
+/* A picture's bytes as a PNG file: as they are when they are one, else decoded and packed again */
+LOCAL ER put_png( XFU *x, CONST UB *path, CONST UB *b, SZ n )
+{
+	UINT	*px = NULL;
+	UB	*png = NULL;
+	SZ	plen = 0;
+	INT	w = 0, h = 0;
+	ER	er;
+
+	if ( n >= 8 && b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G' ) {
+		return put_file(x, path, b, n);
+	}
+	er = xfu_sys_decode(b, n, &px, &w, &h);
+	if ( er >= E_OK ) {
+		er = xfu_png_encode(px, w, h, &png, &plen);
+		xfu_sys_free(px);
+	}
+	if ( er >= E_OK ) {
+		er = put_file(x, path, png, plen);
+		xfu_sys_free(png);
+	}
+	return er;
+}
+
 /* The names a directory of the tree has */
 LOCAL INT names_put( void *arg, CONST T_XFUENT *e )
 {
@@ -352,8 +446,8 @@ LOCAL ER exp_obj( XFU *x, CONST TS_UUID *u, CONST UB *dir, T_XFUNAMES *names, IN
 	T_OBREF		ref;
 	T_OBREC		rec[16];
 	FFACT		*f = NULL;
-	UB		*meta = NULL, *r0 = NULL, *name = NULL, *path = NULL;
-	SZ		mlen = 0, n0 = 0;
+	UB		*meta = NULL, *r0 = NULL, *name = NULL, *path = NULL, *pic = NULL;
+	SZ		mlen = 0, n0 = 0, plen = 0;
 	INT		mode = 0, nrec = 0, raw = 1, i, enc;
 	D		updated = 0, when = 0;
 	UINT		crc;
@@ -412,7 +506,10 @@ LOCAL ER exp_obj( XFU *x, CONST TS_UUID *u, CONST UB *dir, T_XFUNAMES *names, IN
 		INT	fig = ( r0 != NULL ) ? xfu_find(r0, n0, "<figure", 0) : -1;
 		INT	doc = ( r0 != NULL ) ? xfu_find(r0, n0, "<document", 0) : -1;
 
-		if ( r0 == NULL && nrec >= 2 ) {
+		if ( ( flags & XFU_F_IMAGE ) != 0 && r0 != NULL && fig >= 0
+		  && ( pic = first_picture(u, r0, n0, &plen) ) != NULL ) {
+			mode = M_IMAGE;
+		} else if ( r0 == NULL && nrec >= 2 ) {
 			mode = M_RAW;
 		} else if ( fig >= 0 && ( doc < 0 || fig < doc ) && ( flags & XFU_F_ONE ) == 0
 			    && xfu_links(r0, n0, NULL, NULL) > 0 ) {
@@ -431,6 +528,7 @@ LOCAL ER exp_obj( XFU *x, CONST TS_UUID *u, CONST UB *dir, T_XFUNAMES *names, IN
 			i = xfu_scpy(name, XFU_NAME_MAX - 8, ref.name);
 			if ( i == 0 ) i = xfu_scpy(name, XFU_NAME_MAX - 8, (CONST UB *)"_");
 			(void)xfu_scpy(name + i, 8, ( mode == M_TEXT ) ? (CONST UB *)".txt"
+					    : ( mode == M_IMAGE ) ? (CONST UB *)".png"
 					    : ( mode == M_XTAD ) ? (CONST UB *)".xtad"
 					    : ( mode == M_RAW ) ? (CONST UB *)".bin" : (CONST UB *)"");
 		}
@@ -483,6 +581,11 @@ LOCAL ER exp_obj( XFU *x, CONST TS_UUID *u, CONST UB *dir, T_XFUNAMES *names, IN
 			x->st.files++;
 			break;
 
+		case M_IMAGE:
+			er = put_png(x, path, pic, plen);
+			x->st.files++;
+			break;
+
 		case M_DIR:
 			er = ( x->t->mkdir != NULL ) ? x->t->mkdir(x->t->ctx, path) : E_NOSPT;
 			if ( er >= E_OK ) {
@@ -523,6 +626,7 @@ LOCAL ER exp_obj( XFU *x, CONST TS_UUID *u, CONST UB *dir, T_XFUNAMES *names, IN
 	ob_cls_obj(key);
 	if ( meta != NULL ) xfu_sys_free(meta);
 	if ( r0 != NULL ) xfu_sys_free(r0);
+	if ( pic != NULL ) xfu_sys_free(pic);
 	if ( f != NULL ) xfu_sys_free(f);
 	if ( name != NULL ) xfu_sys_free(name);
 	if ( path != NULL ) xfu_sys_free(path);
@@ -612,6 +716,7 @@ LOCAL ER exp_set( XFU *x, CONST TS_UUID *u, CONST UB *dir )
 		if ( er < E_OK ) break;
 		if ( tad ) {
 			b = xfu_rec_all(key, rec[i].recno, &len);
+			if ( b != NULL ) len = xfu_links_bare(b, len);	/* every object goes in this one directory */
 			er = ( b != NULL ) ? put_file(x, path, b, len) : E_NOMEM;
 			if ( b != NULL ) {
 				(void)xfu_links(b, len, seen_put, x);

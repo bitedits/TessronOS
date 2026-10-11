@@ -33,6 +33,9 @@ EXPORT CONST UB knl_basic_data_guid[16] = {
 #define MBR_TYPE_PROTECTIVE	0xEE
 #define MBR_TYPE_EXTENDED	0x05
 #define MBR_TYPE_EXTENDED_LBA	0x0F
+#define MBR_TYPE_EXTENDED_LNX	0x85
+#define MBR_EBR_MAX		( BLK_MAX_PART + 1 )	/* links of an extended partition followed */
+#define GPT_MAX_ENT		4096	/* entries of a GPT looked at: the table as it is made, whatever its size */
 
 LOCAL UH le16( CONST UB *p )
 {
@@ -89,7 +92,7 @@ LOCAL INT read_gpt( BLK_READFN readfn, void *exinf, UD nsect_total, T_PARTTBL *t
 	entry_lba = le64(sect + 72);
 	nent      = le32(sect + 80);
 	entsz     = le32(sect + 84);
-	if ( entsz < 128 || entsz > BLK_SECTOR_SIZE || nent == 0 || nent > 256
+	if ( entsz < 128 || entsz > BLK_SECTOR_SIZE || nent == 0 || nent > GPT_MAX_ENT
 	  || entry_lba == 0 || entry_lba >= nsect_total ) {
 		return E_NOEXS;
 	}
@@ -126,7 +129,8 @@ LOCAL INT read_gpt( BLK_READFN readfn, void *exinf, UD nsect_total, T_PARTTBL *t
 }
 
 /*
- * MBR: four entries at offset 446. Extended partitions are not followed.
+ * MBR: four entries at offset 446, and the logical partitions of an
+ * extended one after them.
  *
  * A medium formatted without a partition table (a "superfloppy": many
  * USB sticks and small cards) has the boot sector of its file system at
@@ -135,9 +139,63 @@ LOCAL INT read_gpt( BLK_READFN readfn, void *exinf, UD nsect_total, T_PARTTBL *t
  * neither 0x00 nor 0x80 cannot be one, and then the sector is not taken
  * for an MBR: the whole device is the one volume.
  */
+LOCAL BOOL mbr_extended( UW type )
+{
+	return (BOOL)( type == MBR_TYPE_EXTENDED || type == MBR_TYPE_EXTENDED_LBA
+		       || type == MBR_TYPE_EXTENDED_LNX );
+}
+
+LOCAL INT mbr_add( T_PARTTBL *tbl, INT n, UD start, UD nsect, UW type, UD nsect_total )
+{
+	if ( n >= BLK_MAX_PART || nsect == 0 || start >= nsect_total || start + nsect > nsect_total ) {
+		return n;
+	}
+	tbl->part[n].start    = start;
+	tbl->part[n].nsect    = nsect;
+	tbl->part[n].mbr_type = type;
+	tbl->part[n].valid    = TRUE;
+	return n + 1;
+}
+
+/*
+ * The chain of an extended partition: each link (an EBR, laid out as
+ * an MBR) holds one logical partition, placed from the link itself,
+ * and where the next link is, placed from the start of the extended
+ * partition. A chain that turns back on itself or runs on is cut.
+ */
+LOCAL INT read_ebr( BLK_READFN readfn, void *exinf, UD nsect_total, T_PARTTBL *tbl, UB *sect,
+		    UD base, INT n )
+{
+	UD	at = base;
+	INT	hops;
+
+	for ( hops = 0; hops < MBR_EBR_MAX && n < BLK_MAX_PART; hops++ ) {
+		CONST UB *e0 = sect + 446, *e1 = sect + 446 + 16;
+		UD	next;
+
+		if ( at >= nsect_total || readfn(exinf, at, 1, sect) != E_OK
+		  || le16(sect + 510) != MBR_SIGNATURE ) {
+			break;
+		}
+		if ( e0[4] != 0 && !mbr_extended(e0[4]) ) {
+			n = mbr_add(tbl, n, at + le32(e0 + 8), le32(e0 + 12), e0[4], nsect_total);
+		}
+		if ( !mbr_extended(e1[4]) || le32(e1 + 8) == 0 ) {
+			break;
+		}
+		next = base + le32(e1 + 8);
+		if ( next <= at ) {
+			break;			/* a link may only point onwards */
+		}
+		at = next;
+	}
+	return n;
+}
+
 LOCAL INT read_mbr( BLK_READFN readfn, void *exinf, UD nsect_total, T_PARTTBL *tbl, UB *sect )
 {
-	INT	i, n = 0;
+	UD	ext[4];
+	INT	i, n = 0, next = 0;
 
 	if ( readfn(exinf, 0, 1, sect) != E_OK ) {
 		return E_IO;
@@ -158,21 +216,18 @@ LOCAL INT read_mbr( BLK_READFN readfn, void *exinf, UD nsect_total, T_PARTTBL *t
 		UW	type = e[4];
 		UD	start = le32(e + 8), nsect = le32(e + 12);
 
-		if ( type == 0 || nsect == 0 ) {
+		if ( type == 0 || nsect == 0 || type == MBR_TYPE_PROTECTIVE ) {
 			continue;
 		}
-		if ( type == MBR_TYPE_PROTECTIVE || type == MBR_TYPE_EXTENDED
-		  || type == MBR_TYPE_EXTENDED_LBA ) {
+		if ( mbr_extended(type) ) {
+			if ( start != 0 && start < nsect_total ) ext[next++] = start;
 			continue;
 		}
-		if ( start >= nsect_total || start + nsect > nsect_total ) {
-			continue;
-		}
-		tbl->part[n].start    = start;
-		tbl->part[n].nsect    = nsect;
-		tbl->part[n].mbr_type = type;
-		tbl->part[n].valid    = TRUE;
-		n++;
+		n = mbr_add(tbl, n, start, nsect, type, nsect_total);
+	}
+	/* the logical partitions after the primary ones; the sector is read over */
+	for ( i = 0; i < next; i++ ) {
+		n = read_ebr(readfn, exinf, nsect_total, tbl, sect, ext[i], n);
 	}
 	tbl->gpt = FALSE;
 	tbl->n = n;

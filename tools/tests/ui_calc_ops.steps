@@ -1,0 +1,124 @@
+# 基本表計算 (design 11.13), for tools/ui_run.py: the fill handle, a column's
+# width, the menu, the tray, rows put in, a join, the find panel, and the
+# 操作パネル's menu of the placing with its frames and bold. The window is at
+# 100,100 and its panel at 100,0; the grid's first row is at y 163.
+open 019b54a4-6ccf-72f7-e320-c98e4a0bab4e
+expect calc: ready
+wait 800
+click 200 163
+text 1
+key 28
+text 2
+key 28
+text =A1*10
+key 28
+expect calc: set A3 shows 10
+wait 500
+drag 200 163 200 207
+drag 238 218 220 262
+expect calc: filled
+expect calc: set A5 shows 2
+drag 240 140 300 140
+expect calc: column 1 width 140
+drag 200 163 200 207
+key 06 01
+expect calc: copied 3
+click 500 163
+key 19 01
+expect calc: pasted 3
+expect calc: set D3 shows 10
+click 600 240 1
+wait 400
+move 610 321
+wait 150
+move 700 321
+wait 300
+click 700 501
+expect calc: row inserted
+wait 300
+shot calc_row_inserted
+drag 580 317 660 339
+click 600 340 1
+wait 400
+move 610 340
+wait 150
+move 700 340
+wait 300
+click 720 720
+expect calc: merged
+wait 300
+shot calc_merged
+click 600 240 1
+wait 400
+move 610 340
+wait 150
+move 700 340
+wait 400
+shot calc_menu_format
+move 700 341
+wait 150
+move 720 441
+wait 150
+click 720 441
+expect calc: paper frame on
+click 600 340 1
+wait 400
+move 610 340
+wait 150
+move 700 340
+wait 150
+move 720 461
+wait 150
+click 720 461
+wait 800
+shot calc_page
+click 640 519
+expect calc: paper set
+wait 300
+shot calc_paper
+key 09 01
+wait 800
+click 540 365
+text 2
+click 360 501
+expect calc: find 2 found
+wait 300
+shot calc_find
+click 660 501
+wait 300
+# the panel: 右揃え from the menu of 横の配置, 格子, 太字
+drag 200 163 330 273
+click 547 21
+wait 400
+shot calc_panel_align
+click 560 76
+expect calc: panel align.right
+click 124 48
+expect calc: panel frame.all
+click 257 21
+expect calc: panel style.bold
+wait 300
+shot calc_framed
+open 019a4370-3819-79a2-9758-881e1e0de90a
+wait 1000
+drag 400 414 820 240
+expect calc: dropped 1
+key 08 01
+wait 500
+click 820 390
+wait 300
+shot calc_dropped
+dclick 830 252
+expect calc: opened TADjsについて
+wait 1000
+key 08 01
+wait 500
+click 820 390
+key 08 01
+wait 800
+shot calc_close_ask
+click 612 457
+expect calc: saved
+expect calc: closed
+# nothing it did was refused for want of a right
+absent !OACV!

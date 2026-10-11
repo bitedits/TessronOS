@@ -47,8 +47,8 @@ EL0からカーネルを呼ぶ手段はSVC命令だけである。SVCの即値�
 | 外核 | 画像、ファイル変換 | PNG、JPEG、BMP、GIF、ICOのデコード`img_`、ファイルと実身の相互変換`xf_` | `outer_kernel/img/`、`xf/` |
 | モニタ層 | 機種依存部 | 起動、例外ベクタ、ディスパッチャ、MMUとキャッシュの操作、GIC、Generic Timer、PSCI | `kernel/sysdepend/` |
 | モニタ層 | ドライバ | シリアル、SD、GPIO、virtio、Ethernet、画面、USB、サウンド | `device/` |
-| アプリ | デスクトップ | 操作環境、仮身一覧、基本文章編集、基本図形編集、かな漢字変換の入力処理(カーネル内で動く) | `application/desktop/`ほか |
-| アプリ | プロセスのプログラム | 小物、書庫解凍、バックアップ、ファイル変換など | `application/` |
+| アプリ | デスクトップ | 操作環境、仮身一覧、基本文章編集、基本図形編集、スライド、基本動画再生と実時間制御TADの実行系`rt_`(第15章)、かな漢字変換の入力処理(カーネル内で動く) | `application/desktop/`、`lib/librtad/`ほか |
+| アプリ | プロセスのプログラム | 小物、書庫解凍、バックアップ、ファイル変換、予定表、かな入力練習、実時間メディアなど | `application/` |
 | ライブラリ | ユーザ側 | SVCのスタブ`libts`、JSON、書庫、文字コード、C++ランタイム、スレッドなど | `lib/` |
 
 ## 2.4 名前の接頭辞
@@ -81,7 +81,7 @@ tessronos/
 ├── device/              disp/ gpio/ net/ sd/ ser/ snd/ usb/ vblk/ vnet/
 ├── application/         desktop/ cab/ doc/ fig/ kconv/ と各プログラム
 ├── lib/                 libts/ libjson/ libconf/ libui/ libbpk/ libbtbk/ libtxc/ libxfu/ libftp/
-│                        libcxxrt/ libpthread/ libtk/ libtm/
+│                        libcxxrt/ libpthread/ libtk/ libtm/ librtad/(実時間制御TADの実行系)
 ├── etc/                 def/(定義実身) xtad/(サンプルの実身) font/ wall/(フォントと壁紙) linker/ boot/(config.txt)
 ├── tests/               ktest/(カーネル内の試験) uprog/(試験用のプロセス)
 ├── tools/               イメージの作成、TSFSのツール、試験の実行、netbsd/(NetBSDのスタックのビルド)

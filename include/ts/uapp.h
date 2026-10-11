@@ -17,8 +17,11 @@
  *	environment (wm_obj_gid). It draws there with the dp_ calls of
  *	include/ts/dp.h that a process may make -- dp_fill_rect,
  *	dp_frame_rect, dp_line, dp_put_argb -- and the letters below, and
- *	shows what it drew with wm_obj_flush. What happens to the window it
- *	is told through notices (ob_ntf_evt) at a channel of its own.
+ *	shows what it drew with wm_obj_flush. A program that draws its
+ *	pixels itself draws them in a surface of the work area mapped into
+ *	its memory (wm_obj_surf) and shows the rectangles it changed with
+ *	wm_obj_put. What happens to the window it is told through notices
+ *	(ob_ntf_evt) at a channel of its own.
  *
  *	Its menu is made from a menu definition and shown on its window with
  *	the calls of include/ts/mn.h, mn_pop_men waiting for the answer; a key
@@ -53,6 +56,33 @@ IMPORT INT wm_obj_gid( ID key );
 
 /* What was drawn in the window shown: a rectangle of its work area, or NULL for all */
 IMPORT ER  wm_obj_flush( ID key, CONST T_DPRECT *r );
+
+/*
+ * A surface of the window's work area in the process's own memory
+ * (T_WMSURF, include/ts/wm.h), drawn in directly; and n rectangles of
+ * it (work area coordinates, at most WM_PUT_MAX) put in the window and
+ * shown, as wm_obj_flush shows what was drawn. The surface is as large
+ * as the work area was when it was asked for; after the window changes
+ * size it is asked for again (wm_obj_surf answers the same surface while
+ * the size is the same). One asked for anew, and one whose window has
+ * closed, is no longer the window's: what is written there goes nowhere,
+ * and wm_obj_put answers E_OBJ or E_ID.
+ */
+IMPORT ER  wm_obj_surf( ID key, T_WMSURF *s );
+IMPORT ER  wm_obj_put( ID key, CONST T_DPRECT *r, INT n );
+
+/*
+ * A screen keyboard: its window made with WM_ATTR_NOFOCUS in its "attr"
+ * never has the keys, so the window that had them keeps them. A key
+ * pressed on its picture is typed there with wm_key_put (the key of the
+ * window, the key's usage, the modifiers held with it), as wm_obj_key_put
+ * of include/ts/wm.h says: only just after a press on the window. The
+ * keys pressed on the keyboard itself are told to the window when its
+ * request has OB_N_KEYSEEN (include/ts/ob.h). The layouts and the keys
+ * given others are read and set with km_get, km_set and km_label of
+ * include/ts/keymap.h.
+ */
+IMPORT ER  wm_key_put( ID key, UINT code, UINT mods );
 
 /*
  * Letters in the system's face, px pixels tall (0: as it is), with the
@@ -111,8 +141,22 @@ IMPORT ER   tm_putstring( CONST UB *s );
  * Also for a process, declared where the kernel's are: ts_gen_uuid and
  * ts_get_random (include/ts/uuid.h; in a process it reads the random
  * source object 乱数, lib/libts/ts_random.c), ob_att_vol and ob_det_vol
- * (include/ts/ob.h).
+ * (include/ts/ob.h), and the tray's tr_ calls (include/ts/tray.h).
  */
+
+/*
+ * The administrator's rights for one operation (lib/libts/ts_admin.c):
+ * ts_admin_ask asks the desktop, which asks the person for the
+ * administrator's password (DT_RQ_ADMIN of include/ts/dtreq.h); what
+ * says what is to be done, win is the program's window (NULL: none).
+ * E_OK when the process acts as an administrator until ob_end_adm,
+ * E_ABORT when the person put the panel away, E_OACV when the password
+ * was typed wrong, E_NOEXS when there is no desktop. ts_no_right tells
+ * the person on the message line that what could not be done for want
+ * of the rights ("時刻を設定" says 時刻を設定する権限がありません).
+ */
+IMPORT ER   ts_admin_ask( CONST char *what, CONST TS_UUID *win );
+IMPORT void ts_no_right( CONST char *what );
 
 /*
  * What went to the console, from *p_pos on (0: from the oldest kept),

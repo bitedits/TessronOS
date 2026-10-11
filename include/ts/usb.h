@@ -72,6 +72,7 @@ typedef struct {
 #define USB_ROLE_HID		2	/* keyboard or pointer */
 #define USB_ROLE_STORAGE	3
 #define USB_ROLE_AUDIO		4
+#define USB_ROLE_CAMERA		5	/* a video class camera (include/ts/cam.h) */
 
 /* One device in the tree */
 typedef struct {
@@ -146,6 +147,36 @@ IMPORT ER  ts_usb_stat( T_USBSTAT *st );
 
 /* Look at every port again now */
 IMPORT ER  ts_usb_rescan( void );
+
+/*
+ * A program's own devices (SVC class 12, design 6.3.1): a device no class
+ * driver of the kernel took (role USB_ROLE_NONE, not a hub), opened by
+ * one process at a time. us_opn_dev gives the caller's number for it,
+ * which the other calls take; E_BUSY for a device that is a class
+ * driver's or another process's. us_ctl makes a request on the control
+ * endpoint (setup: the 8 bytes of SETUP; its length is len). us_xfer
+ * moves data on a bulk or interrupt endpoint of the alternate settings
+ * picked (ep: bEndpointAddress, 0x80 for IN); a transfer IN gives the
+ * bytes of one transfer the device made, waiting up to tmo for one.
+ * On an isochronous endpoint a transfer is one packet of a service
+ * interval: IN, the oldest that came; OUT, put in line to be sent.
+ * us_rst_dev resets the device and addresses and configures it again.
+ * A device that went away answers E_NOEXS. The calls answer how many
+ * bytes moved, or an error.
+ */
+IMPORT INT us_lst_dev( T_USBDEV *list, INT max );
+IMPORT INT us_get_dsc( INT dev, UINT type, UINT index, void *buf, INT len );
+IMPORT INT us_opn_dev( INT dev );
+IMPORT ER  us_cls_dev( INT ud );
+IMPORT INT us_ctl( INT ud, CONST UB *setup, void *data, INT len, TMO tmo );
+IMPORT ER  us_set_alt( INT ud, INT ifno, INT alt );
+IMPORT ER  us_clr_hlt( INT ud, UINT ep );
+IMPORT INT us_xfer( INT ud, UINT ep, void *data, INT len, TMO tmo );
+IMPORT ER  us_rst_dev( INT ud );
+
+/* Inside the kernel: the calls' table, and the devices a process opened closed as it ends */
+IMPORT ER   knl_uusb_init( void );
+IMPORT void knl_us_prc_end( ID pid );
 
 /* ---------------------------------------------------------------- memory */
 

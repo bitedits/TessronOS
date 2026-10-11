@@ -1,0 +1,6 @@
+<tad version="1.0" encoding="UTF-8" filename="歯車">
+<document>
+<p>歯車</p>
+<p>三つの歯車が回る様子を窓に描く小物。OpenGL ESとGLSLのシェーダで描き、eglSwapBuffersで窓に出す。GPUのない機械ではMesaのsoftpipeがCPUで描く。5秒ごとに描いたフレームの数をコンソールに書く。プロセスとして動き、実行形式はレコード1(make GL=1で作ったとき。そうでないときは、作り方を言うだけの小さなプログラム)。</p>
+</document>
+</tad>

@@ -25,7 +25,12 @@
 #include <errno.h>
 #include <sys/stat.h>
 
+/* A program that keeps more says how much with -DUI_ARENA_SIZE */
+#ifdef UI_ARENA_SIZE
+#define ARENA_SIZE	( UI_ARENA_SIZE )
+#else
 #define ARENA_SIZE	( 2 * 1024 * 1024 )
+#endif
 
 static char	arena[ARENA_SIZE] __attribute__((aligned(16)));
 static size_t	arena_used;

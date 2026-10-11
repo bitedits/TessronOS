@@ -14,7 +14,13 @@
  *	A binary TAD is a row of 16-bit words: a word above FF00 starts a
  *	segment (its id, then its length in bytes, FFFF and 32 bits when it
  *	is long, then its data), any other word is a TRON character, and 0
- *	ends it. The segments are turned into the elements the xmlTAD reader
+ *	ends it. Its numbers of more than a byte are written with the high
+ *	byte first in the standard form, and with the low byte first in the
+ *	semi-standard form a little-endian machine keeps; a 32-bit number is
+ *	then its high word first, or its low word first. Which one a record
+ *	is, its first word says: a TAD begins with a segment, whose id has
+ *	FF as its high byte, and no character of either form has FF as its
+ *	low byte. The segments are turned into the elements the xmlTAD reader
  *	knows, one for one where there is one: a text start is <document>
  *	and its paragraphs <p>, a figure start <figure>, a figure element
  *	<rect>, <line> and the rest with the same numbers, a virtual object
@@ -38,6 +44,10 @@
  *	its plane and code. A picture compressed as a facsimile is decoded
  *	first.
  *
+ *	The segments of 実時間制御TAD are its elements again (bpk_rt.c, design
+ *	15.7), each with the attributes the segment carries; one inside a
+ *	text stands between its paragraphs.
+ *
  *	What has no element of its own is kept, not dropped: the 付箋 of an
  *	application as <docappl> or <figappl>, anything else as <tadseg>,
  *	each with the segment's bytes in hexadecimal, and those kept as
@@ -56,6 +66,8 @@
 #define KEEP_PART	2000		/* bytes of a kept segment in one element */
 #define KEEP_MAX	( 16 * 1024 )	/* and in all */
 #define APPL_CALC	0x0009		/* 基本表計算's application ID, the middle word */
+#define RT_DEPTH	32		/* elements of 実時間制御TAD open at once */
+#define RT_NAMELEN	32
 
 /* An element open in the text: a decoration or a span with attributes */
 typedef struct {
@@ -70,12 +82,14 @@ typedef struct {
 	INT	plane;			/* the TRON plane outside it */
 	INT	nspan;
 	SPAN	span[SPAN_MAX];
-	INT	head;			/* where its first <p> was written, -1 when that is past */
-	INT	hunit, vunit;		/* its coordinates' units (UNITS) */
+	INT		head;			/* where its first <p> was written, -1 when that is past */
+	INT		hunit, vunit;		/* its coordinates' units (UNITS) */
+	INT	rtp, rtq;		/* a <p> opened after an element of 実時間制御TAD: where, and the end of it */
 } LEVEL;
 
 typedef struct {
 	BPKCONV		*cv;
+	BOOL		be;		/* the record's numbers: the high byte first */
 	BPKBUF		*o;
 	const char	*self;		/* the UUID of the object the record goes to */
 	const UB	*d;		/* the segment's data */
@@ -96,6 +110,10 @@ typedef struct {
 	INT		tplane;			/* the characters with no Unicode waiting: their plane */
 	INT		ntcode;
 	UH		tcode[TCHAR_MAX];
+	INT		rt_n;			/* elements of 実時間制御TAD open */
+	INT		rt_sp[RT_DEPTH];	/* the level each was opened in */
+	char		rt_name[RT_DEPTH][RT_NAMELEN];
+	char		id_attr[96];		/* ' id="..."' of BPK_RT_ID */
 } TX;
 
 LOCAL void walk( TX *t, const UB *rec, UINT n, BOOL chars, void (*fn)( TX * ) );
@@ -106,20 +124,27 @@ LOCAL void fig_end( TX *t );
 
 /* ---------------------------------------------------------------- words */
 
-LOCAL UINT rd16( const UB *p )
+/* A 16-bit and a 32-bit number of the record, in its byte order */
+LOCAL UINT rd16( const TX *t, const UB *p )
 {
-	return (UINT)p[0] | ( (UINT)p[1] << 8 );
+	return t->be ? ( ( (UINT)p[0] << 8 ) | (UINT)p[1] ) : ( (UINT)p[0] | ( (UINT)p[1] << 8 ) );
 }
 
-LOCAL UINT rd32( const UB *p )
+LOCAL UINT rd32( const TX *t, const UB *p )
 {
-	return (UINT)p[0] | ( (UINT)p[1] << 8 ) | ( (UINT)p[2] << 16 ) | ( (UINT)p[3] << 24 );
+	return t->be ? ( ( rd16(t, p) << 16 ) | rd16(t, p + 2) ) : ( rd16(t, p) | ( rd16(t, p + 2) << 16 ) );
+}
+
+/* Whether a record is written with the high byte first: its first segment's id says */
+LOCAL BOOL tad_be( const UB *rec, UINT len )
+{
+	return (BOOL)( len >= 2 && rec[0] == 0xFF && rec[1] >= 0x80 && rec[1] != 0xFF );
 }
 
 /* Word i of the segment's data, 0 past its end */
 LOCAL UINT W16( TX *t, INT i )
 {
-	return ( (UINT)( 2 * i + 1 ) < t->len ) ? rd16(t->d + 2 * i) : 0;
+	return ( (UINT)( 2 * i + 1 ) < t->len ) ? rd16(t, t->d + 2 * i) : 0;
 }
 
 LOCAL INT S16( TX *t, INT i )
@@ -127,10 +152,10 @@ LOCAL INT S16( TX *t, INT i )
 	return (INT)(H)W16(t, i);
 }
 
-/* A COLOR in words i and i + 1, the low word first */
+/* A COLOR (or another 32-bit number) in words i and i + 1 */
 LOCAL UINT C32( TX *t, INT i )
 {
-	return W16(t, i) | ( W16(t, i + 1) << 16 );
+	return t->be ? ( ( W16(t, i) << 16 ) | W16(t, i + 1) ) : ( W16(t, i) | ( W16(t, i + 1) << 16 ) );
 }
 
 LOCAL INT nwords( TX *t )
@@ -157,6 +182,8 @@ LOCAL BOOL keep( TX *t, const char *name, const char *attrs )
 		n = ( t->len - at > KEEP_PART ) ? KEEP_PART : t->len - at;
 		bpk_buf_printf(t->o, "<%s%s", name, attrs);
 		if ( part > 0 ) bpk_buf_printf(t->o, " part=\"%u\"", part);
+		/* bytes kept as they were: those of the standard form have the high byte first */
+		if ( t->be ) bpk_buf_puts(t->o, " byteorder=\"big\"");
 		bpk_buf_puts(t->o, " data=\"");
 		for ( i = 0; i < n; i++ ) bpk_buf_printf(t->o, "%02x", t->d[at + i]);
 		bpk_buf_puts(t->o, "\"/>");
@@ -302,7 +329,7 @@ LOCAL void spans_close( TX *t )
 	LEVEL	*l = top(t);
 	INT	i;
 
-	if ( l == NULL ) return;
+	if ( l == NULL || ( l->kind == 'T' && !l->para ) ) return;
 	for ( i = l->nspan - 1; i >= 0; i-- ) bpk_buf_printf(t->o, "</%s>", l->span[i].name);
 }
 
@@ -311,7 +338,7 @@ LOCAL void spans_open( TX *t )
 	LEVEL	*l = top(t);
 	INT	i;
 
-	if ( l == NULL ) return;
+	if ( l == NULL || ( l->kind == 'T' && !l->para ) ) return;
 	for ( i = 0; i < l->nspan; i++ ) span_emit(t, &l->span[i]);
 }
 
@@ -361,7 +388,7 @@ LOCAL void span_on( TX *t, const char *name, const char *attrs, BOOL again )
 	s->name[sizeof(s->name) - 1] = 0;
 	strncpy(s->attrs, ( attrs != NULL ) ? attrs : "", sizeof(s->attrs) - 1);
 	s->attrs[sizeof(s->attrs) - 1] = 0;
-	span_emit(t, s);
+	if ( l->para ) span_emit(t, s);
 }
 
 /* The innermost element of that name closed; those inside it opened again */
@@ -371,6 +398,11 @@ LOCAL void span_off( TX *t, const char *name )
 	INT	k, i;
 
 	if ( l == NULL || ( k = span_find(l, name) ) < 0 ) return;
+	if ( l->kind == 'T' && !l->para ) {
+		memmove(&l->span[k], &l->span[k + 1], sizeof(SPAN) * (size_t)( l->nspan - k - 1 ));
+		l->nspan--;
+		return;
+	}
 	for ( i = l->nspan - 1; i >= k; i-- ) bpk_buf_printf(t->o, "</%s>", l->span[i].name);
 	memmove(&l->span[k], &l->span[k + 1], sizeof(SPAN) * (size_t)( l->nspan - k - 1 ));
 	l->nspan--;
@@ -388,6 +420,7 @@ LOCAL void level_push( TX *t, char kind )
 	l->plane = t->cv->plane;
 	l->nspan = 0;
 	l->head = -1;
+	l->rtp = l->rtq = -1;
 	/* the units of what it is in, until its own start says */
 	l->hunit = ( t->sp > 1 ) ? t->lv[t->sp - 2].hunit : -120;
 	l->vunit = ( t->sp > 1 ) ? t->lv[t->sp - 2].vunit : -120;
@@ -468,8 +501,10 @@ LOCAL void text_start( TX *t )
 	if ( infig ) bpk_buf_printf(t->o, " zIndex=\"%d\"", ++t->z);
 	bpk_buf_puts(t->o, "/>\n");
 	top(t)->head = t->o->n;
+	top(t)->rtp = t->o->n;
 	bpk_buf_puts(t->o, "<p>");
 	top(t)->para = TRUE;
+	top(t)->rtq = t->o->n;
 }
 
 LOCAL void text_end( TX *t )
@@ -478,6 +513,12 @@ LOCAL void text_end( TX *t )
 
 	if ( l == NULL || l->kind != 'T' ) return;
 	tchar_flush(t);
+	if ( l->rtq >= 0 && l->rtq > l->rtp && t->o->n == l->rtq && t->o->s != NULL ) {
+		/* the paragraph opened after an element of 実時間制御TAD stayed empty */
+		t->o->n = l->rtp;
+		t->o->s[t->o->n] = 0;
+		l->para = FALSE;
+	}
 	calc_close(t);
 	spans_close(t);
 	l->nspan = 0;
@@ -1510,6 +1551,7 @@ typedef struct {
 	INT		ncmap;
 	const UB	*pix;		/* the planes decoded, base[] into them; NULL: in the segment */
 	UINT		npix;
+	BOOL		be;		/* the numbers of more than a byte: the high byte first */
 } PIC;
 
 /* A byte at an offset from the segment's start, 0 outside it */
@@ -1525,6 +1567,13 @@ LOCAL UINT pxb( const PIC *p, UINT off )
 	return pb(p, off);
 }
 
+/* A 32-bit number at an offset from the segment's start, in the record's byte order */
+LOCAL UINT pb32( const PIC *p, UINT off )
+{
+	if ( p->be ) return ( pb(p, off) << 24 ) | ( pb(p, off + 1) << 16 ) | ( pb(p, off + 2) << 8 ) | pb(p, off + 3);
+	return pb(p, off) | ( pb(p, off + 1) << 8 ) | ( pb(p, off + 2) << 16 ) | ( pb(p, off + 3) << 24 );
+}
+
 LOCAL UINT plane_px( const PIC *p, UINT off, INT x, INT y )
 {
 	UINT	cnt = p->pixbits & 0xFF, wid = ( p->pixbits >> 8 ) & 0xFF;
@@ -1538,6 +1587,14 @@ LOCAL UINT plane_px( const PIC *p, UINT off, INT x, INT y )
 		return ( pxb(p, at) >> ( 8 - stride - bit % 8 ) ) & ( ( 1U << stride ) - 1 );
 	}
 	at = off + (UINT)y * p->rowbytes + (UINT)x * ( stride / 8 );
+	if ( p->be ) {
+		switch ( stride ) {
+		case 16: return ( pxb(p, at) << 8 ) | pxb(p, at + 1);
+		case 24: return ( pxb(p, at) << 16 ) | ( pxb(p, at + 1) << 8 ) | pxb(p, at + 2);
+		case 32: return ( pxb(p, at) << 24 ) | ( pxb(p, at + 1) << 16 ) | ( pxb(p, at + 2) << 8 ) | pxb(p, at + 3);
+		default: return 0;
+		}
+	}
 	switch ( stride ) {
 	case 16: return pxb(p, at) | ( pxb(p, at + 1) << 8 );
 	case 24: return pxb(p, at) | ( pxb(p, at + 1) << 8 ) | ( pxb(p, at + 2) << 16 );
@@ -1642,12 +1699,13 @@ LOCAL void image( TX *t )
 	memset(&p, 0, sizeof(p));
 	p.s = t->d;
 	p.n = t->len + 4;
+	p.be = t->be;
 	cbyte = W16(t, 11) & 0xFF;
 	p.invert = ( cbyte >> 7 ) & 1;
 	p.palette = ( cbyte >> 3 ) & 1;
 	p.mode = cbyte & 7;
 	for ( k = 0; k < 4; k++ ) p.cinfo[k] = W16(t, 12 + (INT)k);
-	p.mask = rd32(t->d + 40);
+	p.mask = rd32(t, t->d + 40);
 	p.planes = W16(t, 23);
 	p.pixbits = W16(t, 24);
 	p.rowbytes = W16(t, 25);
@@ -1662,7 +1720,7 @@ LOCAL void image( TX *t )
 	/* where each plane is; an offset into the table itself means just after it */
 	tend = 0x40 + p.planes * 4;
 	for ( k = 0; k < p.planes; k++ ) {
-		UINT	off = pb(&p, 0x40 + 4 * k) | ( pb(&p, 0x41 + 4 * k) << 8 ) | ( pb(&p, 0x42 + 4 * k) << 16 ) | ( pb(&p, 0x43 + 4 * k) << 24 );
+		UINT	off = pb32(&p, 0x40 + 4 * k);
 
 		if ( p.planes == 1 ? off < tend : off < tend - 4 ) off = tend;
 		p.base[k] = off;
@@ -1699,8 +1757,7 @@ LOCAL void image( TX *t )
 			cmap = malloc(sizeof(UINT) * ( nb / 4 ));
 			if ( cmap != NULL ) {
 				for ( k = 0; k < nb / 4; k++ ) {
-					UINT	raw = pb(&p, off + 4 * k) | ( pb(&p, off + 4 * k + 1) << 8 )
-						    | ( pb(&p, off + 4 * k + 2) << 16 ) | ( pb(&p, off + 4 * k + 3) << 24 );
+					UINT	raw = pb32(&p, off + 4 * k);
 					char	c[8];
 
 					bpk_colour(raw, cv->cmap, cv->ncmap, c);
@@ -1751,6 +1808,260 @@ LOCAL void image( TX *t )
 	cv->nimage++;
 }
 
+/* ---------------------------------------------------------------- 実時間制御TAD */
+
+/* Bytes as XML text or an attribute's value */
+LOCAL void xml_n( TX *t, const UB *p, UINT n )
+{
+	UINT	i, from = 0;
+
+	for ( i = 0; i < n; i++ ) {
+		const char *e = NULL;
+
+		switch ( p[i] ) {
+		case '&':	e = "&amp;";	break;
+		case '<':	e = "&lt;";	break;
+		case '>':	e = "&gt;";	break;
+		case '"':	e = "&quot;";	break;
+		default:
+			if ( p[i] < 0x20 && p[i] != '\t' && p[i] != '\n' && p[i] != '\r' ) e = "";
+			break;
+		}
+		if ( e == NULL ) continue;
+		bpk_buf_putn(t->o, (const char *)p + from, (INT)( i - from ));
+		bpk_buf_puts(t->o, e);
+		from = i + 1;
+	}
+	bpk_buf_putn(t->o, (const char *)p + from, (INT)( n - from ));
+}
+
+/* A string of the segment at byte `at`, its length in `lw` bytes before it: where the next begins, 0 cut short */
+LOCAL UINT rt_str( TX *t, UINT at, UINT lw, const UB **p_s, UINT *p_n )
+{
+	UINT	n;
+
+	if ( at + lw > t->len ) return 0;
+	n = ( lw == 2 ) ? rd16(t, t->d + at) : rd32(t, t->d + at);
+	at += lw;
+	if ( n > t->len - at ) return 0;
+	*p_s = t->d + at;
+	*p_n = n;
+	return at + n + ( n & 1 );
+}
+
+/* The element innermost of 実時間制御TAD is in the level open now */
+LOCAL BOOL rt_inside( TX *t )
+{
+	return (BOOL)( t->rt_n > 0 && t->rt_sp[t->rt_n - 1] == t->sp );
+}
+
+/* An element of 実時間制御TAD begins in a text: the paragraph open closes first */
+LOCAL void rt_enter( TX *t )
+{
+	LEVEL	*l = top(t);
+
+	if ( rt_inside(t) || l == NULL || l->kind != 'T' ) return;
+	if ( l->rtq >= 0 && l->rtq > l->rtp && t->o->n == l->rtq && t->o->s != NULL ) {
+		/* nothing was written in it: taken back */
+		t->o->n = l->rtp;
+		t->o->s[t->o->n] = 0;
+		l->para = FALSE;
+	} else {
+		calc_close(t);
+		spans_close(t);
+		if ( l->para ) bpk_buf_puts(t->o, "</p>\n");
+		l->para = FALSE;
+	}
+	l->rtp = l->rtq = -1;
+}
+
+/* The last of them in a text has ended: a paragraph opens again, taken back if nothing comes into it */
+LOCAL void rt_leave( TX *t )
+{
+	LEVEL	*l = top(t);
+
+	if ( rt_inside(t) || l == NULL || l->kind != 'T' || l->para ) return;
+	l->rtp = t->o->n;
+	bpk_buf_puts(t->o, "<p>");
+	l->para = TRUE;
+	spans_open(t);
+	l->rtq = t->o->n;
+}
+
+LOCAL void rt_close( TX *t )
+{
+	if ( t->rt_n <= 0 ) return;
+	t->rt_n--;
+	bpk_buf_printf(t->o, "</%s>\n", t->rt_name[t->rt_n]);
+	rt_leave(t);
+}
+
+/* The elements of 実時間制御TAD opened in the level open now, closed */
+LOCAL void rt_close_level( TX *t )
+{
+	while ( t->rt_n > 0 && t->rt_sp[t->rt_n - 1] >= t->sp ) rt_close(t);
+}
+
+/* s inserted into the text written, at byte `at` */
+LOCAL void buf_insert( BPKBUF *o, INT at, const char *s )
+{
+	INT	n = (INT)strlen(s), tail = o->n - at;
+
+	if ( at < 0 || tail < 0 ) return;
+	bpk_buf_putn(o, s, n);
+	if ( o->fail || o->s == NULL ) return;
+	memmove(o->s + at + n, o->s + at, (size_t)tail);
+	memcpy(o->s + at, s, (size_t)n);
+}
+
+/* Where a start tag of `el` begins at or after `from`, -1 none */
+LOCAL INT tag_at( TX *t, const char *el, INT from, BOOL last )
+{
+	INT	n = (INT)strlen(el), i, found = -1;
+	char	c;
+
+	if ( t->o->s == NULL ) return -1;
+	for ( i = from; i + n + 1 < t->o->n; i++ ) {
+		if ( t->o->s[i] != '<' || strncmp(t->o->s + i + 1, el, (size_t)n) != 0 ) continue;
+		c = t->o->s[i + 1 + n];
+		if ( c != ' ' && c != '/' && c != '>' ) continue;
+		found = i;
+		if ( !last ) break;
+	}
+	return found;
+}
+
+/* BPK_RT_ID: attributes "el" and "id", put into the last start tag of el */
+LOCAL void rt_id( TX *t )
+{
+	UINT		at = 4, i, n, vn, k;
+	const UB	*name, *v;
+	char		el[RT_NAMELEN];
+
+	if ( t->len < 4 ) return;
+	el[0] = 0;
+	t->id_attr[0] = 0;
+	for ( i = 0; i < rd16(t, t->d + 2); i++ ) {
+		at = rt_str(t, at, 2, &name, &n);
+		if ( at == 0 ) return;
+		at = rt_str(t, at, 4, &v, &vn);
+		if ( at == 0 ) return;
+		if ( n == 2 && memcmp(name, "el", 2) == 0 && vn < sizeof(el) ) {
+			memcpy(el, v, vn);
+			el[vn] = 0;
+		} else if ( n == 2 && memcmp(name, "id", 2) == 0 ) {
+			char	*o = t->id_attr;
+			UINT	m = 0, room = sizeof(t->id_attr) - 2;
+
+			m = (UINT)snprintf(o, room, " id=\"");
+			for ( k = 0; k < vn && m + 6 < room; k++ ) {
+				switch ( v[k] ) {
+				case '&':	memcpy(o + m, "&amp;", 5);	m += 5;	break;
+				case '<':	memcpy(o + m, "&lt;", 4);	m += 4;	break;
+				case '>':	memcpy(o + m, "&gt;", 4);	m += 4;	break;
+				case '"':	memcpy(o + m, "&quot;", 6);	m += 6;	break;
+				default:	o[m++] = (char)v[k];		break;
+				}
+			}
+			o[m++] = '"';
+			o[m] = 0;
+		}
+	}
+	if ( el[0] == 0 || t->id_attr[0] == 0 ) return;
+	at = (UINT)tag_at(t, el, 0, TRUE);
+	if ( (INT)at >= 0 ) buf_insert(t->o, (INT)at + 1 + (INT)strlen(el), t->id_attr);
+}
+
+LOCAL void rt_seg( TX *t )
+{
+	UINT		w0, sub, flags, at = 2, n, i, nattr;
+	const BPKRTEL	*el;
+	const UB	*name = NULL, *v, *text = NULL;
+	UINT		nlen = 0, vn, ntext = 0;
+	BOOL		kids;
+	char		nm[RT_NAMELEN];
+
+	if ( t->len < 2 ) return;
+	w0 = W16(t, 0);
+	sub = ( w0 >> 8 ) & 0xFF;
+	flags = w0 & 0xFF;
+	if ( bpk_rt_is_end(t->id, sub) ) {
+		if ( rt_inside(t) ) rt_close(t);
+		return;
+	}
+	if ( t->id == TS_REAL && sub == BPK_RT_ID ) {
+		rt_id(t);
+		return;
+	}
+	if ( t->id == TS_REAL && sub == BPK_RT_TEXT ) {
+		/* letters between the elements: one attribute with no name */
+		if ( t->len < 4 || rd16(t, t->d + 2) < 1 ) return;
+		at = rt_str(t, 4, 2, &name, &nlen);
+		if ( at == 0 || rt_str(t, at, 4, &v, &vn) == 0 ) return;
+		rt_enter(t);
+		xml_n(t, v, vn);
+		bpk_buf_putc(t->o, '\n');
+		rt_leave(t);
+		return;
+	}
+	if ( t->id == TS_REAL && sub == BPK_RT_ELEM ) {
+		at = rt_str(t, 2, 2, &name, &nlen);
+		if ( at == 0 || nlen == 0 || nlen >= RT_NAMELEN ) {
+			skip(t, sub);
+			return;
+		}
+		memcpy(nm, name, nlen);
+		nm[nlen] = 0;
+	} else if ( ( el = bpk_rt_by_seg(t->id, sub) ) != NULL ) {
+		strncpy(nm, el->name, sizeof(nm) - 1);
+		nm[sizeof(nm) - 1] = 0;
+	} else {
+		skip(t, sub);
+		return;
+	}
+	if ( at + 2 > t->len ) {
+		skip(t, sub);
+		return;
+	}
+	nattr = rd16(t, t->d + at);
+	at += 2;
+	rt_enter(t);
+	bpk_buf_printf(t->o, "<%s", nm);
+	for ( i = 0; i < nattr; i++ ) {
+		at = rt_str(t, at, 2, &name, &n);
+		if ( at == 0 ) break;
+		at = rt_str(t, at, 4, &v, &vn);
+		if ( at == 0 ) break;
+		if ( n == 0 ) {
+			text = v;
+			ntext = vn;
+			continue;
+		}
+		bpk_buf_putc(t->o, ' ');
+		bpk_buf_putn(t->o, (const char *)name, (INT)n);
+		bpk_buf_puts(t->o, "=\"");
+		xml_n(t, v, vn);
+		bpk_buf_putc(t->o, '"');
+	}
+	kids = (BOOL)( ( flags & BPK_RT_KIDS ) != 0 && t->rt_n < RT_DEPTH );
+	if ( !kids && text == NULL ) {
+		bpk_buf_puts(t->o, "/>\n");
+		rt_leave(t);
+		return;
+	}
+	bpk_buf_putc(t->o, '>');
+	if ( text != NULL ) xml_n(t, text, ntext);
+	if ( !kids ) {
+		bpk_buf_printf(t->o, "</%s>\n", nm);
+		rt_leave(t);
+		return;
+	}
+	if ( text == NULL ) bpk_buf_putc(t->o, '\n');
+	strcpy(t->rt_name[t->rt_n], nm);
+	t->rt_sp[t->rt_n] = t->sp;
+	t->rt_n++;
+}
+
 /* ---------------------------------------------------------------- the record */
 
 LOCAL void segment( TX *t )
@@ -1758,6 +2069,12 @@ LOCAL void segment( TX *t )
 	UINT	sub = ( W16(t, 0) >> 8 ) & 0xFF;
 
 	tchar_flush(t);
+	if ( bpk_rt_seg(t->id, rt_inside(t)) ) {
+		rt_seg(t);
+		t->arrow_s = t->arrow_e = FALSE;
+		return;
+	}
+	if ( t->id == TS_TEXTEND || t->id == TS_FIGEND ) rt_close_level(t);
 	switch ( t->id ) {
 	case TS_INFO:					break;
 	case TS_TEXT:	text_start(t);			break;
@@ -1802,7 +2119,7 @@ LOCAL void walk( TX *t, const UB *rec, UINT n, BOOL chars, void (*fn)( TX * ) )
 	UINT	pos = 0;
 
 	while ( pos + 2 <= n ) {
-		UINT	w = rd16(rec + pos), id, len;
+		UINT	w = rd16(t, rec + pos), id, len;
 
 		if ( w == 0 ) break;
 		if ( w <= TC_SPEC ) {
@@ -1814,22 +2131,22 @@ LOCAL void walk( TX *t, const UB *rec, UINT n, BOOL chars, void (*fn)( TX * ) )
 		id = w;
 		if ( w == TS_EXT ) {
 			/* an id past FFFF: whatever it is, it is not one known here */
-			UINT	w2 = ( pos + 2 <= n ) ? rd16(rec + pos) : 0;
+			UINT	w2 = ( pos + 2 <= n ) ? rd16(t, rec + pos) : 0;
 
 			pos += 2;
 			if ( w2 >= 0xFF00 ) {
-				UINT	w3 = ( pos + 2 <= n ) ? rd16(rec + pos) : 0;
+				UINT	w3 = ( pos + 2 <= n ) ? rd16(t, rec + pos) : 0;
 
 				pos += ( w3 == 0xFEFE ) ? 4 : 2;
 			}
 			id = 0x10000;
 		}
 		if ( pos + 2 > n ) break;
-		len = rd16(rec + pos);
+		len = rd16(t, rec + pos);
 		pos += 2;
 		if ( len == TS_LONG ) {
 			if ( pos + 4 > n ) break;
-			len = rd32(rec + pos);
+			len = rd32(t, rec + pos);
 			pos += 4;
 		}
 		if ( len > n - pos ) break;		/* cut short: the rest is lost */
@@ -1864,6 +2181,7 @@ EXPORT ER bpk_tad_to_xml( BPKCONV *cv, const char *name, const char *self, INT r
 	cv->plane = 1;
 	cv->ncmap = 0;
 	t->cv = cv;
+	t->be = tad_be(rec, len);
 	t->o = out;
 	t->self = ( self != NULL ) ? self : "";
 	t->fontsize = 14000;
@@ -1874,8 +2192,9 @@ EXPORT ER bpk_tad_to_xml( BPKCONV *cv, const char *name, const char *self, INT r
 	bpk_buf_puts(out, "\">\n");
 	walk(t, rec, len, TRUE, segment);
 	tchar_flush(t);
-	while ( t->sp > 0 ) {
-		if ( top(t)->kind == 'T' ) text_end(t);
+	while ( t->sp > 0 || t->rt_n > 0 ) {
+		if ( t->rt_n > 0 && t->rt_sp[t->rt_n - 1] >= t->sp ) rt_close(t);
+		else if ( top(t)->kind == 'T' ) text_end(t);
 		else fig_end(t);
 	}
 	bpk_buf_puts(out, "</tad>\n");
@@ -1917,6 +2236,7 @@ LOCAL void scan( const UB *rec, UINT len, SCAN *s )
 	TX	*t = calloc(1, sizeof(TX));
 
 	if ( t == NULL ) return;
+	t->be = tad_be(rec, len);
 	s->first = TRUE;
 	scan_now = s;
 	walk(t, rec, len, FALSE, scan_seg);

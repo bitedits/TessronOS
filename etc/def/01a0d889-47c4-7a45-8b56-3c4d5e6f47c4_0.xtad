@@ -1,0 +1,10 @@
+<tad version="1.0" encoding="UTF-8" filename="電子手帳の印刷">
+<document>
+<p>電子手帳の印刷</p>
+<p>用紙設定、印刷。メニューの定義。</p>
+</document>
+<menu>
+<item code="print.setup">用紙設定</item>
+<item code="print" key="P">印刷</item>
+</menu>
+</tad>

@@ -41,7 +41,7 @@ LOCAL CONST char wall_box_id[] = SYSDEF_WALL_BOX;
 
 /* The face the letters of the system are drawn in, when it is there */
 LOCAL CONST char *system_face[] = {
-	"NotoSansJP-Regular.otf", "NOTOSANS.OTF", "KOGANEI.TTF", NULL
+	"NotoSansJP-Regular.otf", "NOTOSANS.OTF", NULL
 };
 
 /* The picture the ground is laid with, when it is there */

@@ -713,7 +713,7 @@ EXPORT void df_pattern_edit( DTWIN *d, INT pat )
 	}
 	wm_raise(pe_wid);
 	pe_draw(d);
-	wm_composite();
+	wm_update();
 	while ( !done ) {
 		if ( wm_read_event(&ev, 2000) < E_OK ) {
 			continue;
@@ -726,7 +726,7 @@ EXPORT void df_pattern_edit( DTWIN *d, INT pat )
 			down = TRUE;
 			done = pe_press(d, ev.x, ev.y);
 			pe_draw(d);
-			wm_composite();
+			wm_update();
 			break;
 		case HID_EV_BTN_UP:
 			down = FALSE;
@@ -742,7 +742,7 @@ EXPORT void df_pattern_edit( DTWIN *d, INT pat )
 					if ( wm_ref(pe_wid, &pw) >= E_OK ) {
 						pe_drag(px - pw.work.left, py - pw.work.top);
 						pe_draw(d);
-						wm_composite();
+						wm_update();
 					}
 				}
 				wm_pointer_moved(px, py);
@@ -761,5 +761,5 @@ EXPORT void df_pattern_edit( DTWIN *d, INT pat )
 	wm_close(pe_wid);
 	pe_wid = 0;
 	dt_draw(d);
-	wm_composite();
+	wm_update();
 }

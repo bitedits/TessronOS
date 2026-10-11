@@ -47,7 +47,7 @@
 #include <ts/tray.h>
 #include "desktop.h"
 
-#define VM_ACC_MAX	16		/* accessories shown in 小物 */
+#define VM_ACC_MAX	24		/* accessories shown in 小物 */
 #define VM_APP_MAX	8		/* programs shown in 実行 */
 
 LOCAL void attributes( DTWIN *d, CONST T_VOBJ *start );
@@ -62,7 +62,7 @@ LOCAL void reconnect( DTWIN *d, CONST T_VOBJ *v );
 LOCAL CONST char * CONST sys_menus[] = {
 	SYSDEF_MENU_WINDOW, SYSDEF_MENU_OBJECT, SYSDEF_MENU_VOBJ,
 	SYSDEF_MENU_REAL, SYSDEF_MENU_ACC, SYSDEF_MENU_EXEC, SYSDEF_MENU_TRAY,
-	SYSDEF_MENU_WINLIST
+	SYSDEF_MENU_WINLIST, SYSDEF_MENU_TAIL, SYSDEF_MENU_DISK
 };
 
 #define NSYS	( (INT)( sizeof(sys_menus) / sizeof(sys_menus[0]) ) )
@@ -178,6 +178,13 @@ EXPORT void dt_get_vmn( DTWIN *d, ID mid, BOOL on_vobj, CONST T_VOBJ *v )
 	/* ウインドウ: the windows open, nearest first */
 	mn_winlist_fill(mid);
 
+	/* ディスク操作: 切り離し on a link to an object of a disk that may be taken away */
+	{
+		TS_UUID	dd = sys_def(SYSDEF_MENU_DISK);
+
+		atr(mid, &dd, "disk.detach", (BOOL)( !on_vobj || !dt_disk_detachable(v) ));
+	}
+
 	/* away from a virtual object, what is about one cannot be chosen */
 	if ( !on_vobj || v == NULL ) {
 		atr(mid, &obj, "vobj", TRUE);
@@ -205,15 +212,105 @@ EXPORT void dt_get_vmn( DTWIN *d, ID mid, BOOL on_vobj, CONST T_VOBJ *v )
 	(void)mn_chg_atr(mid, &rd, "real.unlock",
 			 !locked ? MN_HIDE : ( cut || sealed ) ? MN_GREY : 0);
 
-	/* 実行: the programs the real object's applist names */
-	apps = (UB (*)[OM_APP_NAME])Kmalloc(sizeof(UB) * OM_APP_NAME * VM_APP_MAX);
+	/*
+	 * 実行: the programs the real object's applist names, then those
+	 * that open an object of its kind (fileTypes) -- スライド and
+	 * 基本動画再生 for any record of xmlTAD
+	 */
+	apps = (UB (*)[OM_APP_NAME])Kmalloc(sizeof(UB) * OM_APP_NAME * VM_APP_MAX * 2);
 	if ( apps != NULL ) {
+		CONST DTPROG	*by[VM_APP_MAX];
+		INT		m, q;
+
 		n = om_link_apps(v, apps, VM_APP_MAX);
-		(void)mn_set_lst(mid, &ed, "exec.app", (CONST UB *)apps, OM_APP_NAME,
-				 ( n > 0 ) ? n : 0);
+		if ( n < 0 ) n = 0;
+		m = dt_prog_by_type(v, by, VM_APP_MAX);
+		for ( i = 0; i < m; i++ ) {
+			for ( q = 0; by[i]->name[q] != 0 && q < OM_APP_NAME - 1; q++ ) apps[n + i][q] = by[i]->name[q];
+			apps[n + i][q] = 0;
+		}
+		(void)mn_set_lst(mid, &ed, "exec.app", (CONST UB *)apps, OM_APP_NAME, n + m);
 		atr(mid, &ed, "exec.app", cut);
 		Kfree(apps);
 	}
+}
+
+/* ---------------------------------------------------------------- the tail of a program's menu */
+
+/*
+ * The menu of a process's window, and that of a window of the desktop's
+ * with a part of its own (DTOWN), ends with ウインドウ, 小物 and 実行 as
+ * every window's does (SYSDEF_MENU_TAIL). 小物 lists the accessories;
+ * 実行 is shown grey, as there is no virtual object under the pointer to
+ * run (a link in a slide is one: its 実行 is set for it).
+ * An accessory chosen there is started from the desktop's own loop: the
+ * choice is made in the task of whoever opened the menu.
+ */
+LOCAL volatile INT	dt_tail_req = 0;	/* -1 the box, n + 1 the n-th accessory */
+
+EXPORT void dt_tail_fill( ID mid )
+{
+	TS_UUID		ad = sys_def(SYSDEF_MENU_ACC), td = sys_def(SYSDEF_MENU_TAIL);
+	CONST DTPROG	*acc[VM_ACC_MAX];
+	UB		(*names)[WM_LABEL_MAX];
+	INT		n, i, k;
+
+	names = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * VM_ACC_MAX);
+	if ( names != NULL ) {
+		n = menu_accessories(acc, VM_ACC_MAX);
+		for ( i = 0; i < n; i++ ) {
+			for ( k = 0; acc[i]->name[k] != 0 && k < WM_LABEL_MAX - 1; k++ ) {
+				names[i][k] = acc[i]->name[k];
+			}
+			names[i][k] = 0;
+		}
+		(void)mn_set_lst(mid, &ad, "acc.item", (CONST UB *)names, WM_LABEL_MAX, n);
+		Kfree(names);
+	}
+	atr(mid, &td, "exec", TRUE);
+}
+
+EXPORT BOOL dt_tail_do( CONST T_MNSEL *sel )
+{
+	if ( sel == NULL || !is_sys(&sel->def) ) {
+		return FALSE;
+	}
+	if ( mn_is(sel, "acc.box") ) {
+		dt_tail_req = -1;
+		return TRUE;
+	}
+	if ( mn_is(sel, "acc.item") ) {
+		dt_tail_req = sel->index + 1;
+		return TRUE;
+	}
+	return FALSE;
+}
+
+/* An accessory chosen in a program's menu, started */
+EXPORT void dt_tail_poll( void )
+{
+	CONST DTPROG	*acc[VM_ACC_MAX];
+	INT		r = dt_tail_req;
+
+	if ( r == 0 ) {
+		return;
+	}
+	dt_tail_req = 0;
+	if ( r < 0 ) {
+		(void)dt_prog_run(NULL, dt_prog_find((CONST UB *)"accessory-box"), NULL);
+	} else if ( r - 1 < menu_accessories(acc, VM_ACC_MAX) ) {
+		(void)dt_prog_run(NULL, acc[r - 1], NULL);
+	}
+}
+
+EXPORT void dt_tail_start( void )
+{
+	mn_tail_hooks(dt_tail_fill, dt_tail_do);
+}
+
+EXPORT void dt_tail_stop( void )
+{
+	mn_tail_hooks(NULL, NULL);
 }
 
 /* ---------------------------------------------------------------- doing */
@@ -259,7 +356,7 @@ EXPORT BOOL dt_exe_vmn( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj, CONST T_VOBJ
 	}
 	if ( mn_is(sel, "close") ) {
 		dt_close(d);			/* nothing of the window is touched after */
-		wm_composite();
+		wm_update();
 		return TRUE;
 	}
 	if ( mn_is(sel, "trash") ) {
@@ -275,6 +372,14 @@ EXPORT BOOL dt_exe_vmn( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj, CONST T_VOBJ
 		if ( sel->index < menu_accessories(acc, VM_ACC_MAX) ) {
 			(void)dt_prog_run(d, acc[sel->index], on_vobj ? v : NULL);
 		}
+	} else if ( mn_is(sel, "disk.connect") ) {
+		dt_disk_connect(d, on_vobj ? v : NULL);
+	} else if ( mn_is(sel, "disk.detach") ) {
+		if ( on_vobj ) {
+			dt_disk_detach(d, v);
+		}
+	} else if ( mn_is(sel, "disk.status") ) {
+		dt_disk_status(d, on_vobj ? v : NULL);
 	} else if ( mn_is(sel, "tray.level") ) {
 		(void)tr_sel_dat(sel->index + 1);
 	} else if ( mn_is(sel, "tray.clear") ) {
@@ -293,7 +398,7 @@ EXPORT BOOL dt_exe_vmn( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj, CONST T_VOBJ
 			}
 		}
 	}
-	wm_composite();
+	wm_update();
 
 	return TRUE;
 }
@@ -315,7 +420,8 @@ EXPORT BOOL dt_exe_vmn( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj, CONST T_VOBJ
 #define AT_SIZE		13
 #define AT_RATIO	20		/* and the six after it */
 
-LOCAL void attributes( DTWIN *d, CONST T_VOBJ *start )
+/* The panel of 属性変更: TRUE with what was chosen in *io when it was agreed to */
+LOCAL BOOL attr_ask( DTWIN *d, T_VOBJ *io )
 {
 	CONST char * CONST shows[] = { "ピクトグラム", "名称", "続柄", "タイプ",
 				       "更新日時", "仮身枠" };
@@ -328,7 +434,7 @@ LOCAL void attributes( DTWIN *d, CONST T_VOBJ *start )
 	CONST INT	tenths[] = { 5, 7, 10, 15, 20, 30, 40 };
 	T_WMPANEL	*def;
 	T_WMPART	*pt;
-	T_VOBJ		v = *start;
+	T_VOBJ		v = *io;
 	CONST UW	*colp[4];
 	INT		pid, i, r0 = 2, chsz = ( v.chsz > 0 ) ? v.chsz : 14;
 	UINT		ans;
@@ -338,7 +444,7 @@ LOCAL void attributes( DTWIN *d, CONST T_VOBJ *start )
 
 	def = dt_pn_new(640, 300);
 	if ( def == NULL ) {
-		return;
+		return FALSE;
 	}
 	dt_pn_add(def, WM_PT_LABEL, 0, 14, 8, 300, 20, "仮身属性変更");
 
@@ -453,10 +559,20 @@ LOCAL void attributes( DTWIN *d, CONST T_VOBJ *start )
 			v.height = v.bottom - v.top;
 		}
 		dt_pn_done(d, pid);
-		ed_set_link(d, &v);
-		return;
+		*io = v;
+		return TRUE;
 	}
 	dt_pn_done(d, pid);
+	return FALSE;
+}
+
+LOCAL void attributes( DTWIN *d, CONST T_VOBJ *start )
+{
+	T_VOBJ	v = *start;
+
+	if ( attr_ask(d, &v) ) {
+		ed_set_link(d, &v);
+	}
 }
 
 /* ---------------------------------------------------------------- 続柄 */
@@ -465,10 +581,10 @@ LOCAL void attributes( DTWIN *d, CONST T_VOBJ *start )
  * The relationship: tags in brackets belong to the object and go in its
  * metadata; the rest belong to this link and go in its record.
  */
-LOCAL void relationship( DTWIN *d, CONST T_VOBJ *start )
+LOCAL BOOL rel_ask( DTWIN *d, T_VOBJ *io )
 {
 	UB	text[WM_LABEL_MAX], out[WM_LABEL_MAX], tags[WM_LABEL_MAX];
-	T_VOBJ	v = *start;
+	T_VOBJ	v = *io;
 	INT	n, i, k = 0, t = 0;
 
 	n = om_store_relationship(&v.target, text, WM_LABEL_MAX);
@@ -487,7 +603,7 @@ LOCAL void relationship( DTWIN *d, CONST T_VOBJ *start )
 	if ( !dt_ask_text(d, "続柄（リレーションタグ名）を入力してください",
 		       "[タグ]形式は実身用、それ以外は仮身用（半角スペース区切りで複数設定可）",
 		       text, out, WM_LABEL_MAX, "設定") ) {
-		return;
+		return FALSE;
 	}
 	/* the bracketed words for the object, the others for the link */
 	for ( i = 0; out[i] != 0; i++ ) {
@@ -514,7 +630,17 @@ LOCAL void relationship( DTWIN *d, CONST T_VOBJ *start )
 	v.relationship[k] = 0;
 	tags[t] = 0;
 	om_store_set_relationship(&v.target, tags);
-	ed_set_link(d, &v);
+	*io = v;
+	return TRUE;
+}
+
+LOCAL void relationship( DTWIN *d, CONST T_VOBJ *start )
+{
+	T_VOBJ	v = *start;
+
+	if ( rel_ask(d, &v) ) {
+		ed_set_link(d, &v);
+	}
 }
 
 /* ---------------------------------------------------------------- 実身操作 */
@@ -549,16 +675,12 @@ LOCAL void rename_real( DTWIN *d, CONST T_VOBJ *v )
  */
 LOCAL void place_copy( DTWIN *d, CONST T_VOBJ *orig, CONST T_VOBJ *c );
 
-LOCAL void duplicate_real( DTWIN *d, CONST T_VOBJ *v )
+/* The object copied under a name asked for, the copy in *p_nid; FALSE when it was not */
+LOCAL BOOL dup_ask( DTWIN *d, CONST T_VOBJ *v, TS_UUID *p_nid )
 {
 	UB	start[WM_LABEL_MAX], name[WM_LABEL_MAX];
-	TS_UUID	nid;
-	T_VOBJ	c;
 	INT	n = 0, k;
 
-	if ( d->sealed ) {
-		return;
-	}
 	if ( om_store_name(&v->target, start, WM_LABEL_MAX - 16) < 0 ) {
 		start[0] = 0;
 	}
@@ -575,9 +697,17 @@ LOCAL void duplicate_real( DTWIN *d, CONST T_VOBJ *v )
 	}
 	if ( !dt_ask_text(d, "新しい実身の名称を入力してください", NULL, start,
 		       name, WM_LABEL_MAX, "設定") || name[0] == 0 ) {
-		return;
+		return FALSE;
 	}
-	if ( om_store_copy(&v->target, name, TRUE, &nid) < E_OK ) {
+	return (BOOL)( om_store_copy(&v->target, name, TRUE, p_nid) >= E_OK );
+}
+
+LOCAL void duplicate_real( DTWIN *d, CONST T_VOBJ *v )
+{
+	TS_UUID	nid;
+	T_VOBJ	c;
+
+	if ( d->sealed || !dup_ask(d, v, &nid) ) {
 		return;
 	}
 	c = *v;
@@ -760,5 +890,166 @@ EXPORT void dt_lock_app( DTWIN *d, CONST T_VOBJ *v )
 		s[at + i] = ins[i];
 	}
 	ed_set_link(d, &c);
+}
+
+/* ---------------------------------------------------------------- a program's links */
+
+/* A link as a program says it looks, at the corner of a box of its size */
+LOCAL void link_of_req( CONST T_DTREQ *rq, T_VOBJ *v )
+{
+	INT	i;
+
+	knl_memset(v, 0, sizeof(*v));
+	v->target = rq->target;
+	v->recno = -1;
+	v->right = rq->look.w;
+	v->bottom = rq->look.h;
+	v->height = rq->look.h;
+	v->chsz = rq->look.chsz;
+	v->frcol = rq->look.frcol;
+	v->chcol = rq->look.chcol;
+	v->tbcol = rq->look.tbcol;
+	v->bgcol = rq->look.bgcol;
+	v->disp = ( rq->look.disp != 0 ) ? rq->look.disp : TAD_D_DEFAULT;
+	v->autoopen = (BOOL)( rq->look.autoopen != 0 );
+	v->hidden = (BOOL)( ( rq->flags & DT_F_HIDDEN ) != 0 );
+	v->zoom = 100;
+	for ( i = 0; rq->name[i] != 0 && i < TAD_REL_MAX - 1 && i < (INT)sizeof(rq->name) - 1; i++ ) {
+		v->relationship[i] = rq->name[i];
+	}
+	v->relationship[i] = 0;
+}
+
+LOCAL void text_out( UB *out, CONST UB *s )
+{
+	INT	i;
+
+	for ( i = 0; s[i] != 0 && i < DT_TEXT_MAX - 1; i++ ) {
+		out[i] = s[i];
+	}
+	out[i] = 0;
+}
+
+EXPORT ER dt_proc_link_op( CONST T_DTREQ *rq, T_DTANS *an )
+{
+	DTWIN	*host = dt_host_of(&rq->win);
+	T_VOBJ	*v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	UB	name[WM_LABEL_MAX];
+	ER	er = E_OK;
+
+	if ( v == NULL ) {
+		return E_NOMEM;
+	}
+	link_of_req(rq, v);
+	wm_obj_quiet(TRUE);		/* what answers the panels is theirs, not the program's */
+	if ( host == NULL && rq->req != DT_RQ_CLOSE && rq->req != DT_RQ_EXEC
+	  && rq->req != DT_RQ_NETWORK && rq->req != DT_RQ_FULL ) {
+		wm_obj_quiet(FALSE);
+		Kfree(v);
+		return E_NOEXS;			/* nowhere to ask in */
+	}
+	switch ( rq->req ) {
+	case DT_RQ_CLOSE:
+		dt_close_vobj(v);
+		break;
+	case DT_RQ_ATTR:
+		if ( !attr_ask(host, v) ) {
+			er = E_ABORT;
+			break;
+		}
+		an->look.w = v->right - v->left;
+		an->look.h = v->bottom - v->top;
+		an->look.chsz = v->chsz;
+		an->look.frcol = v->frcol;
+		an->look.chcol = v->chcol;
+		an->look.tbcol = v->tbcol;
+		an->look.bgcol = v->bgcol;
+		an->look.disp = v->disp;
+		an->look.autoopen = v->autoopen ? 1 : 0;
+		an->flags = v->hidden ? DT_F_HIDDEN : 0;
+		break;
+	case DT_RQ_RELATION:
+		if ( !rel_ask(host, v) ) {
+			er = E_ABORT;
+			break;
+		}
+		text_out(an->text, v->relationship);
+		break;
+	case DT_RQ_RENAME:
+		rename_real(host, v);
+		if ( om_store_name(&v->target, name, WM_LABEL_MAX) >= 0 ) {
+			text_out(an->text, name);
+		}
+		break;
+	case DT_RQ_DUPLICATE:
+		if ( !dup_ask(host, v, &an->into) ) {
+			er = E_ABORT;
+		}
+		break;
+	case DT_RQ_NEWVER:
+		if ( om_store_name(&v->target, name, WM_LABEL_MAX) < 0
+		  || om_store_copy(&v->target, name, FALSE, &an->into) < E_OK ) {
+			er = E_IO;
+		}
+		break;
+	case DT_RQ_INFO:
+		dt_real_info(host, v);
+		break;
+	case DT_RQ_NETWORK:
+		dt_network_open(host, v);
+		break;
+	case DT_RQ_SEARCH:
+		dt_search_open(host);
+		break;
+	case DT_RQ_EXEC:
+		text_out(name, rq->name);
+		if ( name[0] == 0 ) {
+			er = E_PAR;
+			break;
+		}
+		if ( ( rq->flags & DT_F_KEEP ) == 0 ) {
+			(void)om_store_set_default_app(&v->target, name);
+		}
+		v->frcol = v->chcol = v->tbcol = v->bgcol = TAD_COL_NONE;
+		er = dt_open_as(NULL, v, name);
+		break;
+	case DT_RQ_PAPER: {
+		UB	start[8];
+		UW	col;
+
+		dt_colour_text(( rq->look.bgcol == TAD_COL_NONE ) ? 0x00FFFFFFU : rq->look.bgcol, start);
+		if ( !dt_ask_text(host, "背景色を入力してください（例: #ffffff）", NULL, start,
+			       name, WM_LABEL_MAX, "設定") || !dt_colour_of(name, &col) ) {
+			er = E_ABORT;
+			break;
+		}
+		(void)om_store_set_paper(&v->target, col);
+		an->look.bgcol = col;
+		dt_draw_all();
+		break;
+	}
+	case DT_RQ_FULL: {
+		INT		wid = wm_obj_wid(&rq->win);
+		UINT		sw, sh;
+		T_DPRECT	o;
+
+		if ( wid <= 0 || dt_screen_size(&sw, &sh) < E_OK ) {
+			er = E_NOEXS;
+			break;
+		}
+		o.left = 0;  o.top = 0;
+		o.right = (INT)sw;
+		o.bottom = (INT)sh - wm_msg_height();	/* above the message line */
+		er = wm_move(wid, &o);
+		break;
+	}
+	default:
+		er = E_PAR;
+		break;
+	}
+	wm_obj_quiet(FALSE);
+	Kfree(v);
+	wm_update();
+	return er;
 }
 

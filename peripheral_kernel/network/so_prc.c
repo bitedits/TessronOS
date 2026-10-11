@@ -20,7 +20,9 @@
  *
  *	The structures are the so_ calls' own (include/ts/so.h; include/ts/
  *	soapp.h is the process's side of them), so the calls pass them
- *	through.
+ *	through: the stack reads and writes them, and the bytes sent and
+ *	received, where the process has them, once they are made sure of,
+ *	inside UACCESS (PAN). What is looked at here first is copied in.
  */
 
 #include <tk/tkernel.h>
@@ -29,6 +31,7 @@
 #include <ts/svc.h>
 #include <ts/proc.h>
 #include "obj/obj.h"
+#include "cpu_uaccess.h"
 
 #define ADDR_MAX	128		/* bytes of an address the calls take */
 #define OPT_MAX		64		/* bytes of a socket option */
@@ -63,10 +66,13 @@ LOCAL BOOL addr_in( CONST struct sockaddr *a, socklen_t len )
 /* Room for an address to come back in: *p_len writable, and *p_len bytes at a */
 LOCAL BOOL addr_out( struct sockaddr *a, socklen_t *p_len )
 {
+	socklen_t	len;
+
 	if ( !user_ok(p_len, sizeof(*p_len), TRUE) ) {
 		return FALSE;
 	}
-	return ( *p_len <= ADDR_MAX && ( *p_len == 0 || user_ok(a, (SZ)*p_len, TRUE) ) );
+	len = UACCESS(*p_len);
+	return ( len <= ADDR_MAX && ( len == 0 || user_ok(a, (SZ)len, TRUE) ) );
 }
 
 /* ---------------------------------------------------------------- waiting in slices */
@@ -141,22 +147,32 @@ LOCAL ER wait_ready( INT s, INT ev, INT optname )
 	}
 }
 
-/* Received as a blocking call would, in slices: recv or recvfrom */
+/*
+ * Received as a blocking call would, in slices: recv or recvfrom, and
+ * with the type of service when p_tos is given (so_recvtos)
+ */
+LOCAL INT recv_once( INT s, void *mem, SZ size, INT flags,
+		     struct sockaddr *from, socklen_t *fromlen, INT *p_tos )
+{
+	return ( p_tos != NULL ) ? so_recvtos(s, mem, size, flags, from, fromlen, p_tos)
+				 : so_recvfrom(s, mem, size, flags, from, fromlen);
+}
+
 LOCAL INT recv_sliced( INT s, void *mem, SZ size, INT flags,
-		       struct sockaddr *from, socklen_t *fromlen )
+		       struct sockaddr *from, socklen_t *fromlen, INT *p_tos )
 {
 	INT	n;
 	ER	er;
 
 	if ( nowait(s, flags) ) {
-		return so_recvfrom(s, mem, size, flags, from, fromlen);
+		return recv_once(s, mem, size, flags, from, fromlen, p_tos);
 	}
 	for ( ;; ) {
 		er = wait_ready(s, POLLIN, SO_RCVTIMEO);
 		if ( er < E_OK ) {
 			return er;
 		}
-		n = so_recvfrom(s, mem, size, flags | MSG_DONTWAIT, from, fromlen);
+		n = recv_once(s, mem, size, flags | MSG_DONTWAIT, from, fromlen, p_tos);
 		if ( n != E_TMOUT ) {
 			return n;		/* data, the end, or an error */
 		}
@@ -195,7 +211,7 @@ LOCAL INT send_sliced( INT s, CONST void *data, SZ size, INT flags,
 /* The same two for the socket's object (obsock.c): its data record read and written */
 EXPORT INT knl_so_recv_wait( INT s, void *mem, SZ size, INT flags )
 {
-	return recv_sliced(s, mem, size, flags, NULL, NULL);
+	return recv_sliced(s, mem, size, flags, NULL, NULL, NULL);
 }
 
 EXPORT INT knl_so_send_wait( INT s, CONST void *data, SZ size, INT flags )
@@ -265,6 +281,11 @@ LOCAL INT accept_sliced( INT s, struct sockaddr *addr, socklen_t *addrlen )
 		so_fcntl(s, F_SETFL, fl | O_NONBLOCK);
 		n = knl_so_accept_as(s, addr, addrlen, ts_get_pid());
 		so_fcntl(s, F_SETFL, fl);
+		if ( n >= 0 ) {
+			/* the connection takes the listening socket's flags, and with
+			   them the O_NONBLOCK lent for the call: it blocks as that one does */
+			so_fcntl(n, F_SETFL, fl);
+		}
 		if ( n != E_TMOUT ) {
 			return n;
 		}
@@ -290,14 +311,14 @@ LOCAL ER svc_so_bind( INT s, CONST struct sockaddr *name, socklen_t namelen )
 {
 	if ( !mine(s) ) return E_ID;
 	if ( !addr_in(name, namelen) ) return E_MACV;
-	return so_bind(s, name, namelen);
+	return UACCESS(so_bind(s, name, namelen));
 }
 
 LOCAL ER svc_so_connect( INT s, CONST struct sockaddr *name, socklen_t namelen )
 {
 	if ( !mine(s) ) return E_ID;
 	if ( !addr_in(name, namelen) ) return E_MACV;
-	return connect_sliced(s, name, namelen);
+	return UACCESS(connect_sliced(s, name, namelen));
 }
 
 LOCAL ER svc_so_listen( INT s, INT backlog )
@@ -310,7 +331,7 @@ LOCAL INT svc_so_accept( INT s, struct sockaddr *addr, socklen_t *addrlen )
 {
 	if ( !mine(s) ) return E_ID;
 	if ( addr != NULL && !addr_out(addr, addrlen) ) return E_MACV;
-	return accept_sliced(s, addr, ( addr != NULL ) ? addrlen : NULL);
+	return UACCESS(accept_sliced(s, addr, ( addr != NULL ) ? addrlen : NULL));
 }
 
 LOCAL ER svc_so_shutdown( INT s, INT how )
@@ -323,7 +344,7 @@ LOCAL INT svc_so_send( INT s, CONST void *data, SZ size, INT flags )
 	if ( !mine(s) ) return E_ID;
 	if ( size < 0 ) return E_PAR;
 	if ( size > 0 && !user_ok(data, size, FALSE) ) return E_MACV;
-	return send_sliced(s, data, size, flags, NULL, 0);
+	return UACCESS(send_sliced(s, data, size, flags, NULL, 0));
 }
 
 LOCAL INT svc_so_recv( INT s, void *mem, SZ size, INT flags )
@@ -331,7 +352,7 @@ LOCAL INT svc_so_recv( INT s, void *mem, SZ size, INT flags )
 	if ( !mine(s) ) return E_ID;
 	if ( size < 0 ) return E_PAR;
 	if ( size > 0 && !user_ok(mem, size, TRUE) ) return E_MACV;
-	return recv_sliced(s, mem, size, flags, NULL, NULL);
+	return UACCESS(recv_sliced(s, mem, size, flags, NULL, NULL, NULL));
 }
 
 LOCAL INT svc_so_sendto( INT s, CONST void *data, SZ size, INT flags,
@@ -341,7 +362,7 @@ LOCAL INT svc_so_sendto( INT s, CONST void *data, SZ size, INT flags,
 	if ( size < 0 ) return E_PAR;
 	if ( size > 0 && !user_ok(data, size, FALSE) ) return E_MACV;
 	if ( to != NULL && !addr_in(to, tolen) ) return E_MACV;
-	return send_sliced(s, data, size, flags, to, ( to != NULL ) ? tolen : 0);
+	return UACCESS(send_sliced(s, data, size, flags, to, ( to != NULL ) ? tolen : 0));
 }
 
 LOCAL INT svc_so_recvfrom( INT s, void *mem, SZ size, INT flags,
@@ -351,7 +372,24 @@ LOCAL INT svc_so_recvfrom( INT s, void *mem, SZ size, INT flags,
 	if ( size < 0 ) return E_PAR;
 	if ( size > 0 && !user_ok(mem, size, TRUE) ) return E_MACV;
 	if ( from != NULL && !addr_out(from, fromlen) ) return E_MACV;
-	return recv_sliced(s, mem, size, flags, from, ( from != NULL ) ? fromlen : NULL);
+	return UACCESS(recv_sliced(s, mem, size, flags, from, ( from != NULL ) ? fromlen : NULL, NULL));
+}
+
+LOCAL INT svc_so_recvtos( INT s, void *mem, SZ size, INT flags,
+			  struct sockaddr *from, socklen_t *fromlen, INT *p_tos )
+{
+	INT	tos = -1, n;
+
+	if ( !mine(s) ) return E_ID;
+	if ( size < 0 ) return E_PAR;
+	if ( size > 0 && !user_ok(mem, size, TRUE) ) return E_MACV;
+	if ( from != NULL && !addr_out(from, fromlen) ) return E_MACV;
+	if ( !user_ok(p_tos, sizeof(*p_tos), TRUE) ) return E_MACV;
+	n = UACCESS(recv_sliced(s, mem, size, flags, from, ( from != NULL ) ? fromlen : NULL, &tos));
+	if ( n >= 0 ) {
+		knl_ua_put(p_tos, &tos, sizeof(tos));
+	}
+	return n;
 }
 
 /*
@@ -367,13 +405,13 @@ LOCAL ER svc_so_getsockopt( INT s, INT level, INT optname, void *optval, socklen
 
 	if ( !mine(s) ) return E_ID;
 	if ( !user_ok(optlen, sizeof(*optlen), TRUE) ) return E_MACV;
-	len = *optlen;
+	knl_ua_get(&len, optlen, sizeof(len));
 	if ( len > OPT_MAX ) len = OPT_MAX;
 	if ( len > 0 && !user_ok(optval, (SZ)len, TRUE) ) return E_MACV;
 	er = so_getsockopt(s, level, optname, v, &len);
 	if ( er >= E_OK ) {
-		knl_memcpy(optval, v, (INT)len);
-		*optlen = len;
+		knl_ua_put(optval, v, len);
+		knl_ua_put(optlen, &len, sizeof(len));
 	}
 	return er;
 }
@@ -385,7 +423,7 @@ LOCAL ER svc_so_setsockopt( INT s, INT level, INT optname, CONST void *optval, s
 	if ( !mine(s) ) return E_ID;
 	if ( optlen > OPT_MAX ) return E_PAR;
 	if ( optlen > 0 && !user_ok(optval, (SZ)optlen, FALSE) ) return E_MACV;
-	if ( optlen > 0 ) knl_memcpy(v, optval, (INT)optlen);
+	if ( optlen > 0 ) knl_ua_get(v, optval, optlen);
 	return so_setsockopt(s, level, optname, v, optlen);
 }
 
@@ -393,14 +431,14 @@ LOCAL ER svc_so_getsockname( INT s, struct sockaddr *name, socklen_t *namelen )
 {
 	if ( !mine(s) ) return E_ID;
 	if ( !addr_out(name, namelen) ) return E_MACV;
-	return so_getsockname(s, name, namelen);
+	return UACCESS(so_getsockname(s, name, namelen));
 }
 
 LOCAL ER svc_so_getpeername( INT s, struct sockaddr *name, socklen_t *namelen )
 {
 	if ( !mine(s) ) return E_ID;
 	if ( !addr_out(name, namelen) ) return E_MACV;
-	return so_getpeername(s, name, namelen);
+	return UACCESS(so_getpeername(s, name, namelen));
 }
 
 /* The list is taken in, every socket in it the process's, and the answers put back */
@@ -412,7 +450,7 @@ LOCAL INT svc_so_poll( struct pollfd *fds, INT nfds, TMO tmout )
 	if ( nfds < 0 || nfds > POLL_MAX ) return E_PAR;
 	if ( nfds > 0 && !user_ok(fds, (SZ)nfds * (SZ)sizeof(*fds), TRUE) ) return E_MACV;
 	for ( i = 0; i < nfds; i++ ) {
-		k[i] = fds[i];
+		knl_ua_get(&k[i], &fds[i], sizeof(k[i]));
 		if ( !mine(k[i].fd) ) return E_ID;
 		k[i].revents = 0;
 	}
@@ -430,7 +468,7 @@ LOCAL INT svc_so_poll( struct pollfd *fds, INT nfds, TMO tmout )
 	} while ( n == 0 && ( tmout == TMO_FEVR || tmout > 0 ) );
 	if ( n >= 0 ) {
 		for ( i = 0; i < nfds; i++ ) {
-			fds[i].revents = k[i].revents;
+			UACCESS_DO(fds[i].revents = k[i].revents);
 		}
 	}
 	return n;
@@ -444,29 +482,60 @@ LOCAL ER svc_so_fcntl( INT s, INT cmd, INT val )
 	return so_fcntl(s, cmd, val);
 }
 
-LOCAL ER svc_so_resolve( CONST char *name, UW *p_addr )
+/* A name the process gives, taken into n (NAME_MAX bytes) a page at a time */
+LOCAL ER name_in( CONST char *name, char *n )
 {
-	char	n[NAME_MAX];
-	UW	a = 0;
 	INT	i;
-	ER	er;
 
 	if ( name == NULL ) return E_PAR;
-	if ( !user_ok(p_addr, sizeof(*p_addr), TRUE) ) return E_MACV;
 	for ( i = 0; i < NAME_MAX; i++ ) {
 		if ( ( i == 0 || ( ( (UBINT)( name + i ) ) & ( PAGE_BYTES - 1 ) ) == 0 )
 		  && !user_ok(name + i, 1, FALSE) ) {
 			return E_MACV;
 		}
-		n[i] = name[i];
+		n[i] = UACCESS(name[i]);
 		if ( n[i] == '\0' ) break;
 	}
-	if ( i >= NAME_MAX ) return E_PAR;
+	return ( i >= NAME_MAX ) ? E_PAR : E_OK;
+}
+
+LOCAL ER svc_so_resolve( CONST char *name, UW *p_addr )
+{
+	char	n[NAME_MAX];
+	UW	a = 0;
+	ER	er;
+
+	if ( name == NULL ) return E_PAR;
+	if ( !user_ok(p_addr, sizeof(*p_addr), TRUE) ) return E_MACV;
+	er = name_in(name, n);
+	if ( er < E_OK ) return er;
 	er = so_resolve(n, &a);
 	if ( er >= E_OK ) {
-		*p_addr = a;
+		knl_ua_put(p_addr, &a, sizeof(a));
 	}
 	return er;
+}
+
+/* The addresses go through a list of the kernel's: up to RESOLVE_MAX of them */
+#define RESOLVE_MAX	16
+
+LOCAL INT svc_so_resolveall( CONST char *name, INT family, INT flags, T_SOADDR *addrs, INT max )
+{
+	T_SOADDR	l[RESOLVE_MAX];
+	char		n[NAME_MAX];
+	INT		k;
+	ER		er;
+
+	if ( name == NULL || addrs == NULL || max <= 0 ) return E_PAR;
+	if ( max > RESOLVE_MAX ) max = RESOLVE_MAX;
+	if ( !user_ok(addrs, (SZ)max * (SZ)sizeof(T_SOADDR), TRUE) ) return E_MACV;
+	er = name_in(name, n);
+	if ( er < E_OK ) return er;
+	k = so_resolveall(n, family, flags, l, max);
+	if ( k > 0 ) {
+		knl_ua_put(addrs, l, (SZ)k * (SZ)sizeof(T_SOADDR));
+	}
+	return k;
 }
 
 LOCAL BOOL word_out( UW *p )
@@ -477,13 +546,13 @@ LOCAL BOOL word_out( UW *p )
 LOCAL ER svc_so_getifaddr( UW *p_addr, UW *p_mask, UW *p_gw )
 {
 	if ( !word_out(p_addr) || !word_out(p_mask) || !word_out(p_gw) ) return E_MACV;
-	return so_getifaddr(p_addr, p_mask, p_gw);
+	return UACCESS(so_getifaddr(p_addr, p_mask, p_gw));
 }
 
 LOCAL ER svc_so_getdns( UW *p_dns )
 {
 	if ( p_dns == NULL || !user_ok(p_dns, sizeof(*p_dns), TRUE) ) return E_MACV;
-	return so_getdns(p_dns);
+	return UACCESS(so_getdns(p_dns));
 }
 
 LOCAL ER svc_so_setifaddr( UW addr, UW mask, UW gw, UW dns )
@@ -500,7 +569,7 @@ LOCAL ER svc_so_getobj( INT s, TS_UUID *p_uuid )
 {
 	if ( !mine(s) ) return E_ID;
 	if ( !user_ok(p_uuid, sizeof(*p_uuid), TRUE) ) return E_MACV;
-	return so_getobj(s, p_uuid);
+	return UACCESS(so_getobj(s, p_uuid));
 }
 
 #define F(fn)	((FP)(fn))
@@ -529,4 +598,6 @@ EXPORT const FP knl_so_svc_tbl[TSN_SO_MAX + 1] = {
 	[TSN_NUMBER(TSN_SO_SETIFADDR)]	= F(svc_so_setifaddr),
 	[TSN_NUMBER(TSN_SO_DHCP_START)]	= F(svc_so_dhcp_start),
 	[TSN_NUMBER(TSN_SO_GETOBJ)]	= F(svc_so_getobj),
+	[TSN_NUMBER(TSN_SO_RESOLVEALL)]	= F(svc_so_resolveall),
+	[TSN_NUMBER(TSN_SO_RECVTOS)]	= F(svc_so_recvtos),
 };

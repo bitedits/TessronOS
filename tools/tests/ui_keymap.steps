@@ -1,0 +1,163 @@
+# キー配列 (design 11.15), for tools/ui_run.py: a text given the keys, then the
+# accessory opened from its program in front of it (its window at 160,200, its work
+# area at 166,228; a key of the Japanese keyboard's row r whose left edge is q
+# quarter-keys from the corner at 174+10q, 295+40r), letters typed into the text
+# on the picture with the text keeping the keys, the menu of the second button shown
+# and each of its choices made, a key given another and kept, every key given back,
+# and closed. The menu opens with the item last chosen under the pointer, so its rows
+# move as the steps go: 閉じる, then 20 lower after the line 英字配列, かな配列,
+# キーボードの形, 表示, then 20 lower after the line 付け替え, 付け替えをやめる,
+# 付け替えをすべて元に戻す; a submenu opens to the right with its first item level
+# with the row that opened it.
+click 950 600
+wait 300
+open 01a0d8c4-52e8-7b19-9c2a-3d4e5f6a7b84
+expect keymap: ready latin 0 kana 0 map 0
+wait 800
+win キー配列
+shot km_open
+# Shift on the picture for the next key, then T e s t
+click 219 434
+expect keymap: latch 2
+click 414 354
+expect keymap: typed 17 mods 2
+click 334 354
+expect keymap: typed 08 mods 0
+click 304 394
+expect keymap: typed 16 mods 0
+click 414 354
+expect keymap: typed 17 mods 0
+wait 500
+shot km_typed
+# the keyboard's own left Shift held: lit on the picture, the letters capitals, the text keeping the keys
+keydown E1 02
+wait 400
+shot km_held
+keyup E1
+wait 300
+# the menu of the second button, 閉じる under the pointer; 英字配列 > Dvorak
+click 466 278 1
+wait 600
+shot km_menu
+move 470 319
+wait 150
+move 600 319
+wait 400
+move 700 319
+wait 150
+shot km_menu_latin
+move 700 339
+wait 150
+click 700 339
+expect keymap: latin 1
+wait 300
+shot km_dvorak
+# かな配列 > TRONかな配列 (英字配列 under the pointer)
+click 466 278 1
+wait 600
+move 470 299
+wait 150
+move 600 299
+wait 400
+move 700 299
+wait 150
+move 700 319
+wait 150
+click 700 319
+expect keymap: kana 1
+# キーボードの形 > TRON (かな配列 under the pointer)
+click 466 278 1
+wait 600
+move 470 299
+wait 150
+move 600 299
+wait 400
+move 700 299
+wait 150
+move 700 339
+wait 150
+click 700 339
+expect keymap: shape 2
+# 表示 > かな (キーボードの形 under the pointer), the submenu shown with its mark
+click 466 278 1
+wait 600
+move 470 299
+wait 150
+move 600 299
+wait 400
+move 700 299
+wait 150
+shot km_menu_view
+move 700 319
+wait 150
+click 700 319
+expect keymap: view kana
+wait 300
+shot km_tron_kana
+# 付け替え (表示 under the pointer): 英語 (CapsLock) made 命令 (the left Ctrl)
+click 466 278 1
+wait 600
+move 470 319
+wait 150
+click 470 319
+expect keymap: pick on
+click 412 476
+expect keymap: pick from 39
+click 232 410
+expect keymap: map 39 to e0
+wait 300
+shot km_mapped
+# 閉じる (付け替え under the pointer), then opened again: the layouts and the key given another kept
+click 466 278 1
+wait 600
+move 470 139
+wait 150
+click 470 139
+expect keymap: closed
+wait 500
+open 01a0d8c4-52e8-7b19-9c2a-3d4e5f6a7b84
+expect keymap: ready latin 1 kana 1 map 1
+wait 800
+shot km_again
+click 466 278 1
+wait 600
+shot km_menu_again
+# 付け替えをすべて元に戻す (閉じる under the pointer in the new process's menu)
+move 470 459
+wait 150
+click 470 459
+expect keymap: map reset
+wait 300
+shot km_reset
+# 付け替え, then 付け替えをやめる
+click 466 278 1
+wait 600
+move 470 239
+wait 150
+click 470 239
+wait 300
+click 466 278 1
+wait 600
+move 470 299
+wait 150
+click 470 299
+expect keymap: pick off
+# the buttons: the latin layout back to the keys as written, the kana to 親指シフト and JIS かな
+click 259 248
+expect keymap: latin 0
+click 425 248
+expect keymap: kana 2
+click 425 248
+expect keymap: kana 0
+wait 300
+shot km_buttons
+# 閉じる (付け替えをやめる under the pointer)
+click 466 278 1
+wait 600
+move 470 119
+wait 150
+click 470 119
+wait 800
+shot km_closed
+# nothing it did was refused for want of a right
+absent !OACV!

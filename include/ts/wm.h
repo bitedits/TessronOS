@@ -59,6 +59,20 @@ extern "C" {
  */
 #define WM_ATTR_POPUP		0x0100
 #define WM_CLEAR		0xFF000000U
+/*
+ * A window that never has the keys: pressed, it comes forward, but the
+ * keys stay with the window that had them, so that what a screen
+ * keyboard types (wm_obj_key_put) goes there. wm_focus leaves such a
+ * window out.
+ */
+#define WM_ATTR_NOFOCUS		0x0200
+/*
+ * A window that floats: an ordinary window in every other way (its
+ * frame, the input), but in front of every window that does not float,
+ * and behind the popups. A window brought forward comes up behind the
+ * floating ones, as a picture-in-picture window stays over the others.
+ */
+#define WM_ATTR_FLOAT		0x0400
 
 #define WM_TITLE_MAX		128
 
@@ -132,6 +146,7 @@ IMPORT ER  knl_look_setting( UINT num, UW value );
 IMPORT void knl_input_sync( void );
 IMPORT ER  wm_conf_apply( void );
 IMPORT ER  wm_dev_conf_apply( void );	/* the machine's settings */
+IMPORT ER  wm_cpu_conf_apply( void );	/* of them, the processors' clock alone (CPU_MHZ) */
 IMPORT ER  wm_dev_conf_put( CONST char *key, CONST char *val );
 IMPORT BOOL wm_dev_conf_get( CONST char *key, char *v, INT max );
 IMPORT ER  wm_conf_watch( void );		/* the settings objects taken again when written */
@@ -140,7 +155,19 @@ IMPORT ER  wm_conf_watch( void );		/* the settings objects taken again when writ
 #define WM_BEEP_BUZZER	0
 #define WM_BEEP_PRESS	1
 #define WM_BEEP_RELEASE	2
+#define WM_BEEP_TICK	3	/* the buzzer's tone, short: a count going down */
+#define WM_BEEP_LONG	4	/* and long: the count at its end */
+#define WM_BEEP_TEST	5	/* 〈試聴〉 of システム環境設定: 880Hz for half a second */
+#define WM_BEEP_TONE	0x100	/* with one of the above: its tone, though it hold a WAV */
 IMPORT ER  wm_beep( UINT what );
+/*
+ * The same, waiting for the start: plays though the speaker be switched
+ * off, and answers E_OK when it sounds, E_NOSPT when no output can
+ * (beep.c). A process asks through the system object's record 8
+ * (OB_SYS_SOUND: PLAY and buzzer, press, release, tick, long or test,
+ * then tone for WM_BEEP_TONE).
+ */
+IMPORT ER  wm_beep_try( UINT what );
 IMPORT INT wm_user_name( UB *buf, INT max );			/* 0 for a number that is not there */
 IMPORT INT wm_num( UINT num, INT dflt );
 IMPORT ER  wm_set_look( UINT num, UW value );
@@ -150,9 +177,15 @@ IMPORT ER  wm_look_pat( UINT num, T_DPPAT *pat );
 /* ------------------------------------------------------- the look settings */
 
 /*
- * The settings that change the shape of a frame rather than its ink.
- * They are entries of the same table, in the range kept for the
- * system's own settings.
+ * The windows' look (LK_LOOK..LK_OPA_WHOLE in <ts/look.h>): how solid
+ * the frames are and whether the work area is seen through too, the
+ * washes, the corners, the shadow, the spread of what shows through,
+ * the motion. They are entries of the same table, in the range kept
+ * for the system's own settings, and are on every window with a frame
+ * as soon as they are set. wm_set checks one against its range
+ * (cf_look_items) and makes the windows' shapes follow it; the screen
+ * shows it from the next time it is built. knl_wm_look is the same,
+ * answering 1 when the value changed and 0 when it already was that.
  */
 #define WM_SET_ROUND		LK_ROUND
 #define WM_SET_SHADOW		LK_SHD_DARK
@@ -165,6 +198,7 @@ IMPORT ER  wm_look_pat( UINT num, T_DPPAT *pat );
 
 IMPORT ER  wm_set( UINT num, INT value );
 IMPORT INT wm_get( UINT num );		/* -1 for a number that holds nothing */
+IMPORT ER  knl_wm_look( UINT num, INT value );
 
 /* ---------------------------------------------------------------- schemes */
 
@@ -221,12 +255,15 @@ IMPORT ER  wm_load_wall_obj( CONST TS_UUID *uuid, INT recno, UINT mode );
 /* ------------------------------------------------------- seeing through one */
 
 /*
- * How much of what is behind a window shows through its frame. 255 is
- * the whole of the frame's own colour and nothing behind it.
+ * How much of what is behind a window shows through its frame: the
+ * program's own say for one window, 255 (the whole of the frame's own
+ * colour and nothing behind it) until it says otherwise. The look's
+ * LK_OPACITY comes on top of it for a window with a frame.
  *
- * **The work area is never see-through.** Letters on a moving ground
- * cannot be read, and mixing every pixel of every window costs the
- * screen rather than the strip around it (design 16.5.5).
+ * The work area is not seen through unless the look says the whole
+ * window is (LK_OPA_WHOLE). Letters on a moving ground are hard to read,
+ * and mixing every pixel of every window costs the screen rather than
+ * the strip around it (design 16.5.5).
  */
 IMPORT ER  wm_set_opacity( INT wid, UINT opacity );
 IMPORT ER  wm_set_tint( INT wid, UW colour, UINT strength );
@@ -254,8 +291,9 @@ IMPORT ER  wm_move( INT wid, CONST T_DPRECT *outer );
 IMPORT ER  wm_raise( INT wid );
 /*
  * A subordinate window: wid kept just in front of parent whatever is
- * raised or lowered (0: its own again). A window object is made one with
- * "sub":"<the parent window's UUID>" in its metadata.
+ * raised or lowered (0: its own again). It is carried with parent when
+ * parent is moved, and raising it raises parent with it. A window object
+ * is made one with "sub":"<the parent window's UUID>" in its metadata.
  */
 IMPORT ER  wm_set_parent( INT wid, INT parent );
 
@@ -319,6 +357,7 @@ IMPORT ER  wm_draw_bar( INT gid, CONST T_DPRECT *r, CONST T_WMBAR *b,
  */
 IMPORT ER   wm_set_pict( INT wid, INT num, ID owner );
 IMPORT ER   wm_set_icon( INT wid, CONST UW *px, INT w, INT h );	/* an object's icon in the band */
+IMPORT ER   wm_set_icon_default( CONST UW *px, INT w, INT h );	/* the band's icon of a window with none */
 
 IMPORT ER   wm_pict_draw( INT gid, INT num, ID owner, CONST T_DPRECT *box,
 			  UW ink );
@@ -416,6 +455,39 @@ IMPORT INT wm_gid( INT wid );
 IMPORT ER  wm_damage( INT wid, CONST T_DPRECT *r );
 IMPORT ER  wm_take_damage( INT wid, T_DPRECT *r );	/* E_NOEXS when none */
 
+/*
+ * A surface a process draws its window's work area in: pages of the
+ * kernel's, as many pixels as the work area had when it was made, mapped
+ * into that process at an address of the shared window, rows 'pitch'
+ * bytes long. What is drawn there goes into the window's own pixels
+ * only when the process puts it (wm_surf_put), a few rectangles at a
+ * time and while no screen is being built, so the screen never shows a
+ * page half drawn. A window has at most one, the last asked for; it
+ * stays the size it was made at when the window changes size, until it
+ * is asked for again. When it is replaced, when the window closes and
+ * when the process ends, its pages go, and the addresses the process
+ * had them at are left on the page of nothing: a write there goes
+ * nowhere and does not fault.
+ */
+typedef struct {
+	void	*addr;		/* where the process has it */
+	INT	width, height;	/* in pixels */
+	INT	pitch;		/* bytes from one row to the next */
+	UW	serial;		/* different for each surface made */
+} T_WMSURF;
+
+#define WM_PUT_MAX	16	/* rectangles put at once */
+
+IMPORT ER  wm_surf_get( INT wid, ID pid, T_WMSURF *s );
+IMPORT ER  wm_surf_put( INT wid, ID pid, CONST T_DPRECT *r, INT n );
+
+/* The surfaces a process had, let go of as it ends */
+IMPORT void knl_wm_surf_prc_end( ID pid );
+
+/* For a test: how many surfaces there are and the pages they hold; a window's, where its process has it */
+IMPORT INT knl_wm_surf_count( UD *p_pages );
+IMPORT ER  knl_wm_surf_ref( INT wid, ID *p_pid, UBINT *p_va, UD *p_pages );
+
 /* --------------------------------------------------------------- pointer */
 
 /*
@@ -446,9 +518,9 @@ IMPORT UINT wm_pointer_kind( void );
 IMPORT ER   wm_show_pointer( BOOL on );
 
 /*
- * The pointer laid on the screen, over everything. The window manager
- * calls this at the end of building a screen; a program has no reason
- * to.
+ * The pointer drawn through a drawing environment, where the input layer
+ * says it is. The window manager lays its own on the screen itself,
+ * keeping what it covers; a program has no reason to call this.
  */
 IMPORT void wm_draw_pointer( INT gid );
 
@@ -479,7 +551,8 @@ IMPORT INT wm_at( INT x, INT y );
 /*
  * Give a window the input. Which window has it decides where a key
  * goes; where the pointer is decides where a button goes, whatever has
- * the input.
+ * the input. A window that never has the keys (WM_ATTR_NOFOCUS) is not
+ * given them: E_OBJ, and the window that had them keeps them.
  */
 IMPORT ER  wm_focus( INT wid );
 IMPORT INT wm_focused( void );
@@ -533,6 +606,16 @@ IMPORT UINT wm_msg_get_mode( void );		/* the mode shown */
 /*
  * Lay the windows onto the screen. Everything above only changes what
  * is kept; this is what makes the screen agree with it.
+ *
+ * The screen is built by the window manager's compositor, a task of its
+ * own, at most once a refresh (60 a second), whatever was asked for in
+ * the meantime built together. wm_composite, wm_composite_at, wm_update
+ * and wm_set_drag ask for a build and return once it is on the screen.
+ * wm_composite builds all of it, for what changes all of it (the look,
+ * the scheme, the wallpaper, the screen's size); for anything smaller
+ * wm_update builds what has changed. What a window's environment draws
+ * into it is known without being said (dp_set_watch), as are windows
+ * opened, closed, moved, raised or given a new frame.
  */
 IMPORT ER  wm_composite( void );
 
@@ -544,18 +627,29 @@ IMPORT ER  wm_composite( void );
 IMPORT ER  wm_composite_at( CONST T_DPRECT *area );
 
 /*
- * The pointer has moved to a place: where it was laid before and where
- * it is going are built again, and the rest of the screen is left
- * alone. Where it was is known here, so the caller does not carry it.
+ * The pointer has moved to a place: what it covered where it was laid
+ * before is put back, and it is laid where the input layer says it is
+ * now. No window is laid again for it; the two squares are all that is
+ * sent. Where it was is known here, so the caller does not carry it.
+ * It returns at once; the compositor lays the pointer at its next build.
  */
 IMPORT ER   wm_pointer_moved( INT to_x, INT to_y );
 
 /*
  * What has changed since the last build, built again: every window's
- * outstanding damage and the pointer's old and new places, as one
- * rectangle round them all. The damage is taken as it is built.
+ * outstanding damage, as a few rectangles (those near one another
+ * joined, those far apart built apart), and the pointer moved as
+ * wm_pointer_moved moves it. The damage is taken as it is built.
  */
 IMPORT ER   wm_update( void );
+
+/*
+ * wm_update without waiting for the build, for a caller that does not
+ * draw again straight away (a window coming in step by step); wm_flush
+ * waits until everything asked for so far, by anyone, is on the screen.
+ */
+IMPORT ER   wm_post( void );
+IMPORT ER   wm_flush( void );
 
 /*
  * The outlines of what is being carried, in screen coordinates: drawn
@@ -564,6 +658,15 @@ IMPORT ER   wm_update( void );
  */
 #define WM_DRAG_MAX	32
 IMPORT ER   wm_set_drag( CONST T_DPRECT *r, INT n );
+
+/*
+ * A picture of w by h pixels (at most WM_LOUPE_MAX each way) laid with
+ * its corner at (x, y) over every window and the outlines, as the
+ * pointer is; px NULL takes it away. It is part of the screen as built,
+ * so what is read from under it shows it.
+ */
+#define WM_LOUPE_MAX	192
+IMPORT ER   wm_set_loupe( CONST UW *px, INT w, INT h, INT x, INT y );
 
 /*
  * Where it was last laid, how large the square it was laid in was (the
@@ -601,9 +704,38 @@ typedef struct {
 	UD	composites;		/* times the screen was rebuilt */
 	UD	windows_drawn;		/* windows laid down, over all of those */
 	UD	windows_skipped;	/* ones found to be wholly covered */
+	UD	parts;			/* rectangles built, over all of those */
+	UD	pixels;			/* pixels built, a spread's margin with them */
+	UD	ptr_moves;		/* times the pointer was laid somewhere new */
+	UD	ptr_built;		/* of those, ones that came with something built */
 } T_WMSTAT;
 
 IMPORT ER  wm_stat( T_WMSTAT *st );
+
+/*
+ * How the builds kept to the refresh, counted from the start (design
+ * 10.4.5): the time from the start of one build to the start of the
+ * next, where they come in a row (within WM_APART_MS); laying the
+ * windows; sending what was built, which waits for the flip before to
+ * be taken; asleep to keep a refresh between two builds where the sends
+ * do not keep it themselves; and the callers that waited for a build
+ * (wm_update and the like), a program putting a frame among them.
+ */
+#define WM_APART_MS	100
+
+typedef struct {
+	UD	builds;
+	UD	apart;			/* builds begun within WM_APART_MS of the one before */
+	UD	apart_us, apart_max;
+	UD	late;			/* of those, ones begun more than a refresh and a half after it */
+	UD	lay_us, lay_max;
+	UD	send_us, send_max;
+	UD	paced_us;
+	UD	waits;
+	UD	wait_us, wait_max;
+} T_WMFRAMES;
+
+IMPORT ER  wm_frames( T_WMFRAMES *st );
 
 /* The size of the screen, 0 by 0 before the manager is up */
 IMPORT void wm_screen( INT *p_w, INT *p_h );
@@ -614,6 +746,20 @@ IMPORT void wm_screen( INT *p_w, INT *p_h );
  * copy never holds half of one screen and half of the next.
  */
 IMPORT ER  wm_copy_screen( UW *dst, INT pitch );
+
+/*
+ * A rectangle of it, inside the screen, copied the same way into 'dst'
+ * (its corner at r's, 'pitch' pixels to a row): with the pointer as it
+ * lies on the screen, or without it, what it covers in its place.
+ */
+IMPORT ER  wm_grab_screen( UW *dst, INT pitch, CONST T_DPRECT *r, BOOL pointer );
+
+/*
+ * The window in front with the windows subordinate to it (wm_set_parent),
+ * at most max of them, the one they belong to first; 0 when no window
+ * with a name band is shown.
+ */
+IMPORT INT wm_front_group( INT *wids, INT max );
 
 IMPORT INT knl_wm_init( void );
 
@@ -658,6 +804,14 @@ IMPORT ER   wm_obj_shows( INT wid, CONST TS_UUID *obj );
 IMPORT ER   knl_wmobj_init( void );		/* after the object layer is up */
 
 /*
+ * The input told to no window's program for a while: while the desktop
+ * asks something in a panel over a program's window, the keys and the
+ * presses that answer it are the panel's alone. Nested; TRUE begins,
+ * FALSE ends.
+ */
+IMPORT void wm_obj_quiet( BOOL on );
+
+/*
  * Links let go of over a window that belongs to someone else (design
  * 16.5.21): the drop becomes the window's record OB_WR_DROP and is told
  * with OB_E_DROP, at (sx, sy) on the screen. The caller fills in each
@@ -669,11 +823,34 @@ IMPORT ER   wm_obj_drop( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from
 			 CONST T_OBDROPV *v, INT n );
 
 /*
+ * Letters carried out of a text and let go over a window that belongs to
+ * someone else: a drop of no links whose text is the n bytes of UTF-8
+ * (one line), told with OB_E_DROP; (sx, sy) on the screen is where the
+ * corner of the outline carried was. E_NOSPT: nobody takes letters on
+ * that window (OB_E_TEXT).
+ */
+IMPORT ER   wm_obj_drop_text( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
+			      CONST UB *text, INT n );
+
+/*
  * A scroll bar of a window that belongs to someone else, worked by the
  * user: told with OB_E_SCROLL on its record OB_WR_BARS, code the bar
  * (WM_BAR_*), x the start it is asked to go to, y how (OB_SCR_*).
  */
 IMPORT void wm_obj_scroll( INT wid, UINT which, INT pos, UINT how );
+
+/*
+ * A key typed by a window that never has the keys (WM_ATTR_NOFOCUS),
+ * a screen keyboard: put in as if the keyboard had sent it, pressed and
+ * let go, so that it goes to the window that has the keys. code is the
+ * key's usage (1..255), mods the modifiers held with it (HID_MOD_* and
+ * KM_MOD_THUMB_*). It is taken only while the last press of a button
+ * went down on that window, within WM_KEY_PUT_MS of it: a window types
+ * only as a person presses on it. E_OBJ for a window that may have the
+ * keys, E_OACV for no such press.
+ */
+#define WM_KEY_PUT_MS		3000
+IMPORT ER   wm_obj_key_put( INT wid, UINT code, UINT mods );
 
 #ifdef __cplusplus
 }

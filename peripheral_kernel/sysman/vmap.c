@@ -34,6 +34,8 @@ LOCAL UD	vmap_hint;			/* first page that may be free */
 
 IMPORT UBINT	knl_pt_l0_k_pa;
 
+EXPORT void	(*knl_vunmap_hook)( UBINT va, UD npages ) = NULL;
+
 LOCAL BOOL bit_test( UD i )
 {
 	return (vmap_bitmap[i >> 6] >> (i & 63)) & 1;
@@ -168,6 +170,9 @@ EXPORT void knl_vunmap_pa( void *va, UD npages )
 	if ( v < VMAP_VA_BASE || v >= VMAP_VA_BASE + CNF_VMAP_SIZE ) {
 		return;
 	}
+	if ( knl_vunmap_hook != NULL ) {
+		knl_vunmap_hook(v, npages);
+	}
 	for ( i = 0; i < npages; i++, v += PAGE_SIZE ) {
 		knl_pt_unmap(knl_pt_l0_k_pa, v, PAGE_SIZE);
 	}
@@ -187,6 +192,9 @@ EXPORT void knl_vunmap( void *va, UD npages )
 
 	if ( v < VMAP_VA_BASE || v >= VMAP_VA_BASE + CNF_VMAP_SIZE ) return;
 
+	if ( knl_vunmap_hook != NULL ) {
+		knl_vunmap_hook(v, npages);
+	}
 	for ( i = 0; i < npages; i++, v += PAGE_SIZE ) {
 		UD	pa = knl_pt_lookup(knl_pt_l0_k_pa, v);
 		if ( pa != ~(UD)0 ) {

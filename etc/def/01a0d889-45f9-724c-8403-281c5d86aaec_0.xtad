@@ -11,9 +11,15 @@
 <line/>
 <item>ルビ<link id="01a0d889-45fd-7c2a-8c47-978990884a80_0.xtad" vobjid="01a0d8c3-2002-7a52-8db1-8a1c76466e61"/></item>
 <line/>
+<item code="dir.vert">縦書き</item>
+<item code="dir.horiz">横書き</item>
+<item code="comb">縦中横</item>
+<item code="turn">回転</item>
+<line/>
 <item code="pagebreak">改ページ</item>
 <line/>
 <item code="paperframe">用紙枠表示オンオフ</item>
 <item code="pagesetup">用紙設定...</item>
+<item code="print" key="P">印刷...</item>
 </menu>
 </tad>

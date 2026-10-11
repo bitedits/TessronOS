@@ -53,6 +53,8 @@ extern "C" {
 #define TSFSO_F_GARBAGE	0x0100		/* it is on the garbage list */
 #define TSFSO_F_ORPHAN	0x0200		/* it goes when it is last closed */
 #define TSFSO_F_RELINK	0x0400		/* its link table has to be made again */
+#define TSFSO_F_TRASH	0x1000		/* TRASH, the cabinet the disk repair gathers 隠れ屑実身 in:
+					   what only it reaches goes when it goes */
 #define TSFSO_F_AUTOREF	TSFS_F_AUTOREF	/* given out by ts_obj_ref only: never stored */
 
 /* The record number of the icon, which belongs to no record */
@@ -99,7 +101,41 @@ IMPORT ER ts_obj_unlink( ID vol, CONST TS_UUID *uuid );
  * time, each part a transaction that leaves the counts true.
  */
 IMPORT ER ts_obj_relink( ID vol, CONST TS_UUID *uuid );
+
+/*
+ * The links to objects of other volumes (not counted here) that came and
+ * went as link tables were made again or given up, oldest first, taken
+ * by the object layer to keep the record of them on the volume they
+ * point at (design 8.3). 'hvol' is the UUID of the volume of 'host', d
+ * +1 or -1. *p_lost says that some were not kept (the queue was full),
+ * and that the volumes are to be matched again whole.
+ */
+typedef struct {
+	TS_UUID	hvol;
+	TS_UUID	host;
+	TS_UUID	target;
+	INT	d;
+} T_TSXQ;
+
+IMPORT INT ts_obj_xq_take( T_TSXQ *buf, INT max, BOOL *p_lost );
+IMPORT BOOL ts_obj_xq_any( void );
 IMPORT ER ts_obj_lst_lnk( ID vol, CONST TS_UUID *uuid, T_RLNK *buf, INT n, INT *p_cnt );
+
+/*
+ * For the check of a volume (ts/tsfsck.h): a count set to what the link
+ * tables and the holds make it, the garbage list made to agree; and an
+ * object marked for ts_obj_relink to make its link table again.
+ */
+IMPORT ER ts_obj_set_ref( ID vol, CONST TS_UUID *uuid, INT cnt );
+IMPORT ER ts_obj_mark_relink( ID vol, CONST TS_UUID *uuid );
+
+/*
+ * For the repair (ts/tsfsck.h): what can be read of an object whose
+ * block does not pass its check -- its name and every record that reads
+ * whole -- made into a new object (救出: name); how many records it got.
+ * E_OBJ when nothing of it reads.
+ */
+IMPORT ER ts_obj_salvage( ID vol, UD blk, TS_UUID *p_new, INT *p_recs );
 
 /*
  * An object deleted while it is open: out of the index at once, and on
@@ -207,6 +243,7 @@ IMPORT ER ts_obj_lst_res( ID vol, CONST TS_UUID *uuid, T_TSFSRES *buf, INT n, IN
  */
 IMPORT ER ts_obj_begin( ID vol );
 IMPORT ER ts_obj_end( ID vol, BOOL commit );
+IMPORT BOOL ts_obj_trx_open( ID vol );
 
 /*
  * The metadata scanner, which lives in kernel/fs/tsfs.c and is used by

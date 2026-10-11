@@ -43,6 +43,8 @@
 #include <ts/fn.h>
 #include <ts/uuid.h>
 #include <ts/tray.h>
+#include <ts/sysdef.h>
+#include <ts/udic.h>
 #include "desktop.h"
 
 #define KEY_A		0x04
@@ -74,6 +76,7 @@
 
 
 LOCAL DTWIN	*dd_drag = NULL;	/* the window a selection is being drawn in */
+LOCAL DTWIN	*sc_win = NULL;		/* the window whose selection is pressed, to be carried */
 
 /* かな input, and the letters typed that do not yet spell a kana */
 
@@ -307,6 +310,8 @@ LOCAL void undo_point( DTWIN *d, BOOL typing )
  * paragraph, or between two things that are not text -- a text node is
  * made for them.
  */
+LOCAL BOOL same_word( CONST UB *a, CONST char *b );
+
 LOCAL BOOL put_words( DTWIN *d, INT pi, INT pos, CONST UB *s, INT n )
 {
 	T_TAD		*rec = rec_of(d);
@@ -320,6 +325,22 @@ LOCAL BOOL put_words( DTWIN *d, INT pi, INT pos, CONST UB *s, INT n )
 	if ( ri >= 0 ) {
 		CONST T_TVRUN	*r = &d->doc->run[ri];
 
+		if ( ( r->style & TV_ST_COMB ) != 0 && ( off == 0 || off == r->len ) ) {
+			/*
+			 * 縦中横 (<combchar>) is not typed into: letters at
+			 * either end of it go beside it, outside it.
+			 */
+			T_TADNODE	*e = r->node;
+
+			while ( e != NULL && !( e->kind == TAD_ND_ELEM
+					      && same_word(e->name, "combchar") ) ) {
+				e = e->parent;
+			}
+			if ( e != NULL && e->parent != NULL ) {
+				return (BOOL)( tad_text_new(rec, e->parent,
+							    ( off == 0 ) ? e : e->next, s, n) != NULL );
+			}
+		}
 		return (BOOL)( tad_text_splice(rec, r->node, r->noff + off, 0,
 					       s, n) >= E_OK );
 	}
@@ -962,12 +983,22 @@ LOCAL BOOL same_word( CONST UB *a, CONST char *b )
 	return (BOOL)( b[i] == 0 && a[i] == 0 );
 }
 
+/*
+ * An attribute the elements looked for must also have, while it is set:
+ * <font rotation> is 回転, and taking 回転 off takes away only those
+ * <font> elements that turn the letters.
+ */
+LOCAL CONST char	*dd_need_attr = NULL;
+
 /* Whether a node is an element with one of the names */
 LOCAL BOOL named( CONST T_TADNODE *nd, CONST char *CONST *names )
 {
 	INT	i;
 
 	if ( nd == NULL || nd->kind != TAD_ND_ELEM ) {
+		return FALSE;
+	}
+	if ( dd_need_attr != NULL && tad_attr(nd, dd_need_attr) == NULL ) {
 		return FALSE;
 	}
 	for ( i = 0; names[i] != NULL; i++ ) {
@@ -1993,9 +2024,25 @@ LOCAL INT mm10_px( INT mm10 )
  * of the top and the bottom of every page, how tall each band is, and
  * the number of the first page. They are 用紙オーバーレイ 0 and 1, put
  * on by a <docoverlay>: each place a paragraph aligned to it, a height
- * given as the line's own, and '#' written as a <page-number> that
- * counts the pages on from the first.
+ * given as the line's own. The letters that stand for something else
+ * as it is printed are written as what fills them in: %P (and '#') a
+ * <page-number> that counts the pages on from the first; %T the number
+ * of pages, %N the object's name, %Y %y %M %m %D %d the date (the
+ * year's last two figures and the whole year, the month and the day
+ * without and with a nought in front) as <variable>s; %% a '%'.
  */
+
+/* The letter after '%' and the <variable> that fills it in */
+typedef struct {
+	UB	letter;
+	INT	id;
+} HFVAR;
+
+LOCAL CONST HFVAR hf_vars[] = {
+	{ 'T', 250 }, { 'N', 0 }, { 'Y', 100 }, { 'y', 102 },
+	{ 'M', 110 }, { 'm', 111 }, { 'D', 120 }, { 'd', 121 }
+};
+#define N_HFVAR	( (INT)( sizeof(hf_vars) / sizeof(hf_vars[0]) ) )
 
 /* The overlay defined with a number, at the head of the document */
 LOCAL T_TADNODE *overlay_def( T_TAD *rec, INT n )
@@ -2044,13 +2091,27 @@ LOCAL void overlay_read( T_TADNODE *def, UB (*place)[DT_FIELD_MAX],
 				INT	i;
 
 				for ( i = 0; c->text != NULL && c->text[i] != 0
-					     && k < DT_FIELD_MAX - 1; i++ ) {
+					     && k < DT_FIELD_MAX - 2; i++ ) {
+					if ( c->text[i] == '%' ) {
+						buf[k++] = '%';		/* a '%' of its own */
+					}
 					buf[k++] = c->text[i];
 				}
 			} else if ( same_word(c->name, "page-number") ) {
-				if ( k < DT_FIELD_MAX - 1 ) buf[k++] = '#';
+				if ( k < DT_FIELD_MAX - 2 ) {
+					buf[k++] = '%';
+					buf[k++] = 'P';
+				}
 				if ( tad_attr(c, "num") != NULL ) {
 					*p_start = word_num(tad_attr(c, "num")) / 1000;
+				}
+			} else if ( same_word(c->name, "variable") && tad_attr(c, "id") != NULL ) {
+				INT	id = word_num(tad_attr(c, "id")) / 1000, v;
+
+				for ( v = 0; v < N_HFVAR && hf_vars[v].id != id; v++ ) ;
+				if ( v < N_HFVAR && k < DT_FIELD_MAX - 2 ) {
+					buf[k++] = '%';
+					buf[k++] = hf_vars[v].letter;
 				}
 			} else if ( same_word(c->name, "text")
 				 && tad_attr(c, "align") != NULL ) {
@@ -2102,21 +2163,46 @@ LOCAL BOOL overlay_write( T_TAD *rec, T_TADNODE *before, INT n,
 			(void)tad_set_attr(rec, e, "align", (CONST UB *)aligns[i]);
 		}
 		for ( k = 0; ; k++ ) {
-			if ( place[i][k] != '#' && place[i][k] != 0 ) {
+			UB	c = place[i][k], nx = ( c == '%' ) ? place[i][k + 1] : 0;
+			INT	v;
+
+			if ( c != '#' && c != '%' && c != 0 ) {
 				continue;
+			}
+			if ( c == '%' && nx != 'P' && nx != '%' ) {
+				for ( v = 0; v < N_HFVAR && hf_vars[v].letter != nx; v++ ) ;
+				if ( v == N_HFVAR ) {
+					continue;	/* a '%' that stands for nothing: kept as it is */
+				}
 			}
 			if ( k > from ) {
 				(void)tad_text_new(rec, p, NULL, place[i] + from, k - from);
 			}
-			if ( place[i][k] == 0 ) {
+			if ( c == 0 ) {
 				break;
 			}
-			if ( ( e = tad_elem_new(rec, "page-number", p, NULL, TRUE) ) != NULL ) {
-				(void)tad_set_attr(rec, e, "step", (CONST UB *)"1");
-				num_word(start, 0, num);
-				(void)tad_set_attr(rec, e, "num", num);
-			}
 			from = k + 1;
+			if ( c == '%' && nx == '%' ) {
+				(void)tad_text_new(rec, p, NULL, (CONST UB *)"%", 1);
+				from = ++k + 1;
+				continue;
+			}
+			if ( c == '#' || nx == 'P' ) {
+				if ( ( e = tad_elem_new(rec, "page-number", p, NULL, TRUE) ) != NULL ) {
+					(void)tad_set_attr(rec, e, "step", (CONST UB *)"1");
+					num_word(start, 0, num);
+					(void)tad_set_attr(rec, e, "num", num);
+				}
+			} else {
+				for ( v = 0; v < N_HFVAR && hf_vars[v].letter != nx; v++ ) ;
+				if ( ( e = tad_elem_new(rec, "variable", p, NULL, TRUE) ) != NULL ) {
+					num_word(hf_vars[v].id, 0, num);
+					(void)tad_set_attr(rec, e, "id", num);
+				}
+			}
+			if ( c == '%' ) {
+				from = ++k + 1;
+			}
 		}
 	}
 
@@ -2131,7 +2217,7 @@ LOCAL void header_footer( DTWIN *d )
 		"開始ページ番号:"
 	};
 	LOCAL CONST char *CONST hints[] = {
-		"# はページ番号", NULL, NULL, "mm (0=上余白)",
+		"%P ページ %T 全ページ %N 実身名", "%y/%m/%d 日付", NULL, "mm (0=上余白)",
 		NULL, NULL, NULL, "mm (0=下余白)", NULL
 	};
 	T_TAD		*rec = rec_of(d);
@@ -2269,6 +2355,229 @@ LOCAL void page_setup( DTWIN *d )
 	changed(d);
 }
 
+/* ---------------------------------------------------------------- 縦書き */
+
+/*
+ * The 文字方向 of the text: a <text direction> among the elements that
+ * stand at the head of the document, outside any paragraph, where the
+ * settings of the whole text are. NULL when there is none.
+ */
+LOCAL T_TADNODE *dir_node( T_TAD *rec )
+{
+	T_TADNODE	*body = tad_body(rec), *n;
+
+	for ( n = ( body != NULL ) ? body->first : NULL; n != NULL; n = n->next ) {
+		if ( n->kind == TAD_ND_ELEM && same_word(n->name, "text")
+		  && tad_attr(n, "direction") != NULL ) {
+			return n;
+		}
+	}
+
+	return NULL;
+}
+
+/* Whether a node only spaces the elements of a record apart */
+LOCAL BOOL blank_node( CONST T_TADNODE *n )
+{
+	CONST UB	*t;
+
+	if ( n->kind != TAD_ND_TEXT ) {
+		return FALSE;
+	}
+	for ( t = n->text; t != NULL && *t != 0; t++ ) {
+		if ( *t != ' ' && *t != '\t' && *t != '\r' && *t != '\n' ) {
+			return FALSE;
+		}
+	}
+
+	return TRUE;
+}
+
+/*
+ * 縦書き and 横書き: the whole text written downwards, or across again.
+ * Down is <text direction="2"/> put after what heads the document --
+ * its paper, its margins, its scale, its <text lang> -- before the first
+ * paragraph; across takes it away, or, when it says more than the
+ * direction, sets the direction to 0.
+ */
+LOCAL void set_direction( DTWIN *d, BOOL vert )
+{
+	T_TAD		*rec = rec_of(d);
+	T_TADNODE	*body = tad_body(rec), *t, *at;
+
+	if ( d->xml_view || body == NULL || d->doc == NULL || d->doc->vert == vert ) {
+		return;
+	}
+	undo_point(d, FALSE);
+	t = dir_node(rec);
+	if ( vert ) {
+		if ( t == NULL ) {
+			for ( at = body->first; at != NULL; at = at->next ) {
+				if ( blank_node(at) ) {
+					continue;
+				}
+				if ( at->kind == TAD_ND_ELEM
+				  && ( same_word(at->name, "paper") || same_word(at->name, "docmargin")
+				    || same_word(at->name, "docScale") || same_word(at->name, "docView")
+				    || same_word(at->name, "docDraw") || same_word(at->name, "text") ) ) {
+					continue;
+				}
+				break;
+			}
+			t = tad_elem_new(rec, "text", body, at, TRUE);
+			if ( t != NULL ) {
+				(void)tad_text_new(rec, body, at, (CONST UB *)"\n", 1);
+			}
+		}
+		if ( t != NULL ) {
+			(void)tad_set_attr(rec, t, "direction", (CONST UB *)"2");
+		}
+	} else if ( t != NULL ) {
+		if ( t->nattr <= 1 ) {
+			if ( t->next != NULL && blank_node(t->next) ) {
+				tad_node_remove(t->next);
+			}
+			tad_node_remove(t);
+		} else {
+			(void)tad_set_attr(rec, t, "direction", (CONST UB *)"0");
+		}
+	}
+	/* the head of the text, where either way of writing it begins */
+	d->scroll_x = d->scroll_y = 0;
+	changed(d);
+}
+
+/* Whether every letter picked is turned (回転) */
+LOCAL BOOL sel_turned( DTWIN *d )
+{
+	INT	pa, a, pb, b, pi, i, acc;
+	BOOL	any = FALSE;
+
+	sel_order(d, &pa, &a, &pb, &b);
+	for ( pi = pa; pi <= pb && pi < d->doc->npara; pi++ ) {
+		CONST T_TVPARA	*p = &d->doc->para[pi];
+		INT		lo = ( pi == pa ) ? a : 0;
+		INT		hi = ( pi == pb ) ? b : para_len(d, pi);
+
+		acc = 0;
+		for ( i = p->first; i < p->first + p->n && i < d->doc->nrun; i++ ) {
+			CONST T_TVRUN	*r = &d->doc->run[i];
+			INT		u = run_units(r);
+
+			if ( r->kind == TV_RUN_TEXT && u > 0 && acc < hi
+			  && acc + u > lo ) {
+				any = TRUE;
+				if ( r->turn == 0 ) {
+					return FALSE;
+				}
+			}
+			acc += u;
+		}
+	}
+
+	return any;
+}
+
+/*
+ * 縦中横: the letters picked set across in one box of the line, as
+ * <combchar> (結合文字: letters taken together as one). The letters
+ * picked must stand in one line of one paragraph; picked again, they
+ * are taken out of it.
+ */
+LOCAL void comb_sel( DTWIN *d )
+{
+	LOCAL CONST char *CONST nm_comb[] = { "combchar", NULL };
+	INT	pa, a, pb, b, i, acc = 0;
+
+	if ( !has_sel(d) ) {
+		return;
+	}
+	sel_order(d, &pa, &a, &pb, &b);
+	if ( pa != pb ) {
+		dt_tell(d, "縦中横にする範囲に改段落を含めることはできません", NULL);
+		return;
+	}
+	for ( i = d->doc->para[pa].first;
+	      i < d->doc->para[pa].first + d->doc->para[pa].n && i < d->doc->nrun; i++ ) {
+		CONST T_TVRUN	*r = &d->doc->run[i];
+
+		if ( acc >= a && acc < b
+		  && ( r->kind == TV_RUN_BREAK || r->kind == TV_RUN_PAGE ) ) {
+			dt_tell(d, "縦中横にする範囲に改行を含めることはできません", NULL);
+			return;
+		}
+		acc += run_units(r);
+	}
+	style_sel(d, nm_comb, TV_ST_COMB);
+}
+
+/*
+ * 回転: the letters picked -- or, with nothing picked, from the caret to
+ * the end of the text -- turned a quarter clockwise, so that a word of
+ * Latin letters reads down the line, as <font rotation="90">. Picked
+ * again, they are upright again: the <font> elements that turn them are
+ * taken away and nothing else.
+ */
+LOCAL void turn_sel( DTWIN *d )
+{
+	LOCAL CONST char *CONST attrs[] = { "rotation", "90", "rotabs", "0", NULL };
+	LOCAL CONST char *CONST nm_font[] = { "font", NULL };
+
+	if ( !has_sel(d) ) {
+		INT	np = d->doc->npara;
+
+		if ( np <= 0 ) {
+			return;
+		}
+		d->apara = np - 1;
+		d->apos = para_len(d, np - 1);
+		if ( !has_sel(d) ) {
+			return;
+		}
+	}
+	undo_point(d, FALSE);
+	if ( sel_turned(d) ) {
+		dd_need_attr = "rotation";
+		unwrap_range(d, nm_font);
+		dd_need_attr = NULL;
+	} else {
+		wrap_range(d, "font", attrs);
+	}
+	changed(d);
+}
+
+/* How tall the letters at the caret are drawn: those before it, else those after */
+EXPORT INT dd_caret_px( DTWIN *d )
+{
+	INT	off = 0, ri;
+
+	if ( !dd_editable(d) ) {
+		return 14;
+	}
+	clamp(d);
+	ri = text_at(d, d->cpara, d->cpos, &off);
+	if ( ri < 0 ) {
+		CONST T_TVPARA	*p = &d->doc->para[d->cpara];
+
+		ri = ( p->n > 0 ) ? p->first : -1;
+	}
+
+	return ( ri >= 0 && d->doc->run[ri].size > 0 ) ? d->doc->run[ri].size : 14;
+}
+
+/* What the menu ticks for the letters picked: 縦中横 and 回転 */
+EXPORT void dd_menu_state( DTWIN *d, BOOL *p_comb, BOOL *p_turned )
+{
+	*p_comb = FALSE;
+	*p_turned = FALSE;
+	if ( !dd_editable(d) || d->xml_view || !has_sel(d) ) {
+		return;
+	}
+	clamp(d);
+	*p_comb = sel_all(d, TV_ST_COMB);
+	*p_turned = sel_turned(d);
+}
+
 /* ---------------------------------------------------------------- keys */
 
 /* The caret moved; with Shift the selection follows it, without, it goes */
@@ -2298,9 +2607,19 @@ LOCAL BOOL line_place( DTWIN *d, INT dx_mode, INT dy, INT *p_para, INT *p_pos )
 			      d->cpos, &box) < E_OK ) {
 		return FALSE;
 	}
-	x = ( dx_mode < 0 ) ? page.left : ( dx_mode > 0 ) ? page.right : box.left;
-	y = ( dy < 0 ) ? box.top - 3 : ( dy > 0 ) ? box.bottom + 3
-				     : ( box.top + box.bottom ) / 2;
+	if ( d->doc->vert ) {
+		/*
+		 * 縦書き: the line before is to the right, the line after to
+		 * the left, and a line's head is at the top of the page.
+		 */
+		x = ( dy < 0 ) ? box.right + 3 : ( dy > 0 ) ? box.left - 3
+					      : ( box.left + box.right ) / 2;
+		y = ( dx_mode < 0 ) ? page.top : ( dx_mode > 0 ) ? page.bottom : box.top;
+	} else {
+		x = ( dx_mode < 0 ) ? page.left : ( dx_mode > 0 ) ? page.right : box.left;
+		y = ( dy < 0 ) ? box.top - 3 : ( dy > 0 ) ? box.bottom + 3
+					     : ( box.top + box.bottom ) / 2;
+	}
 
 	return (BOOL)( tv_doc_caret_at(d->doc, &page, d->scroll_y, d->rec, x, y,
 				       p_para, p_pos) >= E_OK );
@@ -2321,10 +2640,15 @@ LOCAL void page_move( DTWIN *d, INT dir, BOOL shift )
 		return;
 	}
 	step = ( page.bottom - page.top ) - ( box.bottom - box.top );
+	room = d->height - ( page.bottom - page.top );
+	if ( d->doc->vert ) {
+		/* 縦書き: a page is the width of the window less a line */
+		step = ( page.right - page.left ) - ( box.right - box.left );
+		room = d->height - ( page.right - page.left );
+	}
 	if ( step < 16 ) {
 		step = 16;
 	}
-	room = d->height - ( page.bottom - page.top );
 	to = d->scroll_y + dir * step;
 	if ( to > room ) to = room;
 	if ( to < 0 )    to = 0;
@@ -2338,18 +2662,62 @@ LOCAL void page_move( DTWIN *d, INT dir, BOOL shift )
 		return;
 	}
 	d->scroll_y = to;
-	if ( tv_doc_caret_at(d->doc, &page, d->scroll_y, d->rec, box.left,
-			     ( box.top + box.bottom ) / 2, &pi, &pos) >= E_OK ) {
+	if ( tv_doc_caret_at(d->doc, &page, d->scroll_y, d->rec,
+			     d->doc->vert ? ( box.left + box.right ) / 2 : box.left,
+			     d->doc->vert ? box.top : ( box.top + box.bottom ) / 2,
+			     &pi, &pos) >= E_OK ) {
 		move_to(d, pi, pos, shift);
 	}
 	dt_draw(d);
 	shown(d);
 }
 
+/* Whether a key is one of the four arrows */
+LOCAL BOOL arrow( UINT code )
+{
+	return (BOOL)( code == KEY_UP || code == KEY_DOWN || code == KEY_LEFT
+		    || code == KEY_RIGHT );
+}
+
+/*
+ * An arrow with Alt or with Ctrl held. Across, Alt with ← and → goes to
+ * the head and the end of the line, with ↑ and ↓ to the head and the end
+ * of the text, and Ctrl with ↑ and ↓ goes a page back and on. Down the
+ * line (縦書き) the same is turned: Alt with ↑ and ↓ to the head and the
+ * end of the line, with → and ← to the head and the end of the text, and
+ * Ctrl with → and ← a page back and on.
+ */
+LOCAL void arrow_far( DTWIN *d, UINT code, BOOL alt, BOOL shift )
+{
+	BOOL	v = d->doc->vert;
+	INT	pi, pos, np = d->doc->npara;
+	UINT	line_head = v ? KEY_UP : KEY_LEFT, line_end = v ? KEY_DOWN : KEY_RIGHT;
+	UINT	text_head = v ? KEY_RIGHT : KEY_UP, text_end = v ? KEY_LEFT : KEY_DOWN;
+
+	if ( alt ) {
+		if ( code == line_head || code == line_end ) {
+			if ( line_place(d, ( code == line_head ) ? -1 : 1, 0, &pi, &pos) ) {
+				move_to(d, pi, pos, shift);
+			}
+		} else if ( code == text_head ) {
+			move_to(d, 0, 0, shift);
+		} else if ( np > 0 ) {
+			move_to(d, np - 1, para_len(d, np - 1), shift);
+		}
+		return;
+	}
+	if ( code == text_head ) {
+		page_move(d, -1, shift);
+	} else if ( code == text_end ) {
+		page_move(d, 1, shift);
+	}
+}
+
 EXPORT BOOL dd_key( DTWIN *d, UINT code, UINT mods )
 {
 	BOOL	ctrl = (BOOL)( ( mods & MOD_CTRL ) != 0 );
 	BOOL	shift = (BOOL)( ( mods & MOD_SHIFT ) != 0 );
+	BOOL	alt = (BOOL)( ( mods & MOD_ALT ) != 0 );
 	INT	pi, pos;
 	UB	c;
 
@@ -2357,6 +2725,10 @@ EXPORT BOOL dd_key( DTWIN *d, UINT code, UINT mods )
 		return FALSE;
 	}
 	clamp(d);
+	if ( arrow(code) && ( alt || ctrl ) ) {
+		arrow_far(d, code, alt, shift);
+		return TRUE;
+	}
 	if ( ctrl ) {
 		switch ( code ) {
 		case KEY_A:	dd_command(d, DM_SELECT_ALL);	return TRUE;
@@ -2386,6 +2758,14 @@ EXPORT BOOL dd_key( DTWIN *d, UINT code, UINT mods )
 	/* the text input port sees the keys first (dttip.c) */
 	if ( !d->xml_view && tip_key(d, code, mods) ) {
 		return TRUE;
+	}
+	if ( d->doc->vert && arrow(code) ) {
+		/*
+		 * 縦書き: ↑ and ↓ go to the letter before and after, ← to the
+		 * line after (to the left), → to the line before.
+		 */
+		code = ( code == KEY_UP ) ? KEY_LEFT : ( code == KEY_DOWN ) ? KEY_RIGHT
+		     : ( code == KEY_LEFT ) ? KEY_DOWN : KEY_UP;
 	}
 	switch ( code ) {
 	case KEY_ENTER:
@@ -2470,6 +2850,9 @@ EXPORT BOOL dd_key( DTWIN *d, UINT code, UINT mods )
 
 LOCAL BOOL thing_take( DTWIN *d, INT x, INT y );
 LOCAL BOOL thing_marks( DTWIN *d, INT gid );
+LOCAL BOOL sel_carry_take( DTWIN *d, INT x, INT y, INT pi, INT pos );
+LOCAL void sel_carry_follow( INT sx, INT sy );
+LOCAL void sel_carry_click( void );
 
 /* ---------------------------------------------------------------- the pointer */
 
@@ -2497,6 +2880,10 @@ EXPORT void dd_press( DTWIN *d, INT x, INT y, BOOL extend )
 			     &pi, &pos) < E_OK ) {
 		return;
 	}
+	/* on what is selected: the letters are carried, if the hand moves */
+	if ( !extend && sel_carry_take(d, x, y, pi, pos) ) {
+		return;
+	}
 	move_to(d, pi, pos, extend);
 	dd_drag = d;
 }
@@ -2509,6 +2896,10 @@ EXPORT void dd_follow( INT sx, INT sy )
 	T_DPRECT	page;
 	INT		pi, pos;
 
+	if ( sc_win != NULL ) {
+		sel_carry_follow(sx, sy);
+		return;
+	}
 	if ( d == NULL || !d->used || wm_ref(d->wid, &w) < E_OK ) {
 		return;
 	}
@@ -2523,12 +2914,15 @@ EXPORT void dd_follow( INT sx, INT sy )
 
 EXPORT BOOL dd_dragging( void )
 {
-	return (BOOL)( dd_drag != NULL );
+	return (BOOL)( dd_drag != NULL || sc_win != NULL );
 }
 
 EXPORT void dd_release( void )
 {
 	dd_drag = NULL;
+	if ( sc_win != NULL ) {
+		sel_carry_click();	/* let go where it was pressed: the caret there */
+	}
 }
 
 /* ---------------------------------------------------------------- 詳細: the marks of settings */
@@ -2842,8 +3236,45 @@ EXPORT void dd_mark_release( void )
 
 /* ---------------------------------------------------------------- showing */
 
+/*
+ * The caret's box as thick as ユーザ環境設定 says (細 中 太): a bar down
+ * the line across, across the line down (縦書き).
+ */
+LOCAL void caret_thick( CONST DTWIN *d, T_DPRECT *r )
+{
+	INT	w = wm_num(LK_CARET_W, 1) + 1;
+
+	if ( d->doc != NULL && d->doc->vert ) {
+		r->bottom = r->top + w;
+	} else {
+		r->right = r->left + w;
+	}
+}
+
 /* The caret's turn to be hidden, when it blinks (desktop.c turns it) */
 EXPORT BOOL	dd_caret_hidden = FALSE;
+
+/*
+ * Where the caret is drawn in the window's work area, whether it shows
+ * or not: FALSE when there is none to blink (nothing typed into, or a
+ * selection shown instead). A blink draws the page again inside this
+ * alone, and only this goes to the screen.
+ */
+EXPORT BOOL dd_caret_rect( DTWIN *d, T_DPRECT *r )
+{
+	T_DPRECT	page;
+
+	if ( d == NULL || d->tb_host != NULL || d->tb != NULL || !dd_editable(d) || has_sel(d) ) {
+		return FALSE;
+	}
+	clamp(d);
+	dt_work_rect(d, &page);
+	if ( tv_doc_caret_box(d->doc, &page, d->scroll_y, d->rec, d->cpara, d->cpos, r) < E_OK ) {
+		return FALSE;
+	}
+	caret_thick(d, r);
+	return (BOOL)( r->right > r->left && r->bottom > r->top );
+}
 
 /* The selection turned over and the caret drawn, over the page as drawn */
 EXPORT void dd_draw( DTWIN *d, INT gid )
@@ -2872,7 +3303,7 @@ EXPORT void dd_draw( DTWIN *d, INT gid )
 	  && tv_doc_caret_box(d->doc, &page, d->scroll_y, d->rec, d->cpara,
 			      d->cpos, &box) >= E_OK ) {
 		/* as thick as ユーザ環境設定 says: 細 中 太 */
-		box.right = box.left + wm_num(LK_CARET_W, 1) + 1;
+		caret_thick(d, &box);
 		dp_fill_rect(gid, &box, tip_japanese() ? 0x00D00000U : 0x00000000U);
 	}
 	/* what the converter is working on, over the text at the caret */
@@ -2896,7 +3327,18 @@ EXPORT void dd_show_caret( DTWIN *d )
 			      d->cpos, &box) < E_OK ) {
 		return;
 	}
-	if ( box.top < page.top ) {
+	if ( d->doc->vert ) {
+		/*
+		 * 縦書き: the text is wound to the left as the scroll grows,
+		 * a caret past the left edge winds it on, one past the right
+		 * edge winds it back.
+		 */
+		if ( box.left < page.left ) {
+			to += page.left - box.left;
+		} else if ( box.right > page.right ) {
+			to -= box.right - page.right;
+		}
+	} else if ( box.top < page.top ) {
 		to -= page.top - box.top;
 	} else if ( box.bottom > page.bottom ) {
 		to += box.bottom - page.bottom;
@@ -3094,7 +3536,7 @@ EXPORT void dd_link_follow( INT sx, INT sy )
 	r.left += w.work.left;  r.right += w.work.left;
 	r.top += w.work.top;    r.bottom += w.work.top;
 	wm_set_drag(&r, 1);
-	wm_composite();
+	wm_update();
 }
 
 /* The place in a text under a place on the screen */
@@ -3179,7 +3621,7 @@ EXPORT void dd_link_release( INT sx, INT sy )
 	lc_win = NULL;
 	wm_set_drag(NULL, 0);
 	if ( d == NULL || !d->used || d->doc == NULL || lc_run >= d->doc->nrun ) {
-		wm_composite();
+		wm_update();
 		return;
 	}
 	node = d->doc->run[lc_run].node;
@@ -3224,12 +3666,12 @@ EXPORT void dd_link_release( INT sx, INT sy )
 	t = dt_win_of(wm_at(sx, sy));
 	if ( t == NULL && lc_kind == TV_RUN_LINK && tad_lnk_get(d->rec, lc_link, &v) >= E_OK
 	  && dt_drop_links(d, sx, sy, &v, 1) ) {
-		wm_composite();			/* offered to a program's window; it stays */
+		wm_update();			/* offered to a program's window; it stays */
 		return;
 	}
 	if ( t == NULL || node == NULL || t->sealed
 	  || ( lc_kind == TV_RUN_LINK && tad_lnk_get(d->rec, lc_link, &v) < E_OK ) ) {
-		wm_composite();
+		wm_update();
 		return;
 	}
 	if ( t == d ) {
@@ -3288,7 +3730,7 @@ EXPORT void dd_link_release( INT sx, INT sy )
 	}
 	/* an object is not put inside itself */
 	if ( lc_kind == TV_RUN_LINK && ts_uuid_cmp(&v.target, &t->id) == 0 ) {
-		wm_composite();
+		wm_update();
 		return;
 	}
 	if ( t->doc != NULL && t->kind == TV_KIND_DOC && !t->xml_view ) {
@@ -3404,10 +3846,10 @@ EXPORT void dd_link_release( INT sx, INT sy )
 		t->dirty = TRUE;
 		changed(d);
 		dt_draw_all();
-		wm_composite();
+		wm_update();
 		return;
 	}
-	wm_composite();
+	wm_update();
 }
 
 /* A thing picked alone: its frame, and the handle it is sized by */
@@ -3817,12 +4259,52 @@ LOCAL void face_list( DTWIN *d )
 	}
 }
 
+/*
+ * 単語登録 started with the selection's first line as the word: it is
+ * put in the tray's place of its own (UD_TRAY_SUB), where the accessory
+ * takes it from as it starts.
+ */
+LOCAL void word_register( DTWIN *d )
+{
+	UB		w[UD_WORD_MAX];
+	TS_UUID		u;
+	CONST DTPROG	*p;
+	T_TRREC		r;
+	INT		n = 0, i;
+
+	if ( has_sel(d) ) {
+		n = sel_text(d, w, sizeof(w));
+		for ( i = 0; i < n && w[i] != '\n'; i++ ) ;
+		n = i;
+		if ( n > 0 ) {
+			/* a letter cut short at the end goes */
+			INT	k = n - 1, len;
+
+			while ( k > 0 && ( w[k] & 0xC0 ) == 0x80 ) k--;
+			len = ( w[k] >= 0xF0 ) ? 4 : ( w[k] >= 0xE0 ) ? 3 : ( w[k] >= 0xC0 ) ? 2 : 1;
+			if ( k + len > n ) n = k;
+		}
+	}
+	if ( n > 0 ) {
+		knl_memset(&r, 0, sizeof(r));
+		r.kind = TR_REC;
+		r.sub = UD_TRAY_SUB;
+		r.data = w;
+		r.size = n;
+		(void)tr_set_dat(&r, 1);
+	}
+	if ( ts_str_to_uuid(SYSDEF_PROG_WORDDIC, &u) < E_OK || ( p = dt_prog_of(&u) ) == NULL
+	  || dt_prog_run(d, p, NULL) < E_OK ) {
+		dt_tell(d, "単語登録を起動できませんでした。", NULL);
+	}
+}
+
 /* The commands that apply in 原稿 too: the rest change the look */
 LOCAL BOOL plain_text_cmd( INT cmd )
 {
 	return (BOOL)( cmd == DM_UNDO || cmd == DM_COPY || cmd == DM_PASTE
 		    || cmd == DM_CUT || cmd == DM_MOVE_BACK
-		    || cmd == DM_SELECT_ALL || cmd == DM_FIND );
+		    || cmd == DM_SELECT_ALL || cmd == DM_FIND || cmd == DM_WORDDIC );
 }
 
 /* ---------------------------------------------------------------- the tray */
@@ -4369,6 +4851,8 @@ LOCAL BOOL from_tray( DTWIN *d )
 	}
 	body = tad_body(frag);
 	if ( body != NULL && body->name != NULL && body->name[0] == 'f' ) {
+		/* the pictures the set carries (画面印刷), beside this text's record */
+		if ( !d->xml_view ) (void)dt_tray_pictures(&d->id, rec_of(d), frag);
 		links_paste(d, frag);
 		any = TRUE;
 	} else if ( body != NULL && tv_doc(frag, &m) >= E_OK && m != NULL ) {
@@ -4382,6 +4866,210 @@ LOCAL BOOL from_tray( DTWIN *d )
 	}
 	tad_free(frag);
 	return any;
+}
+
+/* ---------------------------------------------------------------- letters carried */
+
+/*
+ * A press on what is selected and the hand moved: the letters are
+ * carried, an outline following the hand held at its left. Let go over
+ * a text of the desktop's they go in where the outline's corner stands,
+ * as they looked, and leave where they were (a move) unless the second
+ * button went down on the way (a copy). Let go over a program's window
+ * that takes letters (OB_E_TEXT) they are dropped on it as one line,
+ * and stay here as well: the program may still refuse them. Let go
+ * where they were pressed, it was a click: the caret goes there.
+ */
+#define SC_GRAB		4		/* the hand holds the outline this far in from its left */
+#define SC_H		20
+
+LOCAL INT	sc_x0, sc_y0;		/* where it was pressed, on the screen */
+LOCAL INT	sc_pi, sc_pos;		/* and in the text */
+LOCAL INT	sc_w;			/* the outline's width */
+LOCAL BOOL	sc_moved, sc_copy;
+
+LOCAL BOOL sel_carry_take( DTWIN *d, INT x, INT y, INT pi, INT pos )
+{
+	T_WMWIN	w;
+	INT	pa, a, pb, b, n;
+
+	if ( !has_sel(d) || wm_ref(d->wid, &w) < E_OK ) {
+		return FALSE;
+	}
+	sel_order(d, &pa, &a, &pb, &b);
+	if ( pi < pa || ( pi == pa && pos < a ) || pi > pb || ( pi == pb && pos > b ) ) {
+		return FALSE;
+	}
+	sc_win = d;
+	sc_x0 = w.work.left + x;
+	sc_y0 = w.work.top + y;
+	sc_pi = pi;
+	sc_pos = pos;
+	sc_moved = FALSE;
+	sc_copy = FALSE;
+	n = ( pa == pb ) ? b - a : 30;
+	sc_w = n * 4 + 16;		/* about a letter's width for every three bytes */
+	if ( sc_w > 320 ) {
+		sc_w = 320;
+	}
+	return TRUE;
+}
+
+LOCAL void sel_carry_follow( INT sx, INT sy )
+{
+	T_DPRECT	r;
+
+	if ( !sc_moved && sx - sc_x0 < CARRY_START && sc_x0 - sx < CARRY_START
+	  && sy - sc_y0 < CARRY_START && sc_y0 - sy < CARRY_START ) {
+		return;			/* a shaky hand, not a carry */
+	}
+	sc_moved = TRUE;
+	r.left = sx - SC_GRAB;
+	r.top = sy - SC_H / 2;
+	r.right = r.left + sc_w;
+	r.bottom = r.top + SC_H;
+	wm_set_drag(&r, 1);
+	wm_update();
+}
+
+LOCAL void sel_carry_click( void )
+{
+	DTWIN	*d = sc_win;
+
+	sc_win = NULL;
+	if ( d != NULL && d->used && d->doc != NULL && sc_pi < d->doc->npara ) {
+		move_to(d, sc_pi, sc_pos, FALSE);
+	}
+}
+
+EXPORT BOOL dd_sel_carrying( void )
+{
+	return (BOOL)( sc_win != NULL && sc_moved );
+}
+
+EXPORT void dd_sel_copy( void )
+{
+	if ( sc_win != NULL ) {
+		sc_copy = TRUE;
+	}
+}
+
+/* Letters put in a text where a place on the screen is: what a program carries out, or this text's own */
+EXPORT ER dd_text_drop( DTWIN *t, INT sx, INT sy, CONST UB *s, INT n )
+{
+	INT	pi, pos;
+
+	if ( !dd_editable(t) || t->xml_view ) {
+		return E_PAR;
+	}
+	if ( !text_place(t, sx, sy, &pi, &pos) ) {
+		pi = t->doc->npara - 1;
+		pos = para_len(t, pi);
+	}
+	t->apara = t->cpara = pi;
+	t->apos = t->cpos = pos;
+	insert(t, s, n, FALSE);
+	return E_OK;
+}
+
+EXPORT void dd_sel_release( INT sx, INT sy )
+{
+	DTWIN	*d = sc_win, *t;
+	INT	cx = sx - SC_GRAB, cy = sy - SC_H / 2, wid = wm_at(sx, sy);
+	INT	pa, a, pb, b, pi, pos;
+
+	if ( d == NULL || !sc_moved ) {
+		return;			/* a click: dd_release puts the caret */
+	}
+	sc_win = NULL;
+	wm_set_drag(NULL, 0);
+	if ( !d->used || d->doc == NULL || !has_sel(d) ) {
+		wm_update();
+		return;
+	}
+	sel_order(d, &pa, &a, &pb, &b);
+	t = dt_win_of(wid);
+	if ( t == NULL && wid > 0 ) {
+		/* a program's window: the letters as one line, a copy */
+		UB	*s = (UB *)Kmalloc(OB_DROP_TEXT);
+		TS_UUID	u;
+		INT	n, i;
+		ER	er = E_NOMEM;
+
+		if ( s != NULL ) {
+			n = sel_text(d, s, OB_DROP_TEXT);
+			for ( i = 0; i < n; i++ ) {
+				if ( s[i] == '\n' || s[i] == '\t' ) s[i] = ' ';
+			}
+			knl_memset(&u, 0, sizeof(u));
+			(void)wm_obj_uuid(d->wid, &u);
+			er = ( n > 0 ) ? wm_obj_drop_text(wid, cx, cy, 0, &u, s, n) : E_NOEXS;
+			Kfree(s);
+		}
+		if ( er < E_OK ) {
+			(void)wm_msg_put("ここには置けません");
+		}
+		wm_update();
+		return;
+	}
+	if ( t != NULL && t != d && t->doc == NULL && df_is(t) ) {
+		/* a figure: the letters as its text, leaving here unless it was a copy */
+		UB	*s = (UB *)Kmalloc(OB_DROP_TEXT);
+		INT	n;
+		ER	er = E_NOMEM;
+
+		if ( s != NULL ) {
+			n = sel_text(d, s, OB_DROP_TEXT);
+			s[( n < OB_DROP_TEXT ) ? n : OB_DROP_TEXT - 1] = 0;
+			er = ( n > 0 ) ? df_text_drop(t, cx, cy, s, n) : E_NOEXS;
+			Kfree(s);
+		}
+		if ( er < E_OK ) {
+			(void)wm_msg_put("ここには置けません");
+		} else if ( !sc_copy && d->used && d->doc != NULL ) {
+			d->apara = pa;
+			d->apos = a;
+			d->cpara = pb;
+			d->cpos = b;
+			erase_back(d);
+		}
+		wm_update();
+		return;
+	}
+	if ( t == NULL || !dd_editable(t) || t->xml_view ) {
+		(void)wm_msg_put("ここには置けません");
+		wm_update();
+		return;
+	}
+	if ( !text_place(t, cx, cy, &pi, &pos) ) {
+		pi = t->doc->npara - 1;
+		pos = para_len(t, pi);
+	}
+	if ( t == d && ( pi > pa || ( pi == pa && pos >= a ) ) && ( pi < pb || ( pi == pb && pos <= b ) ) ) {
+		wm_update();
+		return;			/* onto itself: nothing moves */
+	}
+	cr_from(d->doc, d->rec, pa, a, pb, b);
+	if ( t == d && !sc_copy && ( pi < pa || ( pi == pa && pos < a ) ) ) {
+		/* before where they were, in the same text: taken out first, the place stays */
+		erase_back(d);
+		d->apara = d->cpara = pi;
+		d->apos = d->cpos = pos;
+		cr_paste(d);
+	} else {
+		t->apara = t->cpara = pi;
+		t->apos = t->cpos = pos;
+		cr_paste(t);
+		if ( !sc_copy && d->used && d->doc != NULL ) {
+			/* after them, or in another text: they leave where they were */
+			d->apara = pa;
+			d->apos = a;
+			d->cpara = pb;
+			d->cpos = b;
+			erase_back(d);
+		}
+	}
+	cr_clear();
 }
 
 EXPORT BOOL dd_command( DTWIN *d, INT cmd )
@@ -4446,6 +5134,9 @@ EXPORT BOOL dd_command( DTWIN *d, INT cmd )
 		return TRUE;
 	case DM_VIRTUALIZE:
 		virtualize(d);
+		return TRUE;
+	case DM_WORDDIC:
+		word_register(d);
 		return TRUE;
 
 	/* 書体 */
@@ -4527,6 +5218,10 @@ EXPORT BOOL dd_command( DTWIN *d, INT cmd )
 	case DM_ALIGN_RIGHT:	align_sel(d, "right");			return TRUE;
 	case DM_RUBY_TOP:	ruby_sel(d, FALSE);			return TRUE;
 	case DM_RUBY_BOTTOM:	ruby_sel(d, TRUE);			return TRUE;
+	case DM_DIR_VERT:	set_direction(d, TRUE);			return TRUE;
+	case DM_DIR_HORIZ:	set_direction(d, FALSE);		return TRUE;
+	case DM_COMB:		comb_sel(d);				return TRUE;
+	case DM_TURN:		turn_sel(d);				return TRUE;
 	case DM_PAGEBREAK:
 		page_break(d);
 		return TRUE;

@@ -120,6 +120,14 @@ typedef struct {
 	TS_UUID	vobjid;			/* identity of the link itself */
 	TS_UUID	target;			/* the real object it refers to */
 	INT	recno;			/* the record of it the id names */
+
+	/*
+	 * Where the object is, as the id says it (design 8.3): the volume
+	 * when it is another than the one the link is on, and the machine
+	 * when it is another than this one. Zero for none.
+	 */
+	TS_UUID	tvol;
+	TS_UUID	tmach;
 	UB	name[TAD_NAME_MAX];
 	UB	relationship[TAD_REL_MAX];
 	UB	applist[TAD_APPL_MAX];

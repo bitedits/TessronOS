@@ -17,8 +17,9 @@
  *		"name": "基本文章編集", "base": [ UUID ], "builtin": true } }
  *	The id is the one an applist names, so what a TADjs Desktop wrote
  *	opens with the program it names. "kind" is app (it has templates,
- *	原紙, and opens objects), accessory (小物: no data of its own) or
- *	utility (a tool of the system). A program the desktop carries in
+ *	原紙, and opens objects), accessory (小物: no data of its own),
+ *	utility (a tool of the system) or command (no window of its own: run
+ *	in a コンソール, which shows what it prints). A program the desktop carries in
  *	itself is "builtin" and has no executable; one that is a process has
  *	its executable in a record of type 9 (tessronos.exec).
  *
@@ -63,12 +64,15 @@
 #include <ts/json.h>
 #include <ts/xf.h>
 #include <ts/sysdef.h>
+#include <ts/fquit.h>
 #include "desktop.h"
 
-#define PROG_MAX	32
+#define PROG_MAX	64		/* the programs the box may link to */
 
 LOCAL DTPROG	prog[PROG_MAX];
 LOCAL INT	nprog = 0;
+
+LOCAL BOOL has_type( CONST UB *types, CONST UB *t );
 
 /* ---------------------------------------------------------------- text */
 
@@ -127,13 +131,32 @@ LOCAL BOOL read_prog( CONST TS_UUID *uuid, DTPROG *p )
 		p->kind = DT_PK_APP;
 		if ( js_get_str(&g, "kind", s, sizeof(s)) > 0 ) {
 			p->kind = same(s, "accessory") ? DT_PK_ACCESSORY
-				: same(s, "utility") ? DT_PK_UTILITY : DT_PK_APP;
+				: same(s, "utility") ? DT_PK_UTILITY
+				: same(s, "command") ? DT_PK_COMMAND : DT_PK_APP;
 		}
 		if ( js_get_str(&g, "version", p->version, DT_VER_MAX) <= 0 ) {
 			p->version[0] = 0;
 		}
 		p->builtin = js_get_bool(&g, "builtin", FALSE);
 		p->menu = js_get_bool(&g, "menu", FALSE);
+
+		/* the kinds of object it opens from 実行: "fileTypes": ["xtad", "tad"] */
+		p->types[0] = 0;
+		if ( js_get(&g, "fileTypes", &base) >= E_OK ) {
+			INT	k = 0;
+
+			for ( it.s = NULL; js_next(&base, &it); ) {
+				UB	t[16];
+				INT	q, n = js_str(&it, t, sizeof(t));
+
+				if ( n <= 0 || k + n + 2 >= DT_TYPES_MAX ) continue;
+				if ( k > 0 ) p->types[k++] = ',';
+				for ( q = 0; q < n; q++ ) {
+					p->types[k++] = ( t[q] >= 'A' && t[q] <= 'Z' ) ? (UB)( t[q] - 'A' + 'a' ) : t[q];
+				}
+				p->types[k] = 0;
+			}
+		}
 
 		/* its templates */
 		p->nbase = 0;
@@ -224,7 +247,7 @@ LOCAL UB *plugin_json( CONST char *dir, SZ *p_size )
  * "tessronos.file" where it came from.
  */
 LOCAL INT plugin_meta( UB *m, INT max, CONST char *dir, CONST UB *id, CONST UB *name,
-		       CONST char *kind, CONST UB *ver, CONST TS_UUID *base )
+		       CONST char *kind, CONST UB *ver, CONST TS_UUID *base, CONST UB *types )
 {
 	char	us[TS_UUID_STRLEN + 1];
 	INT	n = 0;
@@ -246,7 +269,20 @@ LOCAL INT plugin_meta( UB *m, INT max, CONST char *dir, CONST UB *id, CONST UB *
 		n = put(m, n, max, us);
 		n = put(m, n, max, "\"");
 	}
-	n = put(m, n, max, "]},\"plugin\":{\"version\":\"");
+	n = put(m, n, max, "]");
+	if ( types != NULL && types[0] != 0 ) {
+		/* what its right-button menu was offered for (contextMenu fileTypes), as 実行 offers it */
+		INT	k;
+
+		n = put(m, n, max, ",\"fileTypes\":[\"");
+		for ( k = 0; types[k] != 0 && n < max - 4; k++ ) {
+			if ( types[k] == ',' ) n = put(m, n, max, "\",\"");
+			else m[n++] = types[k];
+		}
+		m[n] = 0;
+		n = put(m, n, max, "\"]");
+	}
+	n = put(m, n, max, "},\"plugin\":{\"version\":\"");
 	n = put_json(m, n, max, ver);
 	n = put(m, n, max, "\"},\"file\":{\"name\":\"");
 	n = put_json(m, n, max, (CONST UB *)dir);
@@ -256,8 +292,9 @@ LOCAL INT plugin_meta( UB *m, INT max, CONST char *dir, CONST UB *id, CONST UB *
 
 EXPORT ER dt_plugin_import( CONST char *dir, TS_UUID *p_prog )
 {
-	T_JSON		root, bf;
+	T_JSON		root, bf, cm, it, ft, t1;
 	UB		id[DT_PROG_ID], name[TAD_NAME_MAX], type[32], ver[32], jf[128];
+	UB		types[DT_TYPES_MAX];
 	UB		*j, *m;
 	SZ		size = 0;
 	INT		n;
@@ -283,6 +320,25 @@ EXPORT ER dt_plugin_import( CONST char *dir, TS_UUID *p_prog )
 		return E_PAR;
 	}
 	if ( js_get_str(&root, "type", type, sizeof(type)) <= 0 ) type[0] = 0;
+	/* the kinds of file its menu entries are for, lower case, each once */
+	types[0] = 0;
+	if ( js_get(&root, "contextMenu", &cm) >= E_OK ) {
+		INT	k = 0;
+
+		for ( it.s = NULL; js_next(&cm, &it); ) {
+			if ( js_get(&it, "fileTypes", &ft) < E_OK ) continue;
+			for ( t1.s = NULL; js_next(&ft, &t1); ) {
+				UB	w[16];
+				INT	q, len = js_str(&t1, w, sizeof(w));
+
+				for ( q = 0; q < len; q++ ) if ( w[q] >= 'A' && w[q] <= 'Z' ) w[q] = (UB)( w[q] - 'A' + 'a' );
+				if ( len <= 0 || has_type(types, w) || k + len + 2 >= DT_TYPES_MAX ) continue;
+				if ( k > 0 ) types[k++] = ',';
+				for ( q = 0; q < len; q++ ) types[k++] = w[q];
+				types[k] = 0;
+			}
+		}
+	}
 	if ( js_get_str(&root, "version", ver, sizeof(ver)) <= 0 ) ver[0] = 0;
 	dt_sys_prt(&prt);
 	kind = same(type, "base") ? "app" : same(type, "accessory") ? "accessory" : "utility";
@@ -315,7 +371,7 @@ EXPORT ER dt_plugin_import( CONST char *dir, TS_UUID *p_prog )
 	if ( m == NULL ) {
 		return E_NOMEM;
 	}
-	n = plugin_meta(m, 1024 + FS_PATH_MAX, dir, id, name, kind, ver, has_base ? &base : NULL);
+	n = plugin_meta(m, 1024 + FS_PATH_MAX, dir, id, name, kind, ver, has_base ? &base : NULL, types);
 	knl_memset(&c, 0, sizeof(c));
 	c.type = OB_T_STORAGE;
 	c.sub = OB_S_FILE;
@@ -391,6 +447,12 @@ EXPORT CONST DTPROG *dt_prog_find( CONST UB *id )
 	return NULL;
 }
 
+/* The i-th program the registry knows, NULL past the last */
+EXPORT CONST DTPROG *dt_prog_at( INT i )
+{
+	return ( i >= 0 && i < nprog ) ? &prog[i] : NULL;
+}
+
 EXPORT CONST DTPROG *dt_prog_of( CONST TS_UUID *uuid )
 {
 	INT	i;
@@ -411,6 +473,74 @@ EXPORT INT dt_prog_list( UINT kind, CONST DTPROG **out, INT max )
 		if ( kind == 0 || prog[i].kind == kind ) {
 			out[n++] = &prog[i];
 		}
+	}
+	return n;
+}
+
+/* The kind of object a link points at, as fileTypes names it: "xtad", or the extension of its file */
+LOCAL BOOL obj_type( CONST T_VOBJ *v, UB *t, INT max )
+{
+	T_JSON	root, tf, f;
+	UB	*meta, name[TAD_NAME_MAX];
+	SZ	size = 0;
+	INT	n, i, k = 0;
+	T_OBREC	r[2];
+
+	t[0] = 0;
+	meta = om_obj_meta(&v->target, &size);
+	if ( meta != NULL ) {
+		if ( js_parse(meta, (INT)size, &root) >= E_OK && js_get(&root, "tessronos", &tf) >= E_OK
+		  && js_get(&tf, "file", &f) >= E_OK && ( n = js_get_str(&f, "name", name, sizeof(name)) ) > 0 ) {
+			for ( i = n - 1; i >= 0 && name[i] != '.'; i-- ) ;
+			for ( i++; i > 0 && i < n && k < max - 1; i++ ) {
+				t[k++] = ( name[i] >= 'A' && name[i] <= 'Z' ) ? (UB)( name[i] - 'A' + 'a' ) : name[i];
+			}
+			t[k] = 0;
+		}
+		Kfree(meta);
+		if ( k > 0 ) return TRUE;
+	}
+	/* an object whose record 0 is xmlTAD */
+	n = om_obj_records(&v->target, r, 2);
+	if ( n > 0 && r[0].recno == 0 && r[0].rt == OB_RT_TAD ) {
+		t[0] = 'x';
+		t[1] = 't';
+		t[2] = 'a';
+		t[3] = 'd';
+		t[4] = 0;
+		return TRUE;
+	}
+	return FALSE;
+}
+
+LOCAL BOOL has_type( CONST UB *types, CONST UB *t )
+{
+	INT	i = 0, k;
+
+	while ( types[i] != 0 ) {
+		for ( k = 0; t[k] != 0 && types[i + k] == t[k]; k++ ) ;
+		if ( t[k] == 0 && ( types[i + k] == ',' || types[i + k] == 0 ) ) return TRUE;
+		while ( types[i] != 0 && types[i] != ',' ) i++;
+		if ( types[i] == ',' ) i++;
+	}
+	return FALSE;
+}
+
+EXPORT INT dt_prog_by_type( CONST T_VOBJ *v, CONST DTPROG **out, INT max )
+{
+	UB	t[16], have[DT_PROG_ID];
+	INT	i, k, n = 0;
+
+	if ( v == NULL || !obj_type(v, t, sizeof(t)) ) return 0;
+	for ( i = 0; i < nprog && n < max; i++ ) {
+		BOOL	in_list = FALSE;
+
+		if ( prog[i].types[0] == 0 || !has_type(prog[i].types, t) ) continue;
+		for ( k = 0; k < 16 && !in_list; k++ ) {
+			if ( om_link_app_id(v, k, have, DT_PROG_ID) <= 0 ) break;
+			in_list = same(have, (CONST char *)prog[i].id);
+		}
+		if ( !in_list ) out[n++] = &prog[i];
 	}
 	return n;
 }
@@ -634,7 +764,7 @@ LOCAL BOOL starter( void )
 }
 
 /* A process started from the program: handed to the starter, or started here when there is none */
-LOCAL ER start_process( CONST DTPROG *p, CONST T_VOBJ *v )
+LOCAL ER start_process( CONST DTPROG *p, CONST TS_UUID *arg )
 {
 	DTSTART	s;
 	TS_UUID	pu;
@@ -643,8 +773,8 @@ LOCAL ER start_process( CONST DTPROG *p, CONST T_VOBJ *v )
 
 	knl_memset(&s, 0, sizeof(s));
 	s.prog = p->uuid;
-	if ( v != NULL ) {
-		s.arg = v->target;
+	if ( arg != NULL ) {
+		s.arg = *arg;
 		s.has_arg = TRUE;
 	}
 	for ( i = 0; i < TAD_NAME_MAX - 1 && p->name[i] != 0; i++ ) {
@@ -675,6 +805,30 @@ LOCAL ER start_process( CONST DTPROG *p, CONST T_VOBJ *v )
 }
 
 /*
+ * A command opened, wherever it is linked from: it has no window of its
+ * own and what it prints is the console's, so a コンソール is started
+ * for it, given the command's object, and runs it. E_NOEXS when the
+ * object is no command.
+ */
+EXPORT ER dt_command_run( CONST TS_UUID *target )
+{
+	DTPROG		*p = (DTPROG *)Kmalloc(sizeof(DTPROG));
+	CONST DTPROG	*con;
+	TS_UUID		cu;
+	BOOL		is;
+
+	if ( p == NULL ) {
+		return E_NOMEM;
+	}
+	is = (BOOL)( read_prog(target, p) && p->kind == DT_PK_COMMAND && !p->builtin );
+	Kfree(p);
+	if ( !is || ts_str_to_uuid(SYSDEF_PROG_CONSOLE, &cu) < E_OK || ( con = dt_prog_of(&cu) ) == NULL ) {
+		return E_NOEXS;
+	}
+	return start_process(con, target);
+}
+
+/*
  * A program run: one of the desktop's own by what it is, any other as a
  * process object made from it, given the object to open (its UUID as
  * the start-up argument) when there is one.
@@ -684,8 +838,11 @@ EXPORT ER dt_prog_run( DTWIN *from, CONST DTPROG *p, CONST T_VOBJ *v )
 	if ( p == NULL ) {
 		return E_PAR;
 	}
+	if ( p->kind == DT_PK_COMMAND && !p->builtin ) {
+		return dt_command_run(&p->uuid);
+	}
 	if ( !p->builtin ) {
-		return start_process(p, v);
+		return start_process(p, ( v != NULL ) ? &v->target : NULL);
 	}
 	if ( same(p->id, "base-file-manager") || same(p->id, "accessory-box") ) {
 		T_DPRECT	o;
@@ -697,6 +854,26 @@ EXPORT ER dt_prog_run( DTWIN *from, CONST DTPROG *p, CONST T_VOBJ *v )
 	}
 	if ( same(p->id, "trash-real-objects") ) {
 		dt_trash_open();
+		return E_OK;
+	}
+	if ( same(p->id, "window-list-viewer") ) {
+		dt_winlist_open();
+		return E_OK;
+	}
+	if ( same(p->id, "force-quit") ) {
+		knl_fq_open();			/* 強制終了's own window (outer_kernel/wm/fquit.c) */
+		return E_OK;
+	}
+	if ( same(p->id, "screen-print") ) {
+		dt_scr_open();
+		return E_OK;
+	}
+	if ( same(p->id, "tray-viewer") ) {
+		dt_trayv_open();
+		return E_OK;
+	}
+	if ( same(p->id, "disk-repair") ) {
+		dt_fix_open();
 		return E_OK;
 	}
 	if ( same(p->id, "real-object-search") ) {

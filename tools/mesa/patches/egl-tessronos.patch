@@ -1,0 +1,125 @@
+--- a/src/egl/main/egldisplay.h
++++ b/src/egl/main/egldisplay.h
+@@ -55,6 +55,7 @@
+    _EGL_PLATFORM_SURFACELESS,
+    _EGL_PLATFORM_DEVICE,
+    _EGL_PLATFORM_WINDOWS,
++   _EGL_PLATFORM_TESSRONOS,
+ 
+    _EGL_NUM_PLATFORMS,
+    _EGL_INVALID_PLATFORM = -1
+@@ -354,6 +355,12 @@
+ _EGLDisplay *
+ _eglGetDeviceDisplay(void *native_display, const EGLAttrib *attrib_list);
+ 
++/* The platform of TessronOS: its display (EGL_DEFAULT_DISPLAY only) */
++#define EGL_PLATFORM_TESSRONOS 0x3FD0
++
++_EGLDisplay *
++_eglGetTessronosDisplay(void *native_display, const EGLAttrib *attrib_list);
++
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/src/egl/main/egldisplay.c
++++ b/src/egl/main/egldisplay.c
+@@ -84,6 +84,7 @@
+    {_EGL_PLATFORM_SURFACELESS, "surfaceless"},
+    {_EGL_PLATFORM_DEVICE, "device"},
+    {_EGL_PLATFORM_WINDOWS, "windows"},
++   {_EGL_PLATFORM_TESSRONOS, "tessronos"},
+ };
+ 
+ /**
+@@ -169,6 +170,14 @@
+       detection_method = "autodetected";
+    }
+ 
++#if DETECT_OS_TESSRONOS
++   /* a TessronOS process has the one platform of its own */
++   if (detected_platform == _EGL_INVALID_PLATFORM) {
++      detected_platform = _EGL_PLATFORM_TESSRONOS;
++      detection_method = "the system";
++   }
++#endif
++
+ #if defined(_EGL_NATIVE_PLATFORM)
+    if (detected_platform == _EGL_INVALID_PLATFORM) {
+       detected_platform = _EGL_NATIVE_PLATFORM;
+@@ -683,6 +692,21 @@
+    return dpy;
+ }
+ 
++_EGLDisplay *
++_eglGetTessronosDisplay(void *native_display, const EGLAttrib *attrib_list)
++{
++   /* the windows are named when a surface is made: no display to name */
++   if (native_display != NULL) {
++      _eglError(EGL_BAD_PARAMETER, "eglGetPlatformDisplay");
++      return NULL;
++   }
++   if (attrib_list != NULL && attrib_list[0] != EGL_NONE) {
++      _eglError(EGL_BAD_ATTRIBUTE, "eglGetPlatformDisplay");
++      return NULL;
++   }
++   return _eglFindDisplay(_EGL_PLATFORM_TESSRONOS, NULL, attrib_list);
++}
++
+ #ifdef HAVE_ANDROID_PLATFORM
+ _EGLDisplay *
+ _eglGetAndroidDisplay(void *native_display, const EGLAttrib *attrib_list)
+--- a/src/egl/main/eglapi.c
++++ b/src/egl/main/eglapi.c
+@@ -459,6 +459,9 @@
+    case EGL_PLATFORM_DEVICE_EXT:
+       disp = _eglGetDeviceDisplay(native_display, attrib_list);
+       break;
++   case EGL_PLATFORM_TESSRONOS:
++      disp = _eglGetTessronosDisplay(native_display, attrib_list);
++      break;
+    default:
+       RETURN_EGL_ERROR(NULL, EGL_BAD_PARAMETER, NULL);
+    }
+--- a/src/egl/drivers/dri2/egl_dri2.c
++++ b/src/egl/drivers/dri2/egl_dri2.c
+@@ -913,6 +913,9 @@
+    case _EGL_PLATFORM_ANDROID:
+       ret = dri2_initialize_android(disp);
+       break;
++   case _EGL_PLATFORM_TESSRONOS:
++      ret = dri2_initialize_tessronos(disp);
++      break;
+    default:
+       UNREACHABLE("Callers ensure we cannot get here.");
+       return EGL_FALSE;
+@@ -1006,6 +1009,8 @@
+       break;
+    case _EGL_PLATFORM_DEVICE:
+       break;
++   case _EGL_PLATFORM_TESSRONOS:
++      break;
+    default:
+       UNREACHABLE("Platform teardown is not properly hooked.");
+       break;
+--- a/src/egl/drivers/dri2/egl_dri2.h
++++ b/src/egl/drivers/dri2/egl_dri2.h
+@@ -575,6 +575,9 @@
+ 
+ EGLBoolean
+ dri2_initialize_device(_EGLDisplay *disp);
++
++EGLBoolean
++dri2_initialize_tessronos(_EGLDisplay *disp);
+ static inline void
+ dri2_teardown_device(struct dri2_egl_display *dri2_dpy)
+ { /* noop */
+--- a/src/egl/meson.build
++++ b/src/egl/meson.build
+@@ -102,6 +102,7 @@
+   files_egl += files(
+     'drivers/dri2/platform_device.c',
+     'drivers/dri2/platform_surfaceless.c',
++    'drivers/dri2/platform_tessronos.c',
+   )
+ 
+   if with_platform_x11

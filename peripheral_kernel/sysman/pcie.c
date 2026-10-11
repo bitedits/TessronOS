@@ -395,7 +395,12 @@ EXPORT UBINT ts_pcie_bar_base( CONST T_PCIDEV *dev, INT bar )
 		return 0;
 	}
 
+#ifdef PCIE_BAR_CPU_OFFSET
+	/* the outbound window puts the bus's addresses somewhere else for the processor */
+	return DEV_BASE(dev->bar[bar] + PCIE_BAR_CPU_OFFSET);
+#else
 	return DEV_BASE(dev->bar[bar]);
+#endif
 }
 
 EXPORT UINT ts_pcie_cap_find( CONST T_PCIDEV *dev, UINT cap_id )
@@ -551,6 +556,16 @@ EXPORT ER ts_pcie_msi_alloc( CONST T_PCIDEV *dev, UINT *p_intno )
 	*p_intno = intno;
 
 	return E_OK;
+}
+
+#else /* GICV2M_BASE */
+
+/* No frame to send messages to: the functions use their lines */
+EXPORT ER ts_pcie_msi_alloc( CONST T_PCIDEV *dev, UINT *p_intno )
+{
+	(void)dev;
+	(void)p_intno;
+	return E_NOEXS;
 }
 
 #endif /* GICV2M_BASE */

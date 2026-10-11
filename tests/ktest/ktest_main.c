@@ -201,9 +201,9 @@ LOCAL BOOL kt_wanted( CONST char *name )
  * be skipped once, with the reason, rather than left out without a
  * word; it is not built there. Elsewhere it runs.
  */
-#ifdef RPI5
+#if KT_BOARD
 #define RUN_SUITE_QEMU(n, why) \
-	do { if ( KT_WANTED(n) ) kt_skip(#n, "not run (Raspberry Pi 5: " why ")"); } while (0)
+	do { if ( KT_WANTED(n) ) kt_skip(#n, "not run (Raspberry Pi: " why ")"); } while (0)
 #else
 #define RUN_SUITE_QEMU(n, why)	RUN_SUITE(n)
 #endif
@@ -419,7 +419,7 @@ EXPORT ER kt_shot( const char *path )
  * the type says it was made for this, which a place on the card or a
  * size would not. The system volume and /boot are never it.
  */
-#ifdef RPI5
+#if KT_BOARD
 LOCAL CONST UB	scratch_type[16] = {		/* in GPT mixed-endian form */
 	0x31, 0x53, 0x46, 0x54, 0x00, 0x00, 0x00, 0x40,
 	0x80, 0x00, 0x54, 0x46, 0x53, 0x2d, 0x53, 0x43
@@ -542,8 +542,12 @@ LOCAL void kt_main_task( INT stacd, void *exinf )
 	RUN_SUITE(mem);
 	RUN_SUITE(el0);
 	RUN_SUITE(smp);
+	RUN_SUITE(lockup);
+	RUN_SUITE(board);
 	RUN_SUITE(proc);
 	RUN_SUITE(prcobj);
+	RUN_SUITE(pan);
+	RUN_SUITE(cred);
 	RUN_SUITE(cxx);
 	RUN_SUITE(v8);
 	RUN_SUITE(gpu);
@@ -557,12 +561,12 @@ LOCAL void kt_main_task( INT stacd, void *exinf )
 	 * and the book stops here.
 	 */
 	{
-#ifdef RPI5
+#if KT_BOARD
 		INT	failed = kt.total - kt.pass - kt.skipped;
 #endif
 
 		RUN_SUITE(sd);
-#ifdef RPI5
+#if KT_BOARD
 		if ( kt.total - kt.pass - kt.skipped > failed ) {
 			tm_printf((UB *)"KTEST the SD card driver failed its checks: "
 				  "no further suite runs, so nothing more is written to the card\n");
@@ -580,7 +584,10 @@ LOCAL void kt_main_task( INT stacd, void *exinf )
 	RUN_SUITE_SCRATCH(tsfsbtree);
 	RUN_SUITE_SCRATCH(tsfsjrnl);
 	RUN_SUITE_SCRATCH(tsfsobj);
+	RUN_SUITE_SCRATCH(dfix);
 	RUN_SUITE(ob);
+	RUN_SUITE(psx);
+	RUN_SUITE_QEMU(vols, "no QEMU monitor to plug disks in through");
 #ifdef KT_ONE
 	RUN_SUITE_SCRATCH(tsfscut);	/* without end: only when it is named */
 #endif
@@ -595,20 +602,39 @@ LOCAL void kt_main_task( INT stacd, void *exinf )
 	   against a system that had none */
 	RUN_SUITE(fn);
 	RUN_SUITE_SCREEN(wm);
+	RUN_SUITE(gl);
 	RUN_SUITE_SCREEN(part);
 	RUN_SUITE_SCREEN(mn);
 	RUN_SUITE_SCREEN(ms);
 	RUN_SUITE(unp);
+	RUN_SUITE(arc);
 	RUN_SUITE(btbk);
 	RUN_SUITE(bkp);
 	RUN_SUITE(tray);
 	RUN_SUITE(xf);
 	RUN_SUITE(xfu);
 	RUN_SUITE_SCREEN(xfc);
+	RUN_SUITE_QEMU(btcd, "no QEMU monitor to plug a CD-ROM drive in through");
 	RUN_SUITE_SCREEN(drop);
+	RUN_SUITE_SCREEN(dtwin);
 	RUN_SUITE_SCREEN(fault);
+	RUN_SUITE_SCREEN(fq);
 	RUN_SUITE_SCREEN(cab);
 	RUN_SUITE_SCREEN(tv);
+	RUN_SUITE_SCREEN(vt);
+	RUN_SUITE_SCREEN(prn);
+	RUN_SUITE_SCREEN(scr);
+	RUN_SUITE(cal);
+	RUN_SUITE(calc);
+	RUN_SUITE(kana);
+	RUN_SUITE(udic);
+	RUN_SUITE(calcu);
+	RUN_SUITE(km);
+	RUN_SUITE(mcard);
+	RUN_SUITE(techo);
+	RUN_SUITE(chs);
+	RUN_SUITE(slide);
+	RUN_SUITE(rt);
 	RUN_SUITE(store);
 	/* last: every resource the suites before made is looked for as an object */
 	RUN_SUITE(bt2);
@@ -616,14 +642,16 @@ LOCAL void kt_main_task( INT stacd, void *exinf )
 #if KT_NET
 	RUN_SUITE_QEMU(pcie, "no flat PCI Express configuration space");
 	RUN_SUITE(snd);
+	RUN_SUITE(cam);
 	RUN_SUITE(usb);
 	RUN_SUITE(devob);
 	RUN_SUITE(net);
 	RUN_SUITE(so);
+	RUN_SUITE(rump);
 	RUN_SUITE(svcio);
 #endif
 
-#if defined(RPI5) && KT_FS
+#if KT_BOARD && KT_FS
 summary:
 #endif
 #if CNF_KLOCK_STAT

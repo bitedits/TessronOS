@@ -27,6 +27,12 @@
  *	when the window opened. The zone is the calendar's and the time
  *	server the network settings', and they are written there. The name
  *	changed is the machine's from its next start.
+ *
+ *	Each zone offered is a place's: its standard offset and the IANA
+ *	name of its time zone, set together (dt_setsyszone). The system's
+ *	clock follows the summer time of the places that keep it, and the
+ *	programs with a time zone database of their own (the browser) the
+ *	whole of the place's rules.
  */
 
 #include <string.h>
@@ -143,26 +149,42 @@ LOCAL TONEVOL tonevol[] = {
 };
 #define NTONE	4
 
-/* The zones offered, west to east */
-typedef struct { CONST char *name; INT min; } ZONE;
+/* The zones offered, west to east, as the data box lists them: the standard offset and the IANA name */
+typedef struct { CONST char *name; INT min; CONST char *tz; } ZONE;
 LOCAL CONST ZONE zones[] = {
-	{ "UTC-12:00 日付変更線西", -720 }, { "UTC-11:00 サモア", -660 },
-	{ "UTC-10:00 ハワイ", -600 }, { "UTC-9:00 アラスカ", -540 },
-	{ "UTC-8:00 太平洋（米国）", -480 }, { "UTC-7:00 山岳部（米国）", -420 },
-	{ "UTC-6:00 中部（米国）", -360 }, { "UTC-5:00 東部（米国）", -300 },
-	{ "UTC-4:00 大西洋", -240 }, { "UTC-3:00 ブラジリア", -180 },
-	{ "UTC-2:00 中部大西洋", -120 }, { "UTC-1:00 アゾレス", -60 },
-	{ "UTC 協定世界時", 0 }, { "UTC+1:00 中央ヨーロッパ", 60 },
-	{ "UTC+2:00 東ヨーロッパ", 120 }, { "UTC+3:00 モスクワ", 180 },
-	{ "UTC+3:30 テヘラン", 210 }, { "UTC+4:00 ドバイ", 240 },
-	{ "UTC+4:30 カブール", 270 }, { "UTC+5:00 カラチ", 300 },
-	{ "UTC+5:30 インド", 330 }, { "UTC+5:45 カトマンズ", 345 },
-	{ "UTC+6:00 ダッカ", 360 }, { "UTC+6:30 ヤンゴン", 390 },
-	{ "UTC+7:00 バンコク", 420 }, { "UTC+8:00 北京・シンガポール", 480 },
-	{ "UTC+9:00 日本（東京）", 540 }, { "UTC+9:30 アデレード", 570 },
-	{ "UTC+10:00 シドニー", 600 }, { "UTC+11:00 ソロモン諸島", 660 },
-	{ "UTC+12:00 ニュージーランド", 720 }, { "UTC+13:00 トンガ", 780 },
-	{ "UTC+14:00 ライン諸島", 840 },
+	{ "UTC-12:00 日付変更線西", -720, "Etc/GMT+12" },
+	{ "UTC-11:00 サモア", -660, "Pacific/Pago_Pago" },
+	{ "UTC-10:00 ハワイ", -600, "Pacific/Honolulu" },
+	{ "UTC-9:00 アラスカ", -540, "America/Anchorage" },
+	{ "UTC-8:00 太平洋（米国）", -480, "America/Los_Angeles" },
+	{ "UTC-7:00 山岳部（米国）", -420, "America/Denver" },
+	{ "UTC-6:00 中部（米国）", -360, "America/Chicago" },
+	{ "UTC-5:00 東部（米国）", -300, "America/New_York" },
+	{ "UTC-4:00 大西洋", -240, "America/Halifax" },
+	{ "UTC-3:00 ブラジリア", -180, "America/Sao_Paulo" },
+	{ "UTC-2:00 中部大西洋", -120, "Atlantic/South_Georgia" },
+	{ "UTC-1:00 アゾレス", -60, "Atlantic/Azores" },
+	{ "UTC 協定世界時", 0, "UTC" },
+	{ "UTC+1:00 中央ヨーロッパ", 60, "Europe/Paris" },
+	{ "UTC+2:00 東ヨーロッパ", 120, "Europe/Athens" },
+	{ "UTC+3:00 モスクワ", 180, "Europe/Moscow" },
+	{ "UTC+3:30 テヘラン", 210, "Asia/Tehran" },
+	{ "UTC+4:00 ドバイ", 240, "Asia/Dubai" },
+	{ "UTC+4:30 カブール", 270, "Asia/Kabul" },
+	{ "UTC+5:00 カラチ", 300, "Asia/Karachi" },
+	{ "UTC+5:30 インド", 330, "Asia/Kolkata" },
+	{ "UTC+5:45 カトマンズ", 345, "Asia/Kathmandu" },
+	{ "UTC+6:00 ダッカ", 360, "Asia/Dhaka" },
+	{ "UTC+6:30 ヤンゴン", 390, "Asia/Yangon" },
+	{ "UTC+7:00 バンコク", 420, "Asia/Bangkok" },
+	{ "UTC+8:00 北京・シンガポール", 480, "Asia/Shanghai" },
+	{ "UTC+9:00 日本（東京）", 540, "Asia/Tokyo" },
+	{ "UTC+9:30 アデレード", 570, "Australia/Adelaide" },
+	{ "UTC+10:00 シドニー", 600, "Australia/Sydney" },
+	{ "UTC+11:00 ソロモン諸島", 660, "Pacific/Guadalcanal" },
+	{ "UTC+12:00 ニュージーランド", 720, "Pacific/Auckland" },
+	{ "UTC+13:00 トンガ", 780, "Pacific/Tongatapu" },
+	{ "UTC+14:00 ライン諸島", 840, "Pacific/Kiritimati" },
 };
 #define NZONE	( (INT)( sizeof(zones) / sizeof(zones[0]) ) )
 
@@ -173,6 +195,7 @@ LOCAL BOOL	closing;
 LOCAL UW	was_look[64];
 LOCAL char	was_name[80];
 LOCAL INT	was_zone;
+LOCAL char	was_zone_name[DT_ZONE_MAX];
 LOCAL char	was_ntp[80];
 LOCAL BOOL	time_set;		/* the time was typed in */
 LOCAL INT	kana_now;		/* the input method in use when the window opened */
@@ -323,10 +346,14 @@ LOCAL void ntp_now( char *buf, INT max )
 	if ( ui_value(&ui, P_NTP_ON) != 0 ) (void)ui_text(&ui, P_NTP, buf, max);
 }
 
-LOCAL INT zone_index( INT min )
+/* The zone offered that is the system's: by its name, else by its offset */
+LOCAL INT zone_index( CONST char *name, INT min )
 {
 	INT	i, best = 0;
 
+	for ( i = 0; i < NZONE; i++ ) {
+		if ( strcmp(zones[i].tz, name) == 0 ) return i;
+	}
 	for ( i = 0; i < NZONE; i++ ) {
 		if ( zones[i].min == min ) return i;
 		if ( zones[i].min < min ) best = i;
@@ -360,6 +387,7 @@ LOCAL BOOL time_put( void )
 	TS_TM	tm;
 	TS_TIME	t;
 	INT	z = 0, fv[5];
+	ER	er, adm = E_NOEXS;
 	CONST INT mdays[12] = { 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
 
 	(void)ui_fields(&ui, P_TIME, fv, 5);
@@ -377,7 +405,32 @@ LOCAL BOOL time_put( void )
 	(void)dt_getsystz(&z);
 	if ( dt_mktime(&tm, &t) < E_OK ) return FALSE;
 	t -= (TS_TIME)z * 60;
-	return (BOOL)( dt_settime(t) >= E_OK );
+	{
+		/* in summer time the clock is an hour ahead of the standard offset */
+		TS_TIME	before = t - 3600;
+		TS_TM	k;
+
+		if ( dt_localtime(&before, &k) >= E_OK && k.tm_isdst ) t -= 3600;
+	}
+	er = dt_settime(t);
+	if ( er == E_OACV ) {
+		/* the clock is the administrator's: the password asked for, by the desktop */
+		adm = ts_admin_ask("時刻の設定", &ui.win);
+		if ( adm >= E_OK ) {
+			er = dt_settime(t);
+			(void)ob_end_adm();
+		}
+		if ( er == E_OACV ) {
+			/* the rest is kept; the time stays as the clock has it */
+			if ( adm != E_ABORT ) warn("時刻を設定する権限がありません。");
+			tm_putstring((CONST UB *)"userenv: the time not set: no right\n");
+			time_set = FALSE;
+			shown_min = -1;
+			time_show();
+			return TRUE;
+		}
+	}
+	return (BOOL)( er >= E_OK );
 }
 
 /* ---------------------------------------------------------------- the settings objects */
@@ -460,7 +513,18 @@ LOCAL ER ntp_write( CONST char *server )
 	n.ntp[sizeof(n.ntp) - 1] = 0;
 	len = cf_net_write(text, len, sizeof(text), &n);
 	if ( len < 0 ) return E_LIMIT;
-	return rec_write(SYSDEF_CONF_NET, text, len);	/* the system takes it as it sees it written */
+	er = rec_write(SYSDEF_CONF_NET, text, len);	/* the system takes it as it sees it written */
+	if ( er == E_OACV ) {
+		/* the network's settings are the administrator's */
+		ER	adm = ts_admin_ask("時刻サーバの設定", &ui.win);
+
+		if ( adm >= E_OK ) {
+			er = rec_write(SYSDEF_CONF_NET, text, len);
+			(void)ob_end_adm();
+		}
+		if ( er == E_OACV && adm != E_ABORT ) warn("時刻サーバを設定する権限がありません。");
+	}
+	return er;
 }
 
 LOCAL void read_start( void )
@@ -482,7 +546,8 @@ LOCAL void read_start( void )
 	ui_set_text(&ui, P_NAME, was_name);
 	(void)dt_getsystz(&z);
 	was_zone = z;
-	z = zone_index(z);
+	if ( dt_getsyszone(was_zone_name, sizeof(was_zone_name)) < 0 ) was_zone_name[0] = 0;
+	z = zone_index(was_zone_name, z);
 	ui_set_fields(&ui, P_ZONE, &z, 1);
 	was_ntp[0] = 0;
 	if ( rec_read(SYSDEF_CONF_NET, text, sizeof(text), &len) >= E_OK ) {
@@ -568,59 +633,42 @@ LOCAL ER tone_write( INT i, INT hz, INT ms )
 }
 
 /*
- * A sound object played as the system plays it: its record 1 when that
- * is a WAV file, else the tone its metadata says, written to the sound
- * device's object (each opening a channel of its own).
+ * A sound played as the system plays it, on the output the system has
+ * chosen: asked of the system object's record 8 (PLAY, beep.c), the
+ * tone the metadata now holds -- what is being set -- whatever record 1
+ * holds. The write answers whether it sounds; when it does not, the
+ * person is told.
  */
-#define PLAY_RATE	48000
-LOCAL H		play_pcm[PLAY_RATE * 3 / 2];
+LOCAL CONST char *CONST play_what[NSND] = { "buzzer", "press", "release" };
 
-LOCAL void play( INT i )
+LOCAL BOOL play( INT i )
 {
-	TS_UUID		u, dev;
-	ID		key, dk;
-	SZ		asz = 0;
-	SDPcmMode	m;
-	T_JSON		tone;
-	INT		hz = 2000, ms = 100, n, k, half, e;
-	W		v;
+	TS_UUID	u;
+	ID	key;
+	SZ	asz = 0;
+	char	cmd[32], s[64];
+	ER	er;
 
-	if ( snd_mlen[i] > 0 && tone_span(snd_meta[i], (INT)snd_mlen[i], &tone) ) {
-		hz = (INT)js_get_num(&tone, "hz", 2000);
-		ms = (INT)js_get_num(&tone, "ms", 100);
+	snprintf(cmd, sizeof(cmd), "PLAY %s tone", play_what[i]);
+	if ( ui_uuid(SYSDEF_SYSTEM, &u) < E_OK ) {
+		er = E_SYS;
+	} else if ( ( key = ob_opn_obj(&u, OB_OP_R | OB_OP_WRITE) ) < E_OK ) {
+		er = (ER)key;
+	} else {
+		er = ob_wri_rec(key, OB_SYS_SOUND, 0, cmd, (SZ)strlen(cmd), &asz);
+		ob_cls_obj(key);
 	}
-	/* a WAV file of its own is the system's to play; here the tone is what is being set */
-	if ( ui_uuid(snd_obj[i], &u) < E_OK || ob_fnd_nam((CONST UB *)"snda", &dev) < E_OK ) return;
-	if ( hz < 50 ) hz = 50;
-	if ( ms < 5 ) ms = 5;
-	n = PLAY_RATE / 1000 * ms;
-	if ( n > (INT)( sizeof(play_pcm) / sizeof(play_pcm[0]) ) ) n = (INT)( sizeof(play_pcm) / sizeof(play_pcm[0]) );
-	half = PLAY_RATE / hz / 2;
-	if ( half < 1 ) half = 1;
-	for ( k = 0; k < n; k++ ) {
-		e = ( k < 48 ) ? k : ( n - k < 48 ) ? n - k : 48;
-		play_pcm[k] = (H)( ( ( ( k / half ) & 1 ) ? -6000 : 6000 ) * e / 48 );
+	snprintf(s, sizeof(s), "userenv: %s %d\n", cmd, (INT)er);
+	tm_putstring((CONST UB *)s);
+	if ( er >= E_OK ) return TRUE;
+	if ( er == E_NOSPT || er == E_NOEXS ) {
+		warn("音を出せる出力先がありません。");
+	} else if ( er == E_OACV ) {
+		warn("音を鳴らす権限がありません。");
+	} else {
+		warn("音を鳴らせませんでした。");
 	}
-	(void)key;
-	dk = ob_opn_obj(&dev, OB_OP_R | OB_OP_WRITE);
-	if ( dk < E_OK ) return;
-	memset(&m, 0, sizeof(m));
-	m.sampling = PCMST48K;
-	m.datafmt = PCMFmt16;
-	v = n * 2;
-	if ( ob_wri_rec(dk, OB_SND_MODE, 0, &m, sizeof(m), &asz) >= E_OK
-	  && ob_wri_rec(dk, OB_SND_BUFSZ, 0, &v, sizeof(v), &asz) >= E_OK
-	  && ob_wri_rec(dk, OB_SND_PCM, 0, play_pcm, n * 2, &asz) >= E_OK
-	  && ob_wri_rec(dk, OB_SND_ENDCNT, 0, &v, sizeof(v), &asz) >= E_OK ) {
-		v = PCM_PLAY;
-		if ( ob_wri_rec(dk, OB_SND_CTL, 0, &v, sizeof(v), &asz) >= E_OK ) {
-			for ( k = 0; k < ms / 10 + 50; k++ ) {
-				(void)tk_dly_tsk(10);
-				if ( ob_rea_rec(dk, OB_SND_CTL, 0, &v, sizeof(v), &asz) < E_OK || v == PCM_STOP ) break;
-			}
-		}
-	}
-	ob_cls_obj(dk);
+	return FALSE;
 }
 
 /* The metadata as it was when the window opened, back */
@@ -704,7 +752,7 @@ LOCAL BOOL changed_any( BOOL *p_name )
 	(void)ui_fields(&ui, P_ZONE, &zone, 1);
 	*p_name = (BOOL)( strcmp(was_name, name) != 0 );
 	if ( *p_name || time_set || snd_changed || strcmp(ntp, was_ntp) != 0
-	  || zones[zone].min != was_zone || kana_next != kana_now ) {
+	  || zones[zone].min != was_zone || strcmp(zones[zone].tz, was_zone_name) != 0 || kana_next != kana_now ) {
 		return TRUE;
 	}
 	for ( i = 0; i < cf_user_nitem && i < 64; i++ ) {
@@ -723,7 +771,7 @@ LOCAL void undo( void )
 		if ( cf_user_items[i].look == LK_KANA ) continue;
 		if ( wm_look(cf_user_items[i].look) != was_look[i] ) (void)wm_set_look(cf_user_items[i].look, was_look[i]);
 	}
-	(void)dt_setsystz(was_zone);
+	(void)dt_setsyszone(was_zone_name, was_zone);
 	tone_undo();
 }
 
@@ -741,7 +789,15 @@ LOCAL BOOL keep( void )
 	if ( time_set && !time_put() ) return FALSE;
 	(void)wm_set_look(LK_KANA, ( ui_value(&ui, P_INPUT) == 1 ) ? 1 : 0);
 	er = user_write();
-	if ( er >= E_OK && strcmp(ntp, was_ntp) != 0 ) er = ntp_write(ntp);
+	if ( er >= E_OK && strcmp(ntp, was_ntp) != 0 ) {
+		ER	e = ntp_write(ntp);
+
+		if ( e == E_OACV ) {
+			tm_putstring((CONST UB *)"userenv: the time server not set: no right\n");
+		} else {
+			er = e;
+		}
+	}
 	if ( er < E_OK ) {
 		CONST char *l[3] = { "『ユーザ情報』に設定した内容を保存できません。", "設定した内容は今回限りとなります。", "" };
 
@@ -841,7 +897,12 @@ LOCAL void changed( INT id )
 		break;
 	case P_ZONE:
 		(void)ui_fields(&ui, P_ZONE, &z, 1);
-		(void)dt_setsystz(zones[z].min);
+		if ( dt_setsyszone(zones[z].tz, zones[z].min) >= E_OK ) {
+			char	line[80];
+
+			snprintf(line, sizeof(line), "userenv: zone %s\n", zones[z].tz);
+			tm_putstring((CONST UB *)line);
+		}
 		shown_min = -1;
 		time_show();
 		break;
@@ -889,11 +950,10 @@ int main( void )
 				changed(id);
 				break;
 			case UI_EV_BUTTON:
-				if ( id == P_BEEP ) play(0);
-				if ( id == P_CLICK ) {
-					play(1);
-					(void)tk_dly_tsk(100);
-					play(2);
+				if ( id == P_BEEP ) (void)play(0);
+				if ( id == P_CLICK && play(1) ) {
+					(void)tk_dly_tsk(150);
+					(void)play(2);
 				}
 				break;
 			default:

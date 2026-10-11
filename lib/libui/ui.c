@@ -118,7 +118,7 @@ LOCAL ER panel_make( UI *u, INT num, INT x, INT y, TS_UUID *p_pnl, ID *p_key )
 	c.json = (CONST UB *)json;
 	c.jsonsz = (SZ)strlen(json);
 	if ( ob_cre_obj(&c, p_pnl) < E_OK ) return E_OBJ;
-	key = ob_opn_obj(p_pnl, OB_OP_ALL);
+	key = ob_opn_obj(p_pnl, OB_OP_R | OB_OP_W | OB_OP_PROT);
 	if ( key < E_OK ) {
 		(void)ob_del_obj(p_pnl);
 		return (ER)key;
@@ -154,7 +154,7 @@ LOCAL void parts_open( UI *u )
 		  || asz < (SZ)sizeof(pu) ) {
 			break;
 		}
-		p->key = ob_opn_obj(&pu, OB_OP_ALL);
+		p->key = ob_opn_obj(&pu, OB_OP_R | OB_OP_W | OB_OP_PROT);
 		p->num = 0;
 		p->kind = 0;
 		if ( p->key > 0 && ob_get_atr(p->key, (UB *)j, sizeof(j) - 1, &asz) >= E_OK ) {
@@ -197,6 +197,39 @@ LOCAL UIPART *part( UI *u, INT num )
 
 LOCAL char	ui_prog[40];
 
+LOCAL UINT	ui_more_attr = 0;		/* what ui_attr asked for the next window */
+
+EXPORT void ui_attr( UINT attr )
+{
+	ui_more_attr = attr;
+}
+
+EXPORT void ui_bar( UI *u, INT lo, INT hi, INT clo, INT chi )
+{
+	T_OBWBAR	b;
+	SZ		asz = 0;
+
+	memset(&b, 0, sizeof(b));
+	b.lo = lo;
+	b.hi = hi;
+	b.clo = clo;
+	b.chi = chi;
+	(void)ob_wri_rec(u->kw, OB_WR_BARS, 0, &b, sizeof(b), &asz);
+}
+
+EXPORT void ui_work( UI *u, INT *p_w, INT *p_h )
+{
+	T_OBWPOS	wp;
+	SZ		asz = 0;
+
+	*p_w = u->w;
+	*p_h = u->h;
+	if ( ob_rea_rec(u->kw, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz) >= E_OK ) {
+		*p_w = wp.wright - wp.wleft;
+		*p_h = wp.wbottom - wp.wtop;
+	}
+}
+
 EXPORT void ui_icon( CONST char *prog )
 {
 	strncpy(ui_prog, prog, sizeof(ui_prog) - 1);
@@ -232,10 +265,11 @@ EXPORT ER ui_open( UI *u, CONST char *box, INT num, INT x, INT y )
 	}
 
 	if ( ui_prog[0] != 0 ) {
-		snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":3,\"icon\":\"%s\"}",
-			 x, y, x + u->w + 16, y + u->h + 34, ui_prog);
+		snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":%u,\"icon\":\"%s\"}",
+			 x, y, x + u->w + 16, y + u->h + 34, 3U | ui_more_attr, ui_prog);
 	} else {
-		snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":3}", x, y, x + u->w + 16, y + u->h + 34);
+		snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":%u}", x, y, x + u->w + 16,
+			 y + u->h + 34, 3U | ui_more_attr);
 	}
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_WINDOW;
@@ -248,7 +282,7 @@ EXPORT ER ui_open( UI *u, CONST char *box, INT num, INT x, INT y )
 		(void)ob_del_obj(&pnl);
 		return E_OBJ;
 	}
-	u->kw = ob_opn_obj(&u->win, OB_OP_ALL);
+	u->kw = ob_opn_obj(&u->win, OB_OP_R | OB_OP_W | OB_OP_PROT);
 	/* the work area exactly the panel's size, whatever the frame takes */
 	if ( u->kw > 0 && ob_rea_rec(u->kw, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz) >= E_OK ) {
 		wp.right = wp.left + u->w + ( ( wp.right - wp.left ) - ( wp.wright - wp.wleft ) );
@@ -277,6 +311,9 @@ EXPORT ER ui_open( UI *u, CONST char *box, INT num, INT x, INT y )
 		? ob_opn_obj(&u->ch, OB_OP_READ | OB_OP_WRITE | OB_O_NOWAIT) : E_NOEXS;
 	memset(&req, 0, sizeof(req));
 	req.events = OB_E_CLOSE | OB_E_DELETE | OB_E_PRESS | OB_E_KEY | OB_E_DROP;
+	if ( ui_more_attr != 0 ) {
+		req.events |= OB_E_WHEEL | OB_E_SCROLL | OB_E_REDRAW;	/* its bar and its size */
+	}
 	if ( u->port <= 0 || ob_ntf_evt(u->kw, OB_REC_ANY, &req, u->port) <= 0 ) {
 		ui_close(u);
 		return E_OBJ;
@@ -352,6 +389,14 @@ EXPORT INT ui_event( UI *u, CONST T_OBNTM *m, INT *p_num )
 		return UI_EV_KEY;
 	case OB_E_DROP:
 		return UI_EV_DROP;
+	case OB_E_WHEEL:
+		*p_num = m->dz;
+		return UI_EV_WHEEL;
+	case OB_E_SCROLL:
+		*p_num = m->x;
+		return ( m->code == OB_BAR_R ) ? UI_EV_SCROLL : UI_EV_NONE;
+	case OB_E_REDRAW:
+		return UI_EV_SIZE;
 	case OB_E_CHANGE:
 		num = num_of(u, m);
 		p = part(u, num);
@@ -558,7 +603,7 @@ EXPORT INT ui_ask( UI *u, INT num, CONST char *const *lines, INT nline )
 		c.sub = OB_S_WINDOW;
 		c.json = (CONST UB *)json;
 		c.jsonsz = (SZ)strlen(json);
-		if ( ob_cre_obj(&c, &q.win) < E_OK || ( q.kw = ob_opn_obj(&q.win, OB_OP_ALL) ) <= 0 ) {
+		if ( ob_cre_obj(&c, &q.win) < E_OK || ( q.kw = ob_opn_obj(&q.win, OB_OP_R | OB_OP_W | OB_OP_PROT) ) <= 0 ) {
 			ob_cls_obj(q.pk);
 			(void)ob_del_obj(&q.pnl);
 			return 0;
@@ -648,7 +693,7 @@ EXPORT ER ui_dlg_open( UI *u, INT num, UI *q )
 	c.name = (CONST UB *)title;
 	c.json = (CONST UB *)json;
 	c.jsonsz = (SZ)strlen(json);
-	if ( ob_cre_obj(&c, &q->win) < E_OK || ( q->kw = ob_opn_obj(&q->win, OB_OP_ALL) ) <= 0 ) {
+	if ( ob_cre_obj(&c, &q->win) < E_OK || ( q->kw = ob_opn_obj(&q->win, OB_OP_R | OB_OP_W | OB_OP_PROT) ) <= 0 ) {
 		ob_cls_obj(q->pk);
 		(void)ob_del_obj(&q->pnl);
 		return E_OBJ;

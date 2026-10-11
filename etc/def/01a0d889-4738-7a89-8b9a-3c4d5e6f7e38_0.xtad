@@ -1,0 +1,11 @@
+<tad version="1.0" encoding="UTF-8" filename="マイクロカードの項目の書体">
+<document>
+<p>マイクロカードの項目の書体</p>
+<p>設計画面で文字の項目の書体を選ぶ。メニューの定義。</p>
+</document>
+<menu>
+<item code="face.standard">標準</item>
+<item code="face.mincho">明朝</item>
+<item code="face.gothic">ゴシック</item>
+</menu>
+</tad>

@@ -25,6 +25,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sched.h>
+#include <pthread.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -58,9 +59,15 @@ int creat( const char *path, mode_t mode )
 	return _open(path, O_WRONLY | O_CREAT | O_TRUNC);
 }
 
+extern int	ts_memfd_is( int fd );
+extern int	ts_memfd_dup( int fd );
+
+/* Only a memory object's descriptor (memfd_create) can be duplicated */
 int dup( int fd )
 {
-	(void)fd;
+	if ( ts_memfd_is(fd) ) {
+		return ts_memfd_dup(fd);
+	}
 	errno = EMFILE;
 	return -1;
 }
@@ -123,10 +130,40 @@ uid_t geteuid( void )
 	return 0;
 }
 
-/* The tasks of a process are scheduled by the kernel's priorities alone */
+/* The user and group as POSIX names them: one of each, the same as the effective ones */
+uid_t getuid( void )
+{
+	return 0;
+}
+
+gid_t getgid( void )
+{
+	return 0;
+}
+
+gid_t getegid( void )
+{
+	return 0;
+}
+
+/*
+ * The calling thread's policy, as pthread_setschedparam maps it onto the
+ * kernel's two bands (lib/libpthread, design 4.3.1); pid 0 or the
+ * process's own
+ */
 int sched_setscheduler( pid_t pid, int policy, const struct sched_param *param )
 {
-	(void)pid; (void)policy; (void)param;
+	int	e;
+
+	if ( pid != 0 && pid != getpid() ) {
+		errno = ESRCH;
+		return -1;
+	}
+	e = pthread_setschedparam(pthread_self(), policy, param);
+	if ( e != 0 ) {
+		errno = e;
+		return -1;
+	}
 	return 0;
 }
 

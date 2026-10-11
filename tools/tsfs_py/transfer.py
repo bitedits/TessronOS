@@ -64,16 +64,26 @@ class ObjectSet(object):
         self.pins = 0
 
 
-def scan(dirs, problems):
+def scan(dirs, problems, over=0, exclude=()):
     """Every object set in the directories, {UUID: ObjectSet}. A file
-    that two directories both have is taken from the first."""
+    that two directories both have is taken from the first. The first
+    `over` directories replace what the others have on purpose, so a
+    file of theirs that another directory has too is not a problem.
+    The files named in `exclude` (names, not paths) are not taken: the
+    records of a program the build leaves out."""
     sets = {}
+    exclude = set(exclude)
+    over_dirs = set(dirs[:over])
+
+    def replaced(path):
+        return os.path.dirname(path) in over_dirs
+
     for d in dirs:
         if not os.path.isdir(d):
             raise TsfsError("%s is not a directory" % d)
         for name in sorted(os.listdir(d)):
             path = os.path.join(d, name)
-            if not os.path.isfile(path):
+            if name in exclude or not os.path.isfile(path):
                 continue
             c = metamod.classify(name)
             if c is None:
@@ -88,13 +98,15 @@ def scan(dirs, problems):
             if kind == "json":
                 if s.json is None:
                     s.json = path
-                else:
+                elif not replaced(s.json):
                     problems.append("%s: %s.json is taken from %s"
                                     % (path, u, s.json))
             elif kind == "rec":
                 pos, rk = det
                 if pos in s.recs:
-                    if s.recs[pos][0] != rk:
+                    if replaced(s.recs[pos][1]):
+                        pass
+                    elif s.recs[pos][0] != rk:
                         s.problem = "record %d is both .xtad and .bin" % pos
                     else:
                         problems.append("%s: record %d is taken from %s"
@@ -104,6 +116,8 @@ def scan(dirs, problems):
             else:
                 pos, resno, ext = det
                 if (pos, resno) in s.res:
+                    if replaced(s.res[(pos, resno)][1]):
+                        continue
                     problems.append("%s: resource (%d, %d) is taken from %s"
                                     % (path, pos, resno, s.res[(pos, resno)][1]))
                     continue
@@ -193,14 +207,17 @@ def prepare(s):
     s.links = links
 
 
-def build(vol, dirs, roots=None, problems=None):
+def build(vol, dirs, roots=None, problems=None, over=0, hold=(), exclude=()):
     """Put every object set of the directories on a volume that has just
     been made. `roots` maps "root", "sysbox", "domain" to UUIDs; each
-    one the superblock names is a hold on its object. Answers (objects
-    written, [(UUID, why) skipped])."""
+    one the superblock names is a hold on its object. An object whose
+    metadata is in one of the `hold` directories and that no link of the
+    volume reaches is held once as well: the system finds it by its UUID
+    or through a program's metadata, not through a link, and it is not a
+    屑実身. Answers (objects written, [(UUID, why) skipped])."""
     if problems is None:
         problems = []
-    sets = scan(dirs, problems)
+    sets = scan(dirs, problems, over, exclude)
     skipped = []
     for u in sorted(sets, key=lambda x: x.bytes):
         prepare(sets[u])
@@ -223,6 +240,12 @@ def build(vol, dirs, roots=None, problems=None):
         for _vobjid, target, _rid in s.links:
             if target in counts:
                 counts[target] += 1
+    held = set(os.path.abspath(d) for d in hold)
+    for u, s in good.items():
+        if counts[u] == 0 and s.json is not None \
+           and os.path.abspath(os.path.dirname(s.json)) in held:
+            pins[u] += 1
+            counts[u] += 1
 
     index = []
     for u in sorted(good, key=lambda x: x.bytes):
@@ -238,6 +261,25 @@ def build(vol, dirs, roots=None, problems=None):
     sb.domain_uuid = roots.get("domain") or NIL_UUID
     vol.sb_dirty = True
     return len(index), skipped
+
+
+def content_bytes(dirs, exclude=()):
+    """The bytes of the files of the directories a volume would be made
+    of, a file the first of them has counted once"""
+    seen, total = set(), 0
+    exclude = set(exclude)
+    for d in dirs:
+        if not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            path = os.path.join(d, name)
+            if name in exclude or name in seen or not os.path.isfile(path):
+                continue
+            if metamod.classify(name) is None:
+                continue
+            seen.add(name)
+            total += os.path.getsize(path)
+    return total
 
 
 def write_object(vol, s, here):

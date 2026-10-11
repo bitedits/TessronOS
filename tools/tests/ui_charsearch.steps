@@ -1,0 +1,143 @@
+# 文字検索 (design 11.19), for tools/ui_run.py: the accessory opened from its program
+# (its work area at 186,98; the strip it draws under the panel from 234), the code
+# list of 日本基本 and of 各国, 漢字検索 by a reading and the strokes, a double press
+# for 文字情報, the elements to choose from, 記号検索 by a name, 入力 into the text
+# behind it at its caret and as テキスト形式TRONコード, the related characters of 號,
+# the size of the cells from the menu, and 入力 into the box of 単語登録 that has the keys.
+open 01a0d8c4-5350-7a61-8d72-9fab0c1d5050
+expect charsearch: ready
+wait 800
+win 文字検索
+shot cs_code
+# 各国: the row of U+3042; 次頁 shows the rest of it, then the next row
+click 656 145
+click 340 180
+text 3042
+click 470 180
+expect charsearch: row 各国 0-48
+wait 300
+shot cs_ucs
+click 630 180
+wait 300
+click 630 180
+expect charsearch: row 各国 0-49
+# 日本基本 1-4: the hiragana, か゚ and the others of JIS X 0213 in 水色
+click 310 145
+click 340 180
+key 4D
+key 2A
+key 2A
+key 2A
+key 2A
+text 1-4-1
+click 470 180
+expect charsearch: row 日本基本 1-4
+wait 300
+shot cs_jis
+# 漢字検索: こう =4, the reading in 日本語 and the strokes in 英字
+click 318 114
+wait 300
+click 440 146
+key 88
+text kou
+key 28
+key 39
+key 2C
+key 2D 2
+text 4
+click 686 146
+expect charsearch: found kanji 7 for "こう =4"
+wait 300
+shot cs_kanji
+# 公 (the fourth of 19 a line), its information by a double press
+dclick 306 258
+expect charsearch: info 公
+wait 300
+shot cs_info
+# the elements to choose from: 一 added to the conditions
+click 318 114
+wait 300
+click 774 146
+wait 300
+shot cs_elems
+click 233 255
+expect charsearch: element 一
+click 774 146
+# 記号検索: heart
+click 394 114
+wait 300
+click 368 146
+text heart
+click 774 146
+expect charsearch: found symbol
+wait 300
+shot cs_symbol
+# 入力: the text behind given the caret, 文字検索 in front again, 公 typed into it
+click 318 114
+wait 300
+click 306 258
+expect charsearch: picked 公
+click 1000 493
+wait 300
+click 400 84
+wait 300
+click 774 212
+expect charsearch: typed 公 text
+expect desktop: typed 公 into window
+wait 300
+shot cs_typed
+# its テキスト形式TRONコード, from 文字情報
+click 470 114
+wait 300
+click 620 146
+expect charsearch: typed &T213878; text
+wait 300
+shot cs_typed_code
+# 號 by its code (the 43rd, 17 a line), and its information: 号 its simplified form
+click 232 114
+wait 300
+click 340 180
+key 4D
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+text 1-73-43
+click 470 180
+expect charsearch: picked 號
+wait 300
+dclick 530 322
+expect charsearch: info 號
+wait 300
+shot cs_info_var
+# the menu: the cells twice the size
+click 500 500 1
+wait 600
+shot cs_menu
+click 520 686
+expect charsearch: zoom z2
+click 232 114
+wait 500
+shot cs_zoom
+# into the box of 単語登録 that has the keys
+click 318 114
+wait 200
+open 01a0d8c4-5312-7c23-8d34-5e6f7b8c9d12
+expect worddic: ready
+wait 800
+click 507 166
+wait 200
+click 800 84
+wait 300
+click 774 212
+expect desktop: typed 號 into a box
+key 08 1
+expect charsearch: closed
+wait 500
+shot cs_box
+key 08 1
+expect worddic: closed
+# nothing it did was refused for want of a right
+absent !OACV!

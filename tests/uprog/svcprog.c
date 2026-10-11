@@ -108,6 +108,81 @@
  *	SP_FAULT fault, after arg[2] milliseconds: arg[1] 0 writes to an
  *		address of its half that is not mapped (FAULT_VA), 1 runs an
  *		instruction that is none (UDF), 2 jumps to that address.
+ *	SP_FLTBACK a fault handed back to the program (ts_def_flt): a
+ *		write to FAULT_VA and a read a page above it go to its entry,
+ *		which goes back past the access (ts_flt_ret); the address is
+ *		the one met, a register of FP/SIMD the entry changed is put
+ *		back, and the entry taken away leaves it as before.
+ *	SP_USBDEV a USB device of the program's own (us_, class 12): the
+ *		FTDI serial converter the test plugged in is listed and its
+ *		device descriptor read; opened (and not twice); a vendor
+ *		request and GET_STATUS on its control endpoint; bytes written
+ *		to its bulk OUT endpoint; the bytes its line gives read
+ *		from its bulk IN endpoint (after the two of its status); an
+ *		endpoint it does not
+ *		have refused; the halt of one cleared; the device reset
+ *		and answering again on both endpoints; closed;
+ *		a keyboard, which a class driver has, not opened.
+ *	SP_TRAY	put a set in the tray, read what the tray says of it and
+ *		its bytes back, add a record to it, and hand the tray calls
+ *		pointers that are not the process's; the set is left in the
+ *		tray for the test to read.
+ *	SP_SURF	make a window "ktsurf" and draw it through a surface of its
+ *		work area (wm_obj_surf, wm_obj_put): blue, put whole; the
+ *		same surface when asked again; calls with bad arguments
+ *		refused. Then at each message from the test: 1 (the window
+ *		was made larger) the old surface is still written and put,
+ *		a new one of the new size asked for, the old one written
+ *		again (it goes nowhere, and nothing faults) and the new one
+ *		filled green and put; 2 (the window was closed) the surface
+ *		is written (nothing faults) and putting it is refused, and
+ *		it ends with 0; 3 it draws without end, for the test to end
+ *		it. It makes a semaphore each time it is ready.
+ *	SP_PAN	the kernel's way to its pages (PAN): a word of its own read
+ *		by the kernel once made sure of (TSN_TM_PAN_PROBE, a kernel
+ *		built for its tests), and one that is not its own refused;
+ *		a message buffer, the time, a file's state and a line on
+ *		the console as any program uses them; then the word read by
+ *		the kernel straight, which PAN refuses: it ends there with
+ *		TS_ABORT_FAULT, and returns 0 only where there is no PAN.
+ *	SP_RIGHTS the calls that act on the whole system: logged in as the
+ *		user in arg[1..4], the time, the look of the windows, the
+ *		network interface and the volumes are refused it; the zone
+ *		is let when arg[5] has bit 0, the key layouts when it has
+ *		bit 1, and refused otherwise. With no user, as the
+ *		administrator, they are let. What is set is set as it was.
+ *	SP_CRED	started as the desktop starts a program (ktest_cred): it
+ *		acts as 利用者, not as an administrator; the time, the
+ *		network, the volumes, the clock and the network's settings
+ *		are refused it, and what is the person's to set -- the zone,
+ *		the key layouts, an entry of ユーザ環境設定, the user
+ *		information, the machine's settings, the system object -- is
+ *		let. Then it waits for the administrator's rights the test
+ *		gives it, sets the time, gives them back and is refused
+ *		again; and once more, keeping them past the time they were
+ *		given for, after which it is refused. arg[1] says how long
+ *		that was (ms).
+ *	SP_BGWAIT no window: made ready, it sleeps until it is ended
+ *		(ktest_fq, the list of 強制終了).
+ *	SP_OBSTUCK with a window ("ktstuck") and made ready, it opens a
+ *		key to a real object and closes it every 10 ms, without
+ *		end: once the test holds the objects' lock it stays inside
+ *		that call (ktest_fq, the second step of 強制終了).
+ *	SP_TONE	a tone of arg[1] Hz for arg[2] ms, played on the sound
+ *		device's object with a channel of its own, over and over
+ *		(ui_sndmix: two of these at once are two programs to the
+ *		mixer).
+ *	SP_ADMINASK asks the desktop for the administrator's rights
+ *		(ts_admin_ask), which shows its panel for it; ends with what
+ *		came of it (ktest_fq, a panel the desktop shows for it).
+ *	SP_TCHURN a task of its own made, run and deleted arg[1] times;
+ *		each one's user stack is where the one before had it
+ *		(ktest_prcobj).
+ *	SP_SLICE arg[1] 0: five tasks of its priority spin for arg[2] ms
+ *		beside one more that notes the longest it went without
+ *		running, which is the exit code (ms). arg[1] 1: one task
+ *		sleeps 2 ms over and over for arg[2] ms and ends with the
+ *		longest it woke late (ms). (ktest_prcobj, design 4.3.1)
  */
 
 #include <config.h>		/* first: the core's types as wide as the kernel's */
@@ -118,7 +193,14 @@
 #include <ts/proc.h>
 #include <ts/dt.h>
 #include <ts/hid.h>
+#include <ts/usb.h>
 #include <ts/svc.h>
+#include <ts/tray.h>
+#include <ts/wm.h>
+#include <ts/look.h>
+#include <ts/keymap.h>
+#include <ts/sysdef.h>
+#include <ts/snd.h>
 
 IMPORT ER ts_get_mono( UD *p_ns );
 
@@ -149,7 +231,21 @@ IMPORT ER ts_get_mono( UD *p_ns );
 #define SP_PAUSEWIN	25
 #define SP_FAULT	26
 #define SP_DEVOB	27
+#define SP_TRAY		28
+#define SP_SURF		29
+#define SP_PAN		30
+#define SP_RIGHTS	31
+#define SP_CRED		32
+#define SP_BGWAIT	33
+#define SP_OBSTUCK	34
+#define SP_ADMINASK	35
+#define SP_FLTBACK	36
+#define SP_USBDEV	37
+#define SP_TONE		38
+#define SP_TCHURN	39
+#define SP_SLICE	40
 #define LIST_MAX	128
+#define MNT_MAX		32		/* mounts looked at: the system's few and a test's */
 #define BIG_SZ		( 160 * 1024 )
 #define KILL_SZ		( 640 * 1024 )		/* more than the gateway's pieces */
 
@@ -157,7 +253,7 @@ IMPORT ER ts_get_mono( UD *p_ns );
 #define KERNEL_PTR	((void *)0xFFFF000000100000UL)	/* not the process's */
 
 LOCAL UINT	arg[8];
-LOCAL T_FSMNT	mnt[FS_MAX_MOUNT];
+LOCAL T_FSMNT	mnt[MNT_MAX];
 LOCAL T_TSMSG	msg;
 LOCAL TS_UUID	list[LIST_MAX];
 LOCAL T_OBNTM	ntm;
@@ -286,9 +382,9 @@ LOCAL INT net( void )
 	if ( ts_get_random(KERNEL_PTR, 16) != E_MACV ) return 20;
 
 	/* the mounts, listed */
-	n = fs_mounts(mnt, FS_MAX_MOUNT);
+	n = fs_mounts(mnt, MNT_MAX);
 	if ( n < 1 ) return 21;
-	for ( i = 0; i < n && i < FS_MAX_MOUNT; i++ ) {
+	for ( i = 0; i < n && i < MNT_MAX; i++ ) {
 		if ( same(mnt[i].path, "/boot") && same(mnt[i].fimp, "fatfs") ) boot = TRUE;
 	}
 	if ( !boot ) return 22;
@@ -422,8 +518,8 @@ LOCAL INT mount( void )
 	if ( fs_detach_dev(krw) != EX_NOENT ) return 66;
 
 	/* what the system mounted stays: /boot, through its object from the list */
-	n = fs_mounts(mnt, FS_MAX_MOUNT);
-	for ( i = 0; i < n && i < FS_MAX_MOUNT; i++ ) {
+	n = fs_mounts(mnt, MNT_MAX);
+	for ( i = 0; i < n && i < MNT_MAX; i++ ) {
 		if ( same(mnt[i].path, "/boot") ) {
 			boot = mnt[i].obj;
 			fboot = TRUE;
@@ -542,8 +638,8 @@ LOCAL INT limits( void )
 	if ( fs_open(PROG, O_RDONLY) != EX_MFILE ) return 520;
 
 	/* each is an alias of a file on the volume of a device object */
-	n = fs_mounts(mnt, FS_MAX_MOUNT);
-	for ( i = 0; i < n && i < FS_MAX_MOUNT; i++ ) {
+	n = fs_mounts(mnt, MNT_MAX);
+	for ( i = 0; i < n && i < MNT_MAX; i++ ) {
 		if ( same(mnt[i].path, "/boot") ) {
 			boot = mnt[i].obj;
 			fboot = TRUE;
@@ -1556,6 +1652,84 @@ LOCAL INT pausewin( void )
 	return 2502;
 }
 
+/* Every pixel of a surface one colour */
+LOCAL void surf_fill( CONST T_WMSURF *s, UW colour )
+{
+	INT	x, y;
+
+	for ( y = 0; y < s->height; y++ ) {
+		UW	*row = (UW *)( (UB *)s->addr + (SZ)y * s->pitch );
+
+		for ( x = 0; x < s->width; x++ ) row[x] = colour;
+	}
+}
+
+LOCAL INT surf( void )
+{
+	CONST char	*j = "{\"rect\":[300,200,560,380],\"attr\":7}";
+	T_WMSURF	s, s2;
+	T_DPRECT	r;
+	T_OBCRE		c;
+	TS_UUID		win;
+	UINT		n = 0;
+	ID		kw;
+
+	memset(&c, 0, sizeof(c));
+	c.type = OB_T_WINDOW;
+	c.sub = OB_S_WINDOW;
+	c.name = (CONST UB *)"ktsurf";
+	c.json = (CONST UB *)j;
+	for ( c.jsonsz = 0; j[c.jsonsz] != '\0'; c.jsonsz++ ) ;
+	if ( ob_cre_obj(&c, &win) != E_OK ) return 2900;
+	kw = ob_opn_obj(&win, OB_OP_R | OB_OP_W);
+	if ( kw <= 0 ) return 2901;
+	if ( wm_obj_surf(kw, &s) != E_OK ) return 2902;
+	if ( s.addr == NULL || s.width <= 0 || s.height <= 0 || s.pitch != s.width * 4 ) return 2903;
+	surf_fill(&s, 0x0000C0);
+	r.left = 0;
+	r.top = 0;
+	r.right = s.width;
+	r.bottom = s.height;
+	if ( wm_obj_put(kw, &r, 1) != E_OK ) return 2904;
+	if ( wm_obj_surf(kw, &s2) != E_OK || s2.addr != s.addr || s2.serial != s.serial ) return 2905;
+	if ( wm_obj_put(kw, &r, 0) != E_PAR || wm_obj_put(kw, &r, WM_PUT_MAX + 1) != E_PAR ) return 2906;
+	if ( wm_obj_put(kw, KERNEL_PTR, 1) != E_MACV ) return 2907;
+	if ( wm_obj_surf(kw, KERNEL_PTR) != E_MACV ) return 2908;
+	if ( wm_obj_surf(kw, (T_WMSURF *)(void *)same) != E_MACV ) return 2909;	/* read only */
+	if ( !ready() ) return 2910;
+	for ( ;; ) {
+		if ( ts_rcv_msg(&msg, 20000) != E_OK ) return 2911;
+		switch ( msg.type ) {
+		case 1:
+			surf_fill(&s, 0xC00000);
+			if ( wm_obj_put(kw, &r, 1) != E_OK ) return 2912;
+			if ( wm_obj_surf(kw, &s2) != E_OK ) return 2913;
+			if ( s2.addr == s.addr || s2.serial == s.serial || s2.width <= s.width
+			  || s2.height <= s.height ) return 2914;
+			surf_fill(&s, 0x123456);
+			s = s2;
+			surf_fill(&s, 0x00C000);
+			r.right = s.width;
+			r.bottom = s.height;
+			if ( wm_obj_put(kw, &r, 1) != E_OK ) return 2915;
+			if ( !ready() ) return 2916;
+			break;
+		case 2:
+			surf_fill(&s, 0x654321);
+			if ( wm_obj_put(kw, &r, 1) >= E_OK ) return 2917;
+			if ( wm_obj_surf(kw, &s2) >= E_OK ) return 2918;
+			return 0;
+		case 3:
+			for ( ;; n++ ) {
+				surf_fill(&s, 0x010203 * n);
+				(void)wm_obj_put(kw, &r, 1);
+			}
+		default:
+			return 2919;
+		}
+	}
+}
+
 /* The exceptions the desktop tells of (design 5.5): the address and the three kinds */
 #define FAULT_VA	0x0000200000001230UL
 
@@ -1576,6 +1750,98 @@ LOCAL INT faults( void )
 		return 2601;
 	}
 	return 2600;
+}
+
+LOCAL volatile INT	flt_seen;
+LOCAL volatile UD	flt_far;
+
+/* The entry for faults: past the access, after spoiling FP/SIMD registers the kernel puts back */
+LOCAL void flt_take( T_TSFLT *c )
+{
+	flt_seen++;
+	flt_far = c->far;
+	c->pc += 4;
+	__asm__ volatile ( "movi v8.2d, #0\n\tmovi v0.2d, #0" ::: "v0", "v8" );
+	(void)ts_flt_ret(c);
+	for ( ;; ) ;
+}
+
+LOCAL INT fltback( void )
+{
+	UD	d8 = 0;
+
+	if ( ts_def_flt(flt_take) != E_OK ) return 3600;
+	__asm__ volatile ( "fmov d8, %0" :: "r"(0x4045000000000000ULL) : "v8" );	/* 42.0 */
+	*(volatile UW *)FAULT_VA = 1;
+	__asm__ volatile ( "fmov %0, d8" : "=r"(d8) );
+	if ( flt_seen != 1 ) return 3601;
+	if ( flt_far != FAULT_VA ) return 3602;
+	if ( d8 != 0x4045000000000000ULL ) return 3603;
+	(void)*(volatile UW *)( FAULT_VA + 0x1000 );
+	if ( flt_seen != 2 || flt_far != FAULT_VA + 0x1000 ) return 3604;
+	if ( ts_def_flt(NULL) != E_OK ) return 3605;
+	if ( ts_def_flt((void (*)( T_TSFLT * ))0x10) != E_PAR ) return 3606;
+	return 0;
+}
+
+/* A line on the console: the words and a number */
+LOCAL void say( CONST char *w, INT v )
+{
+	char	b[80];
+	INT	n = 0, i, neg = ( v < 0 );
+	char	d[12];
+	UINT	u = neg ? (UINT)-v : (UINT)v;
+
+	while ( *w != 0 && n < 60 ) b[n++] = *w++;
+	if ( neg ) b[n++] = '-';
+	i = 0;
+	do { d[i++] = (char)( '0' + u % 10 ); u /= 10; } while ( u != 0 );
+	while ( i > 0 ) b[n++] = d[--i];
+	b[n++] = '\n';
+	b[n] = 0;
+	(void)tm_putstring((CONST UB *)b);
+}
+
+LOCAL INT usbdev( void )
+{
+	static T_USBDEV	l[32];
+	UB		d[18], buf[64];
+	UB		reset[8] = { 0x40, 3, 0x38, 0x41, 0, 0, 0, 0 };	/* FTDI: SIO_SET_BAUD_RATE, 9600 */
+	UB		status[8] = { 0x80, 0, 0, 0, 0, 0, 2, 0 };	/* GET_STATUS of the device */
+	char		got[64];
+	INT		n, i, ud, dev = 0, kbd = 0, k, have = 0, tries;
+
+	n = us_lst_dev(l, 32);
+	for ( i = 0; i < n && i < 32; i++ ) {
+		if ( l[i].vendor == 0x0403 && l[i].role == USB_ROLE_NONE ) dev = l[i].dev;
+		if ( l[i].role == USB_ROLE_HID && kbd == 0 ) kbd = l[i].dev;
+	}
+	if ( dev == 0 ) return 3700;
+	if ( us_get_dsc(dev, 1, 0, d, sizeof(d)) != 18 || d[1] != 1 || ( d[8] | ( d[9] << 8 ) ) != 0x0403 ) return 3701;
+	ud = us_opn_dev(dev);
+	if ( ud <= 0 ) return 3702;
+	if ( us_opn_dev(dev) != E_BUSY ) return 3703;
+	say("svcprog: usb: opened as ", ud);
+	if ( us_ctl(ud, reset, NULL, 0, 1000) != 0 ) return 3704;
+	if ( us_ctl(ud, status, buf, 2, 1000) != 2 ) return 3705;
+	if ( us_xfer(ud, 0x02, (void *)"hello", 5, 1000) != 5 ) return 3706;
+	say("svcprog: usb: control and bulk OUT done ", 0);
+	for ( tries = 0; tries < 40 && have < 3; tries++ ) {
+		k = us_xfer(ud, 0x81, buf, sizeof(buf), 500);
+		if ( tries < 3 ) say("svcprog: usb: in ", k);
+		if ( k < 0 && k != E_TMOUT ) return 3707;
+		for ( i = 2; i < k && have < (INT)sizeof(got) - 1; i++ ) got[have++] = (char)buf[i];
+	}
+	if ( have < 3 ) return 3708;
+	if ( us_xfer(ud, 0x85, buf, 4, 100) != E_NOEXS ) return 3709;
+	if ( us_clr_hlt(ud, 0x81) != E_OK ) return 3710;
+	if ( us_rst_dev(ud) != E_OK ) return 3715;
+	if ( us_ctl(ud, status, buf, 2, 1000) != 2 ) return 3716;		/* there again after the reset */
+	if ( us_xfer(ud, 0x02, (void *)"again", 5, 1000) != 5 ) return 3717;
+	if ( us_cls_dev(ud) != E_OK ) return 3711;
+	if ( us_cls_dev(ud) != E_ID ) return 3712;
+	if ( kbd != 0 && us_opn_dev(kbd) != E_BUSY ) return 3713;
+	return 0;
 }
 
 LOCAL char	longline[700];
@@ -1770,6 +2036,492 @@ LOCAL INT devob( void )
 	return 2700;
 }
 
+/* The tray as a process uses it, through the kernel's task that does its calls */
+LOCAL INT tray( void )
+{
+	static CONST char	frag[] = "<tad version=\"1.0\" encoding=\"UTF-8\"><figure>"
+					 "<link id=\"0199ce60-532a-7670-b8bc-84c970de11dc_0.xtad\"/></figure></tad>";
+	static CONST UB		png[] = { 0x89, 'P', 'N', 'G', 13, 10, 26, 10 };
+	static T_TRSTS		s;
+	T_TRREC			r;
+	T_TRINF			inf;
+	SZ			asz = 0;
+	INT			i, n = (INT)sizeof(frag) - 1;
+
+	memset(&r, 0, sizeof(r));
+	r.kind = TR_TAD;
+	r.data = frag;
+	r.size = n;
+	if ( tr_psh_dat(&r, 1, (CONST UB *)"プロセスの組") != 1 ) return 2801;
+	if ( tr_get_sts(&s) != E_OK || s.hand != 1 || s.nlevel < 1 ) return 2802;
+	if ( !same(s.set[1].name, "プロセスの組") || ( s.set[1].kinds & ( 1U << TR_TAD ) ) == 0 ) return 2803;
+	if ( tr_ref_rec(TR_HAND, 0, &inf) != E_OK || inf.kind != TR_TAD || inf.size != n ) return 2804;
+	if ( tr_rea_rec(TR_HAND, 0, rbuf, n, &asz) != E_OK || asz != n ) return 2805;
+	for ( i = 0; i < n; i++ ) {
+		if ( rbuf[i] != (UB)frag[i] ) return 2806;
+	}
+	/* too little room: what fits, and how much there is */
+	memset(rbuf, 0, 8);
+	if ( tr_rea_rec(TR_HAND, 0, rbuf + 1, 4, &asz) != E_OK || asz != n || rbuf[1] != '<' || rbuf[5] != 0 ) {
+		return 2807;
+	}
+	r.kind = TR_PNG;
+	r.data = png;
+	r.size = sizeof(png);
+	if ( tr_add_dat(&r, 1) != 1 ) return 2808;
+	if ( tr_ref_rec(TR_HAND, 1, &inf) != E_OK || inf.kind != TR_PNG || inf.size != (SZ)sizeof(png) ) {
+		return 2809;
+	}
+
+	/* pointers that are not the process's */
+	r.data = KERNEL_PTR;
+	if ( tr_psh_dat(&r, 1, NULL) != E_MACV ) return 2810;
+	if ( tr_psh_dat(KERNEL_PTR, 1, NULL) != E_MACV ) return 2811;
+	r.data = png;
+	if ( tr_psh_dat(&r, 1, KERNEL_PTR) != E_MACV ) return 2812;
+	if ( tr_get_sts(KERNEL_PTR) != E_MACV ) return 2813;
+	if ( tr_ref_rec(TR_HAND, 0, KERNEL_PTR) != E_MACV ) return 2814;
+	if ( tr_rea_rec(TR_HAND, 0, KERNEL_PTR, 4, &asz) != E_MACV ) return 2815;
+	if ( tr_rea_rec(TR_HAND, 0, (void *)same, 4, &asz) != E_MACV ) return 2816;	/* read only */
+	if ( tr_psh_dat(&r, 0, NULL) != E_PAR ) return 2817;
+
+	/* and the set as it was: no set went in for any of them */
+	if ( tr_get_sts(&s) != E_OK || s.hand != 1 || !same(s.set[1].name, "プロセスの組") ) return 2818;
+	return 0;
+}
+
+/* ---------------------------------------------------------------- SP_PAN */
+
+#define PAN_WORD	0x50414E2D6B746573ULL
+
+LOCAL volatile UD	pan_word = PAN_WORD;
+
+/* A word of the process's read by the kernel: opened 1 once it has made sure of it, 0 straight */
+LOCAL UD pan_probe( CONST volatile void *p, UD opened )
+{
+	register UD	x0 __asm__("x0") = (UD)p;
+	register UD	x1 __asm__("x1") = opened;
+	register UD	x8 __asm__("x8") = TSN_TM_PAN_PROBE;
+
+	__asm__ volatile("svc #0" : "+r"(x0), "+r"(x1) : "r"(x8)
+			 : "x2", "x3", "x4", "x5", "x6", "x7", "x9", "x10", "x11", "x12", "x13",
+			   "x14", "x15", "x16", "x17", "x30", "memory", "cc");
+	return x0;
+}
+
+LOCAL INT pan( void )
+{
+	T_CMBF	cm;
+	T_FSTAT	st;
+	TS_TIME	t = 0;
+	ID	mbf;
+	INT	i, n;
+
+	if ( pan_probe(&pan_word, 1) != PAN_WORD ) return 3001;
+	if ( (ER)pan_probe(KERNEL_PTR, 1) != E_MACV ) return 3002;
+
+	/* a message through a buffer of its own, both ways through the kernel */
+	memset(&cm, 0, sizeof(cm));
+	cm.mbfatr = TA_TFIFO;
+	cm.bufsz = 256;
+	cm.maxmsz = 64;
+	mbf = tk_cre_mbf(&cm);
+	if ( mbf <= 0 ) return 3003;
+	for ( i = 0; i < 64; i++ ) wbuf[i] = (UB)( i * 7 + 1 );
+	memset(rbuf, 0, 64);
+	if ( tk_snd_mbf(mbf, wbuf, 64, TMO_FEVR) != E_OK ) return 3004;
+	n = tk_rcv_mbf(mbf, rbuf, TMO_FEVR);
+	if ( n != 64 ) return 3005;
+	for ( i = 0; i < 64; i++ ) {
+		if ( rbuf[i] != wbuf[i] ) return 3005;
+	}
+	if ( tk_del_mbf(mbf) != E_OK ) return 3006;
+
+	/* answers written back, a path and a line taken in */
+	if ( dt_gettime(&t) != E_OK || t <= 0 ) return 3007;
+	if ( fs_stat(PROG, &st) != EX_OK || st.size <= 0 ) return 3008;
+	if ( tm_putstring((CONST UB *)"  svcprog: what it handed went in and out under PAN\n") != E_OK ) return 3009;
+
+	/* the kernel reading the word straight: PAN refuses it, and this ends here */
+	(void)pan_probe(&pan_word, 0);
+	return 0;
+}
+
+/* ---------------------------------------------------------------- SP_RIGHTS */
+
+LOCAL INT rights( void )
+{
+	T_KMSTATE	*ks = (T_KMSTATE *)rbuf;
+	TS_UUID		me, none;
+	TS_TIME		t = 0;
+	INT		z = 0;
+	UW		look;
+	UINT		may = arg[5];
+	BOOL		user;
+
+	memcpy(&me, &arg[1], sizeof(me));
+	memset(&none, 0, sizeof(none));
+	user = !same_uuid(&me, &none);
+	if ( user && ob_login(&me, (CONST UB *)"ktest-pw") != E_OK ) return 3100;
+	if ( dt_gettime(&t) != E_OK || dt_getsystz(&z) != E_OK || km_get(ks) != E_OK ) return 3101;
+	look = wm_look(LK_GROUND);
+	if ( user ) {
+		if ( dt_settime(t) != E_OACV ) return 3110;
+		if ( dt_setsystz(z) != ( ( may & 1 ) ? E_OK : E_OACV ) ) return 3111;
+		if ( km_set(ks, 0) != ( ( may & 2 ) ? E_OK : E_OACV ) ) return 3112;
+		if ( wm_set_look(LK_GROUND, look) != E_OACV ) return 3113;
+		if ( so_setifaddr(0, 0, 0, 0) != E_OACV ) return 3114;
+		if ( so_dhcp_start() != E_OACV ) return 3115;
+		if ( ob_att_vol("/ktest-none", 0) != E_OACV ) return 3116;
+		if ( ob_det_vol("/ktest-none") != E_OACV ) return 3117;
+		return 0;
+	}
+	if ( dt_setsystz(z) != E_OK ) return 3120;
+	if ( km_set(ks, 0) != E_OK ) return 3121;
+	if ( wm_set_look(LK_GROUND, look) == E_OACV ) return 3122;
+	if ( ob_det_vol("/ktest-none") == E_OACV ) return 3123;
+	return 0;
+}
+
+/* Whether the process acts as an administrator now */
+LOCAL BOOL is_admin( void )
+{
+	CONST TS_UUID	adm = OB_GROUP_ADMIN_INIT;
+	INT		g;
+
+	if ( ob_get_crd(&crd) != E_OK ) return FALSE;
+	for ( g = 0; g < crd.ngrp && g < CNF_OB_MAX_GROUPS; g++ ) {
+		if ( same_uuid(&crd.grp[g], &adm) ) return TRUE;
+	}
+	return FALSE;
+}
+
+/* A UUID from its text, "01a0d8c4-52c0-..." */
+LOCAL BOOL text_uuid( CONST char *s, TS_UUID *u )
+{
+	INT	i, n = 0, h;
+
+	for ( i = 0; s[i] != 0 && n < 32; i++ ) {
+		if ( s[i] == '-' ) continue;
+		h = ( s[i] >= '0' && s[i] <= '9' ) ? s[i] - '0'
+		  : ( s[i] >= 'a' && s[i] <= 'f' ) ? s[i] - 'a' + 10 : -1;
+		if ( h < 0 ) return FALSE;
+		if ( ( n & 1 ) == 0 ) u->b[n / 2] = (UB)( h << 4 );
+		else u->b[n / 2] |= (UB)h;
+		n++;
+	}
+	return ( n == 32 );
+}
+
+/* A settings object (its UUID as text) opened with ops: the key closed, and the answer */
+LOCAL ER try_open( CONST char *s, UINT ops )
+{
+	TS_UUID	u;
+	ID	k;
+
+	if ( !text_uuid(s, &u) ) return E_SYS;
+	k = ob_opn_obj(&u, ops);
+	if ( k > 0 ) {
+		(void)ob_cls_obj(k);
+		return E_OK;
+	}
+	return (ER)k;
+}
+
+/* Waiting up to 'ms' for the administrator's rights the test gives */
+LOCAL BOOL wait_admin( INT ms )
+{
+	INT	i;
+
+	for ( i = 0; i < ms / 20; i++ ) {
+		if ( is_admin() ) return TRUE;
+		tk_dly_tsk(20);
+	}
+	return FALSE;
+}
+
+LOCAL INT credtest( void )
+{
+	T_KMSTATE	*ks = (T_KMSTATE *)rbuf;
+	CONST TS_UUID	person = OB_USER_PERSON_INIT, clock = OB_UUID_CLOCK_INIT;
+	CONST TS_UUID	system = OB_UUID_SYSTEM_INIT;
+	TS_TIME		t = 0;
+	INT		z = 0;
+	UW		kana;
+	ID		k;
+
+	/* 利用者, of no administrators' group */
+	if ( ob_get_crd(&crd) != E_OK || !same_uuid(&crd.user, &person) ) return 3200;
+	if ( is_admin() ) return 3201;
+	if ( dt_gettime(&t) != E_OK || dt_getsystz(&z) != E_OK || km_get(ks) != E_OK ) return 3202;
+	kana = wm_look(LK_KANA);
+
+	/* what acts on the whole machine: refused */
+	if ( dt_settime(t) != E_OACV ) return 3210;
+	if ( so_setifaddr(0, 0, 0, 0) != E_OACV ) return 3211;
+	if ( so_dhcp_start() != E_OACV ) return 3212;
+	if ( ob_att_vol("/ktest-none", 0) != E_OACV ) return 3213;
+	if ( ob_det_vol("/ktest-none") != E_OACV ) return 3214;
+	if ( wm_set_look(LK_GROUND, wm_look(LK_GROUND)) != E_OACV ) return 3215;
+	if ( try_open(SYSDEF_CONF_NET, OB_OP_R | OB_OP_WRITE) != E_OACV ) return 3216;
+	k = ob_opn_obj(&clock, OB_OP_R | OB_OP_WRITE);
+	if ( k > 0 ) (void)ob_cls_obj(k);
+	if ( k != E_OACV ) return 3217;
+
+	/* what is the person's to set: let */
+	if ( dt_setsystz(z) != E_OK ) return 3220;
+	if ( km_set(ks, 0) != E_OK ) return 3221;
+	if ( wm_set_look(LK_KANA, kana) != E_OK ) return 3222;
+	if ( try_open(SYSDEF_CONF_USER, OB_OP_R | OB_OP_WRITE) != E_OK ) return 3223;
+	if ( try_open(SYSDEF_CONF_DEV, OB_OP_R | OB_OP_WRITE) != E_OK ) return 3224;
+	k = ob_opn_obj(&system, OB_OP_R | OB_OP_WRITE);
+	if ( k <= 0 ) return 3225;
+	(void)ob_cls_obj(k);
+	if ( ob_end_adm() != E_OK ) return 3226;	/* none to give back */
+
+	/* the administrator's rights, for a while: then the time is set */
+	if ( !wait_admin(15000) ) return 3230;
+	if ( dt_gettime(&t) != E_OK || dt_settime(t) != E_OK ) return 3231;
+	if ( try_open(SYSDEF_CONF_NET, OB_OP_R | OB_OP_WRITE) != E_OK ) return 3232;
+	if ( ob_end_adm() != E_OK || is_admin() ) return 3233;
+	if ( dt_settime(t) != E_OACV ) return 3234;
+
+	/* given again for arg[1] ms only, and kept past that: refused */
+	if ( !wait_admin(15000) ) return 3240;
+	tk_dly_tsk((RELTIM)arg[1] + 500);
+	if ( is_admin() ) return 3241;
+	if ( dt_gettime(&t) != E_OK || dt_settime(t) != E_OACV ) return 3242;
+	return 0;
+}
+
+/* ---------------------------------------------------------------- 強制終了 */
+
+LOCAL INT bgwait( void )
+{
+	if ( !ready() ) return 3300;
+	for ( ;; ) {
+		(void)tk_slp_tsk(TMO_FEVR);
+	}
+	return 3301;
+}
+
+LOCAL INT obstuck( void )
+{
+	CONST TS_UUID	devlist = OB_UUID_DEVLIST_INIT;
+	CONST char	*j = "{\"rect\":[340,260,640,440],\"attr\":7}";
+	T_OBCRE		c;
+	TS_UUID		win;
+	ID		k;
+
+	memset(&c, 0, sizeof(c));
+	c.type = OB_T_WINDOW;
+	c.sub = OB_S_WINDOW;
+	c.name = (CONST UB *)"ktstuck";
+	c.json = (CONST UB *)j;
+	for ( c.jsonsz = 0; j[c.jsonsz] != '\0'; c.jsonsz++ ) ;
+	if ( ob_cre_obj(&c, &win) != E_OK ) return 3402;
+	if ( !ready() ) return 3400;
+	for ( ;; ) {
+		/* opening and closing a key take the objects' lock */
+		k = ob_opn_obj(&devlist, OB_OP_R);
+		if ( k > 0 ) (void)ob_cls_obj(k);
+		tk_dly_tsk(10);
+	}
+	return 3401;
+}
+
+LOCAL INT adminask( void )
+{
+	ER	er;
+
+	if ( !ready() ) return 3500;
+	er = ts_admin_ask("ktest 強制終了", NULL);
+	return ( er >= E_OK ) ? 0 : 3501;
+}
+
+/*
+ * SP_SLICE: turns among the tasks of one priority (design 4.3.1). The
+ * spinning tasks never wait; in the time-shared band the one that notes
+ * its gaps still runs every few turns. In the other form one task of
+ * the real-time band sleeps and wakes, and the time-shared band
+ * spinning beside it does not hold it back.
+ */
+#define SL_SPIN		5
+
+LOCAL volatile BOOL	sl_stop;
+LOCAL volatile UD	sl_gap;
+LOCAL volatile UW	sl_bad;
+
+LOCAL void sl_spin( INT stacd, void *exinf )
+{
+	volatile UW	n = 0;
+
+	if ( tk_chg_slt(TSK_SELF, 20) != E_OK ) sl_bad++;
+	while ( !sl_stop ) n++;
+	(void)tk_sig_sem((ID)stacd, 1);
+	tk_ext_tsk();
+}
+
+LOCAL void sl_probe( INT stacd, void *exinf )
+{
+	UD	t, last = 0;
+
+	while ( !sl_stop ) {
+		(void)ts_get_mono(&t);
+		if ( last != 0 && t - last > sl_gap ) sl_gap = t - last;
+		last = t;
+	}
+	(void)tk_sig_sem((ID)stacd, 1);
+	tk_ext_tsk();
+}
+
+LOCAL INT slice( void )
+{
+	T_CSEM	cs;
+	T_CTSK	c;
+	T_RTSK	rt;
+	UD	t0 = 0, t = 0, late = 0, want;
+	ID	sem, tid;
+	INT	i;
+
+	if ( tk_ref_tsk(TSK_SELF, &rt) != E_OK ) return 4000;
+	if ( arg[1] == 1 ) {
+		(void)ts_get_mono(&t0);
+		for ( ;; ) {
+			(void)ts_get_mono(&t);
+			if ( t - t0 >= (UD)arg[2] * 1000000ULL ) break;
+			want = t + 2000000ULL;
+			(void)tk_dly_tsk(2);
+			(void)ts_get_mono(&t);
+			/* the first 200 ms bring its pages in and are not counted */
+			if ( t - t0 > 200000000ULL && t > want && t - want > late ) late = t - want;
+		}
+		return (INT)( late / 1000000ULL );
+	}
+	memset(&cs, 0, sizeof(cs));
+	cs.sematr = TA_TFIFO;
+	cs.maxsem = SL_SPIN + 1;
+	sem = tk_cre_sem(&cs);
+	if ( sem <= 0 ) return 4001;
+	sl_stop = FALSE;
+	sl_gap = 0;
+	sl_bad = 0;
+	for ( i = 0; i <= SL_SPIN; i++ ) {
+		memset(&c, 0, sizeof(c));
+		c.tskatr = TA_HLNG | TA_RNG3;
+		c.task = ( i < SL_SPIN ) ? (FP)sl_spin : (FP)sl_probe;
+		c.itskpri = rt.tskbpri;
+		c.stksz = 16 * 1024;
+		tid = tk_cre_tsk(&c);
+		if ( tid <= 0 ) return 4002;
+		if ( tk_sta_tsk(tid, (INT)sem) != E_OK ) return 4003;
+	}
+	(void)tk_dly_tsk((TMO)arg[2]);
+	sl_stop = TRUE;
+	for ( i = 0; i <= SL_SPIN; i++ ) {
+		if ( tk_wai_sem(sem, 1, 10000) != E_OK ) return 4004;
+	}
+	if ( sl_bad != 0 ) return 4005;
+	return (INT)( sl_gap / 1000000ULL );
+}
+
+/*
+ * SP_TCHURN: a task of its own made, run and deleted arg[1] times, one
+ * at a time. Each one's user stack is to be where the one before had
+ * it: the places of stacks given back are handed out again (design
+ * 4.6.2), and a space that makes tasks without end does not grow.
+ */
+LOCAL volatile UBINT	tch_at;
+
+LOCAL void tch_task( INT stacd, void *exinf )
+{
+	volatile INT	here = 0;
+
+	tch_at = (UBINT)&here;
+	(void)tk_sig_sem((ID)stacd, 1);
+	tk_ext_tsk();
+}
+
+LOCAL INT tchurn( void )
+{
+	T_CSEM	cs;
+	T_CTSK	c;
+	T_RTSK	rt;
+	UBINT	seen[4];
+	UW	n = ( arg[1] > 0 ) ? arg[1] : 1000, i;
+	INT	nseen = 0, k;
+	ID	sem, t;
+	ER	er;
+
+	if ( tk_ref_tsk(TSK_SELF, &rt) != E_OK ) return 3900;
+	memset(&cs, 0, sizeof(cs));
+	cs.sematr = TA_TFIFO;
+	cs.maxsem = 1;
+	sem = tk_cre_sem(&cs);
+	if ( sem <= 0 ) return 3901;
+	for ( i = 0; i < n; i++ ) {
+		memset(&c, 0, sizeof(c));
+		c.tskatr = TA_HLNG | TA_RNG3;
+		c.task = (FP)tch_task;
+		c.itskpri = rt.tskbpri;
+		c.stksz = 16 * 1024;
+		t = tk_cre_tsk(&c);
+		if ( t <= 0 ) return 3902;
+		tch_at = 0;
+		if ( tk_sta_tsk(t, (INT)sem) != E_OK ) return 3903;
+		if ( tk_wai_sem(sem, 1, 10000) != E_OK ) return 3904;
+		while ( ( er = tk_del_tsk(t) ) == E_OBJ ) {
+			tk_dly_tsk(1);		/* not dormant yet */
+		}
+		if ( er != E_OK ) return 3905;
+		for ( k = 0; k < nseen && seen[k] != ( tch_at >> 16 ); k++ ) ;
+		if ( k == nseen ) {
+			if ( nseen == 4 ) return 3906;	/* the stacks keep going somewhere new */
+			seen[nseen++] = tch_at >> 16;
+		}
+	}
+	return 0;
+}
+
+/* A triangle wave of arg[1] Hz, a second of it played over and over for arg[2] ms */
+LOCAL INT tone( void )
+{
+	static H	pcm[48000 * 2];
+	TS_UUID		dev;
+	SDPcmMode	m;
+	INT		cnt = 0, i, p, v, hz = ( arg[1] > 0 ) ? (INT)arg[1] : 440;
+	W		w;
+	SZ		asz = 0;
+	ID		k;
+
+	if ( ob_lst_obj(OB_T_DEVICE, OB_S_SOUND, NULL, &dev, 1, &cnt) < E_OK || cnt < 1 ) return 3800;
+	k = ob_opn_obj(&dev, OB_OP_R | OB_OP_WRITE);
+	if ( k <= 0 ) return 3801;
+	for ( i = 0; i < 48000; i++ ) {
+		p = (INT)( ( (UW)i * (UW)hz ) % 48000U );
+		v = ( p < 24000 ) ? p : 48000 - p;
+		pcm[i * 2] = pcm[i * 2 + 1] = (H)( v * 12000 / 24000 - 6000 );
+	}
+	memset(&m, 0, sizeof(m));
+	m.sampling = PCMST48K;
+	m.datafmt = PCMFmt16;
+	m.stereo = 1;
+	(void)ob_wri_rec(k, OB_SND_MODE, 0, &m, sizeof(m), &asz);
+	w = (W)sizeof(pcm);
+	(void)ob_wri_rec(k, OB_SND_BUFSZ, 0, &w, sizeof(w), &asz);
+	(void)ob_wri_rec(k, OB_SND_PCM, 0, pcm, sizeof(pcm), &asz);
+	w = PCM_REPPLAY;
+	if ( ob_wri_rec(k, OB_SND_CTL, 0, &w, sizeof(w), &asz) < E_OK ) {
+		ob_cls_obj(k);
+		return 3802;
+	}
+	tk_dly_tsk((TMO)arg[2]);
+	w = PCM_STOP;
+	(void)ob_wri_rec(k, OB_SND_CTL, 0, &w, sizeof(w), &asz);
+	ob_cls_obj(k);
+	return 0;
+}
+
 int main( void )
 {
 	SZ	n = ts_get_arg(arg, sizeof(arg));
@@ -1805,7 +2557,20 @@ int main( void )
 	  case SP_KILLWIN: return killwin();
 	  case SP_PAUSEWIN: return pausewin();
 	  case SP_FAULT: return faults();
+	  case SP_FLTBACK: return fltback();
+	  case SP_USBDEV: return usbdev();
 	  case SP_DEVOB: return devob();
+	  case SP_TRAY:	return tray();
+	  case SP_SURF:	return surf();
+	  case SP_PAN:	return pan();
+	  case SP_RIGHTS: return rights();
+	  case SP_CRED:	return credtest();
+	  case SP_BGWAIT: return bgwait();
+	  case SP_OBSTUCK: return obstuck();
+	  case SP_ADMINASK: return adminask();
+	  case SP_TONE:	return tone();
+	  case SP_TCHURN: return tchurn();
+	  case SP_SLICE: return slice();
 	  default:	return 101;
 	}
 }

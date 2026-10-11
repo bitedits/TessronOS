@@ -46,6 +46,28 @@ EXPORT void tv_source( CONST T_TVSRC *src, void *arg )
 	knl_tv_src_arg = arg;
 }
 
+LOCAL TS_UUID	tv_host;
+LOCAL ID	tv_host_tsk = 0;	/* the task drawing it, 0 for none */
+
+EXPORT void tv_draw_host( CONST TS_UUID *id )
+{
+	if ( id == NULL ) {
+		tv_host_tsk = 0;
+		return;
+	}
+	tv_host = *id;
+	tv_host_tsk = tk_get_tid();
+}
+
+EXPORT BOOL tv_host_of( TS_UUID *p_id )
+{
+	if ( tv_host_tsk <= 0 || tv_host_tsk != tk_get_tid() ) {
+		return FALSE;
+	}
+	*p_id = tv_host;
+	return TRUE;
+}
+
 /* ---------------------------------------------------------------- numbers */
 
 LOCAL INT to_int( CONST UB *s, INT dflt )
@@ -910,6 +932,14 @@ LOCAL void doc_walk( DOCBUILD *b, CONST T_TADNODE *nd )
 
 		b->d->lang = to_int(tad_attr(nd, "lang"), b->d->lang);
 		b->d->bpat = to_int(tad_attr(nd, "bpat"), b->d->bpat);
+		/*
+		 * 文字方向: 0 across from the left, 1 across from the right,
+		 * 2 down. A text across from the right is shown as one
+		 * across from the left; down is 縦書き, for the whole text.
+		 */
+		if ( ( v = tad_attr(nd, "direction") ) != NULL ) {
+			b->d->vert = (BOOL)( to_int(v, 0) == 2 );
+		}
 		/* the alignment and the line pitch, from here on */
 		if ( ( v = tad_attr(nd, "align") ) != NULL ) {
 			b->ps.align = ( v[0] == 'c' ) ? TV_ALIGN_CENTRE
@@ -964,6 +994,15 @@ LOCAL void doc_walk( DOCBUILD *b, CONST T_TADNODE *nd )
 	if ( name_is(nd, "tcode") || name_is(nd, "page-number-define")
 	  || name_is(nd, "frame-open") || name_is(nd, "field-format")
 	  || name_is(nd, "docappl") || name_is(nd, "tadseg") ) {
+		return;
+	}
+	/*
+	 * 実時間制御TAD: what is shown over the page and when is the
+	 * player's (design 19); its pictures, media and events are not
+	 * the text's.
+	 */
+	if ( name_is(nd, "realtime") || name_is(nd, "realData") || name_is(nd, "audio")
+	  || name_is(nd, "video") ) {
 		return;
 	}
 	/* anything else: whatever is inside it still counts */
@@ -1158,7 +1197,33 @@ typedef struct {
 	UW	md_col[16];
 } FIGBUILD;
 
-/* A mask of the figure's own, its sixteen rows, or NULL */
+/*
+ * The masks every figure has without defining them, numbers 0 to 13:
+ * four by four, laid four times across and down. 0 is undefined and
+ * draws nothing, 1 to 7 are 0% to 100% in eighths (none, 12.5, 25, 50,
+ * 75, 87.5 and all), 8 and 9 are upright and level lines, 10 and 11
+ * the slants either way, 12 and 13 the two cross-hatches.
+ */
+#define MK_STD		14
+
+LOCAL CONST UH mask_std[MK_STD][16] = {
+	{ 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 },
+	{ 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 },
+	{ 0x8888, 0x0000, 0x2222, 0x0000, 0x8888, 0x0000, 0x2222, 0x0000, 0x8888, 0x0000, 0x2222, 0x0000, 0x8888, 0x0000, 0x2222, 0x0000 },
+	{ 0xAAAA, 0x0000, 0xAAAA, 0x0000, 0xAAAA, 0x0000, 0xAAAA, 0x0000, 0xAAAA, 0x0000, 0xAAAA, 0x0000, 0xAAAA, 0x0000, 0xAAAA, 0x0000 },
+	{ 0xAAAA, 0x5555, 0xAAAA, 0x5555, 0xAAAA, 0x5555, 0xAAAA, 0x5555, 0xAAAA, 0x5555, 0xAAAA, 0x5555, 0xAAAA, 0x5555, 0xAAAA, 0x5555 },
+	{ 0xAAAA, 0xFFFF, 0xAAAA, 0xFFFF, 0xAAAA, 0xFFFF, 0xAAAA, 0xFFFF, 0xAAAA, 0xFFFF, 0xAAAA, 0xFFFF, 0xAAAA, 0xFFFF, 0xAAAA, 0xFFFF },
+	{ 0xBBBB, 0xFFFF, 0xEEEE, 0xFFFF, 0xBBBB, 0xFFFF, 0xEEEE, 0xFFFF, 0xBBBB, 0xFFFF, 0xEEEE, 0xFFFF, 0xBBBB, 0xFFFF, 0xEEEE, 0xFFFF },
+	{ 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF },
+	{ 0x4444, 0x4444, 0x4444, 0x4444, 0x4444, 0x4444, 0x4444, 0x4444, 0x4444, 0x4444, 0x4444, 0x4444, 0x4444, 0x4444, 0x4444, 0x4444 },
+	{ 0x0000, 0xFFFF, 0x0000, 0x0000, 0x0000, 0xFFFF, 0x0000, 0x0000, 0x0000, 0xFFFF, 0x0000, 0x0000, 0x0000, 0xFFFF, 0x0000, 0x0000 },
+	{ 0x1111, 0x2222, 0x4444, 0x8888, 0x1111, 0x2222, 0x4444, 0x8888, 0x1111, 0x2222, 0x4444, 0x8888, 0x1111, 0x2222, 0x4444, 0x8888 },
+	{ 0x8888, 0x4444, 0x2222, 0x1111, 0x8888, 0x4444, 0x2222, 0x1111, 0x8888, 0x4444, 0x2222, 0x1111, 0x8888, 0x4444, 0x2222, 0x1111 },
+	{ 0x4444, 0xFFFF, 0x4444, 0x4444, 0x4444, 0xFFFF, 0x4444, 0x4444, 0x4444, 0xFFFF, 0x4444, 0x4444, 0x4444, 0xFFFF, 0x4444, 0x4444 },
+	{ 0x9999, 0x6666, 0x6666, 0x9999, 0x9999, 0x6666, 0x6666, 0x9999, 0x9999, 0x6666, 0x6666, 0x9999, 0x9999, 0x6666, 0x6666, 0x9999 },
+};
+
+/* A mask the figure names, its sixteen rows: its own, else the standard one of the number, or NULL */
 LOCAL CONST UH *mask_of( CONST FIGBUILD *b, INT id )
 {
 	INT	i;
@@ -1167,6 +1232,9 @@ LOCAL CONST UH *mask_of( CONST FIGBUILD *b, INT id )
 		if ( b->mk_id[i] == id ) {
 			return b->mk_rows[i];
 		}
+	}
+	if ( id >= 0 && id < MK_STD ) {
+		return mask_std[id];
 	}
 
 	return NULL;
@@ -2242,8 +2310,13 @@ LOCAL void fig_walk1( FIGBUILD *b, CONST T_TADNODE *nd )
 		}
 		return;
 	}
-	if ( name_is(nd, "group") || name_is(nd, "realGroup") ) {
+	if ( name_is(nd, "group") ) {
 		fig_children(b, nd);
+		return;
+	}
+	/* 実時間制御TAD: the player's (design 19), not shapes of the figure */
+	if ( name_is(nd, "realtime") || name_is(nd, "realData") || name_is(nd, "audio")
+	  || name_is(nd, "video") ) {
 		return;
 	}
 	/* anything else: what is inside it may still be a shape */

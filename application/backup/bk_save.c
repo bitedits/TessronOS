@@ -474,11 +474,13 @@ LOCAL void xml_numbered( BKJOB *j, BPKBUF *b, const UB *xml, UINT len, const cha
 		}
 		if ( p + 4 >= e ) continue;
 		{
-			const UB *v = p + 4, *ve = v;
+			const UB *v0 = p + 4, *v = v0, *ve = v;
 			UB	q = p[3];
 			char	num[16];
 
 			while ( ve < e && *ve != q ) ve++;
+			/* a volume it names goes: what is restored goes on one volume */
+			v += ts_lnk_split(v, (INT)( ve - v ), NULL, NULL);
 			if ( ve - v > 36 ) {
 				/* a UUID with more after it ("_0.xtad"): only the UUID is numbered */
 				char	us[37];
@@ -488,7 +490,7 @@ LOCAL void xml_numbered( BKJOB *j, BPKBUF *b, const UB *xml, UINT len, const cha
 				us[36] = 0;
 				if ( bk_uuid_parse(us, &u) ) ve = v + 36;
 			}
-			bpk_buf_putn(b, (const char *)xml + at, (INT)( v - xml - at ));
+			bpk_buf_putn(b, (const char *)xml + at, (INT)( v0 - xml - at ));
 			snprintf(num, sizeof(num), "@%d", i);
 			bpk_buf_puts(b, num);
 			at = (UINT)( ve - xml );

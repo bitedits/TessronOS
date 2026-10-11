@@ -215,6 +215,8 @@ EXPORT ER tv_draw_link( INT gid, CONST T_DPRECT *r, CONST T_VOBJ *v,
 	look.text = NULL;
 	look.icon = NULL;
 	look.icon_w = look.icon_h = 0;
+	look.state = ( knl_tv_src != NULL && knl_tv_src->state != NULL )
+		     ? knl_tv_src->state(&vv, knl_tv_src_arg) : 0;
 	if ( knl_tv_src != NULL && knl_tv_src->label != NULL
 	  && knl_tv_src->label(&vv, text, OM_LOOK_TEXT, knl_tv_src_arg) >= 0 ) {
 		look.text = text;
@@ -256,8 +258,9 @@ EXPORT ER tv_draw_link( INT gid, CONST T_DPRECT *r, CONST T_VOBJ *v,
 		return om_draw_vob_as(gid, r, &vv, &look, FALSE, NULL);
 	}
 	om_draw_vob_as(gid, r, &vv, &look, TRUE, &inner);
-	if ( inner.right <= inner.left || inner.bottom <= inner.top ) {
-		return E_OK;
+	if ( inner.right <= inner.left || inner.bottom <= inner.top
+	  || ( look.state & TV_ST_GONE ) != 0 ) {
+		return E_OK;			/* a 虚身 shows nothing inside */
 	}
 	target = knl_tv_src->open(&vv, knl_tv_src_arg);
 	if ( target == NULL ) {

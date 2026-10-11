@@ -23,16 +23,39 @@
  * Critical section
  *	Interrupts are masked with PSTATE.I. A dispatch request raised inside
  *	the section is executed at its end.
+ *
+ *	Whether to dispatch is decided before the kernel lock is let go. A
+ *	task that the section put into a wait then always goes through the
+ *	dispatcher, which takes the lock again before it lets the task run
+ *	on (knl_dispatch_pick): a processor that ends the wait meanwhile has
+ *	by then written all it gives the task -- the wait's result, a
+ *	message, a block. Decided after letting go, the task could find
+ *	itself made ready again by that processor half way through, run on
+ *	without the dispatcher and read its result before it was written
+ *	(E_TMOUT from a wait without a limit), while the result went into
+ *	its stack afterwards, over whatever the stack held by then
+ *	(design 4.3).
  */
+#if USE_KTEST
+IMPORT volatile UW	knl_kt_unlock_spin;
+IMPORT volatile UW	knl_kt_release_spin;
+IMPORT volatile UW	knl_kt_exit_spin;
+#define KT_SPIN(n)	{ UW _k_ = (n); while ( _k_ != 0 ) { _k_--; Asm("nop"); } }
+#else
+#define KT_SPIN(n)
+#endif
+
 #define BEGIN_CRITICAL_SECTION	{ UINT _intsts_ = knl_lock_kernel();
-#define END_CRITICAL_SECTION	knl_unlock_kernel_keep();		\
-				if ( !isDI(_intsts_)			\
+#define END_CRITICAL_SECTION	{ BOOL _dsp_ = ( !isDI(_intsts_)	\
 				  && knl_ctxtsk != knl_schedtsk		\
 				  && !knl_isTaskIndependent()		\
-				  && !knl_dispatch_disabled ) {		\
+				  && !knl_dispatch_disabled );		\
+				knl_unlock_kernel_keep();		\
+				KT_SPIN(knl_kt_unlock_spin)		\
+				if ( _dsp_ ) {				\
 					knl_dispatch();			\
 				}					\
-				enaint(_intsts_); }
+				enaint(_intsts_); } }
 
 #define BEGIN_DISABLE_INTERRUPT	{ UINT _intsts_ = disint();
 #define END_DISABLE_INTERRUPT	enaint(_intsts_); }

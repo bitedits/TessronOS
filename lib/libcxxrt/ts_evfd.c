@@ -20,6 +20,12 @@
  *	by an epoll is never reported (the port does not wait on sockets
  *	through epoll). The watch is level triggered: a counter above zero
  *	is readable until it is read.
+ *
+ *	A pipe is two descriptors of the range as well: its read end counts
+ *	the bytes written to its write end, and is readable while that is
+ *	above zero. What is read is zeros: a pipe within a process is used
+ *	to wake a loop (a write of a byte to wake, a read to take the wake
+ *	back), not to carry data.
  */
 
 #include <stddef.h>
@@ -47,13 +53,13 @@ struct ts_epoll_event {
 	uint64_t	data;
 };
 
-enum { K_FREE, K_EVENT, K_EPOLL };
+enum { K_FREE, K_EVENT, K_EPOLL, K_PIPER, K_PIPEW };
 
 typedef struct {
 	int		kind;
 	int		flags;
-	uint64_t	count;			/* K_EVENT */
-	int		nw;			/* K_EPOLL */
+	uint64_t	count;			/* K_EVENT, K_PIPER: what was written */
+	int		nw;			/* K_EPOLL; K_PIPEW: its read end */
 	struct {
 		int		fd;
 		uint32_t	events;
@@ -106,6 +112,22 @@ int eventfd( unsigned int initval, int flags )
 	return fd;
 }
 
+int pipe( int fds[2] )
+{
+	int	r = make(K_PIPER, 0), w;
+
+	if ( r < 0 ) return -1;
+	w = make(K_PIPEW, 0);
+	if ( w < 0 ) {
+		ev[r - EVFD_BASE].kind = K_FREE;
+		return -1;
+	}
+	ev[w - EVFD_BASE].nw = r;
+	fds[0] = r;
+	fds[1] = w;
+	return 0;
+}
+
 int ts_evfd_close( int fd )
 {
 	EVOBJ	*o;
@@ -113,6 +135,8 @@ int ts_evfd_close( int fd )
 	pthread_mutex_lock(&ev_mu);
 	o = get(fd, K_EVENT);
 	if ( o == NULL ) o = get(fd, K_EPOLL);
+	if ( o == NULL ) o = get(fd, K_PIPER);
+	if ( o == NULL ) o = get(fd, K_PIPEW);
 	if ( o != NULL ) o->kind = K_FREE;
 	pthread_mutex_unlock(&ev_mu);
 	if ( o == NULL ) {
@@ -127,6 +151,22 @@ long ts_evfd_write( int fd, const void *buf, size_t n )
 	EVOBJ		*o;
 	uint64_t	v;
 
+	pthread_mutex_lock(&ev_mu);
+	o = get(fd, K_PIPEW);
+	if ( o != NULL ) {
+		EVOBJ *r = get(o->nw, K_PIPER);
+
+		if ( r == NULL ) {
+			pthread_mutex_unlock(&ev_mu);
+			errno = EPIPE;
+			return -1;
+		}
+		r->count += n;
+		pthread_cond_broadcast(&ev_cv);
+		pthread_mutex_unlock(&ev_mu);
+		return (long)n;
+	}
+	pthread_mutex_unlock(&ev_mu);
 	if ( n < sizeof(v) ) {
 		errno = EINVAL;
 		return -1;
@@ -150,6 +190,23 @@ long ts_evfd_read( int fd, void *buf, size_t n )
 	EVOBJ		*o;
 	uint64_t	v;
 
+	pthread_mutex_lock(&ev_mu);
+	if ( ( o = get(fd, K_PIPER) ) != NULL ) {
+		while ( o->count == 0 ) {
+			pthread_cond_wait(&ev_cv, &ev_mu);
+			if ( ( o = get(fd, K_PIPER) ) == NULL ) {
+				pthread_mutex_unlock(&ev_mu);
+				errno = EBADF;
+				return -1;
+			}
+		}
+		if ( n > o->count ) n = (size_t)o->count;
+		o->count -= n;
+		pthread_mutex_unlock(&ev_mu);
+		memset(buf, 0, n);
+		return (long)n;
+	}
+	pthread_mutex_unlock(&ev_mu);
 	if ( n < sizeof(v) ) {
 		errno = EINVAL;
 		return -1;
@@ -257,6 +314,8 @@ static int ready( EVOBJ *o, struct ts_epoll_event *events, int max )
 
 	for ( i = 0; i < o->nw && n < max; i++ ) {
 		EVOBJ	*e = get(o->w[i].fd, K_EVENT);
+
+		if ( e == NULL ) e = get(o->w[i].fd, K_PIPER);
 
 		if ( e != NULL && e->count > 0 && ( o->w[i].events & EPOLLIN ) ) {
 			events[n].events = EPOLLIN;

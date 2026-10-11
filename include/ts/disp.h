@@ -22,6 +22,10 @@
  *	The second is that a single change on screen usually takes many
  *	calls, each of which would otherwise send its own small rectangle.
  *	Holding the screen gathers them into one rectangle and one send.
+ *
+ *	Where the framebuffer has room for two screens and the screen can
+ *	be told which to show, a send goes to the one not shown, which is
+ *	shown once it is whole: nothing half sent is ever on the screen.
  */
 
 #ifndef __TS_DISP_H__
@@ -55,6 +59,9 @@ typedef struct {
 	UINT	fb_pitch;		/* the framebuffer's own row stride */
 	UINT	fb_bpp;			/* its bits in one pixel */
 	UINT	fb_format;		/* its DISP_FMT_* */
+	UINT	fb_pages;		/* screens' worth of rows from fb_pa: 1, or 2 to flip between */
+	UINT	fb_shown;		/* the one shown: its rows start fb_shown * height rows down */
+	BOOL	flipping;		/* sends go to the one not shown, which is then shown */
 } T_DISPSPEC;
 
 /* A part of the screen */
@@ -83,7 +90,8 @@ IMPORT void *ts_disp_buffer( void );
 /*
  * Say that a part of the back buffer changed. Nothing is sent while the
  * screen is held; the rectangles are gathered and go together when the
- * last hold is released.
+ * last hold is released, as a few separate rectangles (those near one
+ * another joined into one).
  */
 IMPORT ER  ts_disp_damage( CONST T_DISPRECT *r );
 
@@ -101,6 +109,18 @@ IMPORT ER  ts_disp_flush( void );
 IMPORT ER  ts_disp_clear( UW colour );
 
 /*
+ * Sends to the page not shown, then shown (TRUE), or to the page shown
+ * (FALSE). The page not shown holds the screen as it was a send ago, so
+ * each send also brings it the rectangles the last one sent; a flip
+ * takes from the screen's next refresh, and a send waits until the last
+ * flip has been taken before it writes the page that was shown.
+ * E_NOSPT when the screen has no second page or cannot be told which to
+ * show. The screen driver turns it on by itself where it was set up so
+ * and a check at start-up passed (disp.c).
+ */
+IMPORT ER  ts_disp_flip( BOOL on );
+
+/*
  * What has been sent since the counters were last read: rectangles, rows
  * and the number of times the screen was written to. Holding is meant to
  * keep the last of these small, so it is worth being able to see it.
@@ -109,9 +129,54 @@ typedef struct {
 	UD	sends;			/* times the screen was written to */
 	UD	rects;			/* rectangles those covered */
 	UD	rows;			/* rows of pixels copied */
+	UD	pixels;			/* pixels copied */
+	UD	send_us;		/* time spent copying them */
+	UD	flips;			/* pages shown in turn */
+	UD	waits;			/* sends that waited for the last flip to be taken */
+	UD	wait_us;		/* and how long, all told */
 } T_DISPSTAT;
 
 IMPORT ER  ts_disp_stat( T_DISPSTAT *st );
+
+/*
+ * How the flips kept to the screen's refresh, counted from the start
+ * (design 10.4.5). A refresh is the screen's own where it can say when
+ * its blanks end, else one at 60 Hz. 'apart' sorts each flip by how
+ * many refreshes came between it and the one before, rounded: within
+ * half of one (two flips for one refresh), one, two, three, four or
+ * more. 'phase' sorts the flips made where the blanks are known by
+ * the quarter of the refresh they were made in, counted from the end
+ * of the blank before. A send made while the flip before might not
+ * have been taken yet either finds, by the clock of the blanks, that
+ * it has been ('taken'), or waits for the blank at the screen
+ * ('waited'), asleep until shortly before it where the clock says when
+ * that is. 'off' counts the blanks seen more than DISP_BLANK_SLOP_US
+ * from where the clock put them.
+ */
+#define DISP_BLANK_SLOP_US	300
+
+typedef struct {
+	UD	frame_ns;		/* the refresh; 0: the screen does not say */
+	UD	flips;
+	UD	apart[5];		/* 0 (within half a refresh), 1, 2, 3, 4 or more */
+	UD	phase[4];
+	UD	due;			/* sends made while the flip before might not have been taken */
+	UD	taken;			/* of those, ones the clock said it had been */
+	UD	waited;			/* ones that waited for the blank at the screen */
+	UD	spin_us;		/* time spent watching the screen for it */
+	UD	sleep_us;		/* time asleep before it */
+	UD	off;
+} T_DISPFRAME;
+
+IMPORT ER  ts_disp_frames( T_DISPFRAME *st );
+
+/*
+ * Whether the sends keep to the refresh by themselves: with flipping on
+ * and the screen able to say when a flip was taken, a send waits for the
+ * flip before, so there is at most one a refresh. The refresh in us, or
+ * 0 when the sends do not wait and whoever sends must keep the pace.
+ */
+IMPORT UINT ts_disp_paced( void );
 
 #ifdef __cplusplus
 }

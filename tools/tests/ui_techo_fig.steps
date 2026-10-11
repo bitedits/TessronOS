@@ -1,0 +1,68 @@
+# 電子手帳 (design 11.23), for tools/ui_run.py: letters of a 記入欄 carried
+# into a figure of 基本図形編集, and the windows as they were left.
+# The figure (画用紙, 100,100 to 900,700) is opened first; the 手帳's three
+# windows come in front of it, the figure showing below the 予定表. The
+# 氏名 of the 住所録 is carried onto the figure: a new piece of text stands
+# where the outline's corner was; then the 〒 is carried onto that piece
+# and goes into it. The カレンダー moved, the 手帳 closed and opened
+# again: its windows come back where they were left.
+open 019a0f91-066f-706f-93da-ffe8150d6207
+wait 2000
+open 01a0d8c4-53c6-7a77-8b88-9cadbecf53c6
+expect techo: ready 私の手帳
+wait 800
+wins
+shot tf_start
+click 700 503
+expect techo: field addr 6
+key 4A
+key 4D 02
+wait 200
+hold 640 503
+wait 100
+move 620 503
+wait 100
+move 500 540
+wait 100
+move 320 560
+wait 300
+shot tf_carry
+up
+expect techo: carried text 青木 遥 (0)
+expect figure: text dropped as a new piece (0)
+wait 600
+shot tf_dropped
+click 640 375
+key 4A
+key 4D 02
+wait 200
+hold 600 375
+wait 100
+move 580 375
+wait 100
+move 450 500
+wait 100
+move 340 566
+wait 300
+up
+expect figure: text dropped into a piece (0)
+wait 600
+shot tf_dropped2
+# the カレンダー moved by its name band, the 手帳 saved and closed, opened again
+drag 600 80 640 110
+wait 300
+win 私の手帳（カレンダー）
+key 08 01
+wait 800
+key 28
+expect techo: places kept
+expect techo: closed
+wait 800
+open 01a0d8c4-53c6-7a77-8b88-9cadbecf53c6
+expect techo: ready 私の手帳
+wait 800
+wins
+win 私の手帳（カレンダー）
+shot tf_reopened
+# nothing it did was refused for want of a right
+absent !OACV!

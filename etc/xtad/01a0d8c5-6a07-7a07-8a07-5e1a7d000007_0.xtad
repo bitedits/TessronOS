@@ -1,0 +1,87 @@
+<tad version="1.0" encoding="UTF-8" filename="10.7 アニメーション付きスライド">
+<realtime autoplay="true">
+<!-- スライド全体の図形セグメント -->
+<figure>
+<figView top="0" left="0" right="1920" bottom="1080"/>
+<figDraw top="0" left="0" right="1920" bottom="1080"/>
+<figScale hunit="-72" vunit="-72"/>
+<!-- 背景矩形 -->
+<rect lineType="0" lineWidth="0" f_pat="1" left="0" top="0" right="1920" bottom="1080" fillColor="#1a1a2e" zIndex="0"/>
+<!-- スライドタイトル（テキストボックス） -->
+<document>
+<docView viewleft="100" viewtop="80" viewright="1820" viewbottom="150"/>
+<docDraw drawleft="100" drawtop="80" drawright="1820" drawbottom="150"/>
+<docScale hunit="-72" vunit="-72"/>
+<text id="title" lang="0" bpat="0" zIndex="90"/>
+<font size="48"/>
+<font face="sans-serif"/>
+<font color="#FFFFFF"/>
+実時間TADの活用例
+</document>
+<!-- 本文テキスト1 -->
+<document>
+<docView viewleft="150" viewtop="250" viewright="900" viewbottom="300"/>
+<docDraw drawleft="150" drawtop="250" drawright="900" drawbottom="300"/>
+<docScale hunit="-72" vunit="-72"/>
+<text id="body1" lang="0" bpat="0" zIndex="80"/>
+<font size="24"/>
+<font color="#CCCCCC"/>
+・マルチメディアプレゼンテーション
+</document>
+<!-- 本文テキスト2 -->
+<document>
+<docView viewleft="150" viewtop="320" viewright="900" viewbottom="370"/>
+<docDraw drawleft="150" drawtop="320" drawright="900" drawbottom="370"/>
+<docScale hunit="-72" vunit="-72"/>
+<text id="body2" lang="0" bpat="0" zIndex="80"/>
+<font size="24"/>
+<font color="#CCCCCC"/>
+・インタラクティブな教材
+</document>
+<!-- 本文テキスト3 -->
+<document>
+<docView viewleft="150" viewtop="390" viewright="900" viewbottom="440"/>
+<docDraw drawleft="150" drawtop="390" drawright="900" drawbottom="440"/>
+<docScale hunit="-72" vunit="-72"/>
+<text id="body3" lang="0" bpat="0" zIndex="80"/>
+<font size="24"/>
+<font color="#CCCCCC"/>
+・動的なデータビジュアライゼーション
+</document>
+<!-- 図解画像（初期状態で透明） -->
+<image id="diagram" href="{realId}_0_0.png" left="1000" top="250" right="1800" bottom="750" lineType="0" lineWidth="0" zIndex="10"/>
+<!-- アイコン画像（初期状態で画面外） -->
+<image id="icon1" href="{realId}_0_1.png" left="-100" top="300" right="0" bottom="400" lineType="0" lineWidth="0" zIndex="5"/>
+</figure>
+<realData>
+<stream number="1">
+<deviceName>display:</deviceName>
+</stream>
+<!-- 単位系設定（ミリ秒） -->
+<unitSystem id="10">
+<primaryUnit>
+<dimension>s</dimension>
+<derivation ratio="1/1000" sexp="-1"/>
+</primaryUnit>
+<auxiliaryUnit number="0" name="ms" derivation="1"/>
+</unitSystem>
+<unitSpec unitId="10" unitNumber="0"/>
+<!-- 図解画像のフェードイン（1500ms〜） -->
+<realGroup type="parallel" stream="1">
+<timeDelta value="1500"/>
+<interpolate function="linear" divisions="30">
+<imageControl ref="diagram" command="setAlpha" value="0.0"/>
+<imageControl ref="diagram" command="setAlpha" value="1.0"/>
+</interpolate>
+</realGroup>
+<!-- アイコンのスライドイン（2000ms〜） -->
+<realGroup type="parallel" stream="1">
+<timeDelta value="500"/>
+<interpolate function="spline" divisions="30">
+<imageControl ref="icon1" command="setPosition" left="-100" top="300" right="0" bottom="400"/>
+<imageControl ref="icon1" command="setPosition" left="50" top="300" right="150" bottom="400"/>
+</interpolate>
+</realGroup>
+</realData>
+</realtime>
+</tad>

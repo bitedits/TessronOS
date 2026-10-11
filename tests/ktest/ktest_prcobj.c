@@ -28,6 +28,9 @@
  *	  of its own, or waiting in its menu, is ended again and again; the
  *	  screen and the panels hold together after, and another window
  *	  still draws.
+ *	- surf: a window drawn through a surface mapped into its process,
+ *	  made larger, closed under the process and ended with it: the
+ *	  surface follows, and its pages are let go of each time.
  *	- dt ptr: the calendar and the console refuse pointers that are not
  *	  the process's.
  */
@@ -543,6 +546,236 @@ LOCAL void test_parallel( void )
 	}
 }
 
+/*
+ * A process makes, runs and deletes a task of its own KT_CHURN_N times
+ * (SP_TCHURN): the user stacks go where the one before had its, so the
+ * space does not grow (design 4.6.2), and all the pages come back when it
+ * ends.
+ */
+#define SP_TCHURN	39		/* as tests/uprog/svcprog.c */
+IMPORT UD	knl_pf_free_count( INT zone );
+IMPORT BOOL	knl_pt_reclaim( void );
+#if TS_NETSTACK_NETBSD
+IMPORT UD	knl_rump_pages( void );
+#endif
+
+/* Free pages, those the network stack keeps for itself counted as free */
+LOCAL UD pages_free( void )
+{
+#if TS_NETSTACK_NETBSD
+	UD	r, f;
+
+	do {
+		r = knl_rump_pages();
+		f = knl_pf_free_count(-1);
+	} while ( knl_rump_pages() != r );
+	return f + r;
+#else
+	return knl_pf_free_count(-1);
+#endif
+}
+
+LOCAL void test_task_churn( void )
+{
+	T_PSTS	psts;
+	UW	arg[8];
+	UD	before, after = 0;
+	ID	pid;
+	INT	t;
+
+	if ( !have_prog ) KT_SKIP("no program");
+	(void)knl_pt_reclaim();
+	before = pages_free();
+	knl_memset(arg, 0, sizeof(arg));
+	arg[0] = SP_TCHURN;
+	arg[1] = KT_CHURN_N;
+	pid = start_args(arg);
+	KT_ASSERT(pid > 0);
+	if ( pid <= 0 ) return;
+	psts.exitcd = -1;
+	KT_ASSERT_ER(ts_wai_prc(pid, &psts, 300000), E_OK);
+	for ( t = 0; t < 50; t++ ) {
+		(void)knl_pt_reclaim();
+		after = pages_free();
+		if ( after == before ) break;
+		tk_dly_tsk(100);
+	}
+	tm_printf((UB*)"  %d tasks made and deleted: ended with %d, free pages %d -> %d\n",
+		  (INT)KT_CHURN_N, psts.exitcd, (INT)before, (INT)after);
+	KT_ASSERT_EQ(psts.exitcd, 0);
+	KT_ASSERT_EQ(after, before);
+}
+
+/*
+ * Turns among the tasks of one priority (design 4.3.1; SP_SLICE). Six
+ * tasks of a process in the time-shared band never wait, on four
+ * processors: the one that notes its gaps still runs every few turns
+ * of CNF_SLICE_MS. And a task of the real-time band that sleeps and
+ * wakes is not held back by them: it wakes on time.
+ */
+#define SP_SLICE	40		/* as tests/uprog/svcprog.c */
+#define SL_TS_PRI	24		/* below the test's own task, in the time-shared band */
+#define SL_RT_PRI	14		/* in the real-time band */
+
+LOCAL ID slice_start( PRI pri, UW how, UW ms )
+{
+	UW	arg[8];
+
+	knl_memset(arg, 0, sizeof(arg));
+	arg[0] = SP_SLICE;
+	arg[1] = how;
+	arg[2] = ms;
+	return start_at(arg, pri);
+}
+
+LOCAL void test_slice( void )
+{
+	T_PSTS	psts;
+	ID	pid;
+
+	if ( !have_prog ) KT_SKIP("no program");
+	pid = slice_start(SL_TS_PRI, 0, 1500);
+	KT_ASSERT(pid > 0);
+	if ( pid <= 0 ) return;
+	psts.exitcd = -1;
+	KT_ASSERT_ER(ts_wai_prc(pid, &psts, 30000), E_OK);
+	tm_printf((UB*)"  six spinning tasks of one priority: the longest one went without running %d ms\n",
+		  psts.exitcd);
+	KT_ASSERT(psts.exitcd >= 0 && psts.exitcd <= 150);
+}
+
+LOCAL void test_slice_rt( void )
+{
+	T_PSTS	psts, rsts;
+	ID	load, rt;
+
+	if ( !have_prog ) KT_SKIP("no program");
+	load = slice_start(SL_TS_PRI, 0, 2500);
+	KT_ASSERT(load > 0);
+	if ( load <= 0 ) return;
+	tk_dly_tsk(300);			/* the spinning under way */
+	rt = slice_start(SL_RT_PRI, 1, 1500);
+	KT_ASSERT(rt > 0);
+	rsts.exitcd = -1;
+	if ( rt > 0 ) KT_ASSERT_ER(ts_wai_prc(rt, &rsts, 30000), E_OK);
+	psts.exitcd = -1;
+	KT_ASSERT_ER(ts_wai_prc(load, &psts, 30000), E_OK);
+	tm_printf((UB*)"  a real-time task sleeping 2 ms beside them woke at most %d ms late"
+		  " (the spinning: %d ms)\n", rsts.exitcd, psts.exitcd);
+	/*
+	 * Held back by them, it would wake only after turns of the six
+	 * (well over 100 ms) or not at all. What an emulator on a busy
+	 * host adds on its own is allowed for.
+	 */
+	KT_ASSERT(rsts.exitcd >= 0 && rsts.exitcd <= 60);
+	KT_ASSERT(psts.exitcd >= 0 && psts.exitcd < 4000);
+}
+
+/*
+ * A window drawn through a surface mapped into its process (wm_obj_surf,
+ * wm_obj_put; SP_SURF): what is put is on the screen; when the window is
+ * made larger the old surface stays the process's until it asks again,
+ * and then the new one is at another address and the old address no
+ * longer reaches its pages; when the window closes the surface's pages
+ * go and the process, still writing where they were, does not fault and
+ * is refused the put; a process ended while it draws leaves no surface.
+ */
+#define SP_SURF		29		/* as tests/uprog/svcprog.c */
+
+/* The screen's pixel at the middle of a window's work area */
+LOCAL UW work_px( INT wid )
+{
+	T_WMWIN		ref;
+	T_DISPSPEC	spec;
+	UB		*fb;
+
+	if ( wm_ref(wid, &ref) < E_OK || ts_disp_ref(&spec) < E_OK
+	  || ( fb = (UB *)ts_disp_buffer() ) == NULL ) return 0xFFFFFFFF;
+	return ((UW *)( fb + (UD)( ( ref.work.top + ref.work.bottom ) / 2 ) * spec.pitch ))
+		[( ref.work.left + ref.work.right ) / 2] & 0x00FFFFFF;
+}
+
+LOCAL void test_surf( void )
+{
+	T_PSTS		psts;
+	T_WMWIN		ref;
+	T_DPRECT	o;
+	TS_UUID		win;
+	UBINT		va = 0, va2 = 0;
+	UD		pg0 = 0, pg = 0, pages = 0, pages2 = 0, pa, pa2;
+	UW		arg[8];
+	INT		n0, wid;
+	ID		pid, owner = 0;
+
+	if ( !have_prog ) KT_SKIP("no program");
+	n0 = knl_wm_surf_count(&pg0);
+	knl_memset(arg, 0, sizeof(arg));
+	arg[0] = SP_SURF;
+	pid = start_args(arg);
+	KT_ASSERT(pid > 0);
+	if ( pid <= 0 ) return;
+	KT_ASSERT(wait_owned(pid, 1, 0));
+	KT_ASSERT(window_named("ktsurf", &win));
+	wid = wm_obj_wid(&win);
+	KT_ASSERT(wid > 0);
+	KT_ASSERT_ER(knl_wm_surf_ref(wid, &owner, &va, &pages), E_OK);
+	KT_ASSERT_EQ(owner, pid);
+	KT_ASSERT_EQ(knl_wm_surf_count(&pg), n0 + 1);
+	KT_ASSERT_EQ(pg, pg0 + pages);
+	pa = knl_prc_lookup(pid, va);
+	KT_ASSERT(pa != ~(UD)0);
+	KT_ASSERT_EQ(work_px(wid), 0x0000C0);
+
+	/* made larger: the old surface is put clipped, then a new one */
+	KT_ASSERT_ER(wm_ref(wid, &ref), E_OK);
+	o = ref.outer;
+	o.right += 80;
+	o.bottom += 40;
+	KT_ASSERT_ER(wm_move(wid, &o), E_OK);
+	KT_ASSERT_ER(send(pid, 1, NULL, 0), E_OK);
+	KT_ASSERT(wait_owned(pid, 2, 0));
+	KT_ASSERT_ER(knl_wm_surf_ref(wid, &owner, &va2, &pages2), E_OK);
+	KT_ASSERT(va2 != va && pages2 > pages);
+	KT_ASSERT(knl_prc_lookup(pid, va) != pa);		/* the old pages are out of its reach */
+	KT_ASSERT_EQ(knl_wm_surf_count(&pg), n0 + 1);
+	KT_ASSERT_EQ(pg, pg0 + pages2);
+	KT_ASSERT_EQ(work_px(wid), 0x00C000);
+	tm_printf((UB*)"  surface %d pages at 0x%lx, then %d pages at 0x%lx\n", (INT)pages, va,
+		  (INT)pages2, va2);
+
+	/* closed under it: the pages go, its writes go nowhere, the put is refused */
+	pa2 = knl_prc_lookup(pid, va2);
+	KT_ASSERT_ER(wm_close(wid), E_OK);
+	(void)wm_update();
+	KT_ASSERT_EQ(knl_wm_surf_count(&pg), n0);
+	KT_ASSERT_EQ(pg, pg0);
+	KT_ASSERT(knl_prc_lookup(pid, va2) != pa2);
+	KT_ASSERT_ER(send(pid, 2, NULL, 0), E_OK);
+	psts.exitcd = -1;
+	KT_ASSERT_ER(ts_wai_prc(pid, &psts, 10000), E_OK);
+	if ( psts.exitcd != 0 ) {
+		tm_printf((UB*)"  the program stopped at step %d\n", psts.exitcd);
+	}
+	KT_ASSERT_EQ(psts.exitcd, 0);
+
+	/* ended while it draws: no surface is left */
+	pid = start_args(arg);
+	KT_ASSERT(pid > 0);
+	if ( pid <= 0 ) return;
+	KT_ASSERT(wait_owned(pid, 1, 0));
+	KT_ASSERT_EQ(knl_wm_surf_count(NULL), n0 + 1);
+	KT_ASSERT_ER(send(pid, 3, NULL, 0), E_OK);
+	tk_dly_tsk(300);
+	KT_ASSERT_ER(ts_ter_prc(pid, -7), E_OK);
+	psts.exitcd = 0;
+	KT_ASSERT_ER(ts_wai_prc(pid, &psts, 20000), E_OK);
+	KT_ASSERT_EQ(psts.exitcd, -7);
+	KT_ASSERT_EQ(knl_wm_surf_count(&pg), n0);
+	KT_ASSERT_EQ(pg, pg0);
+	KT_ASSERT(!window_named("ktsurf", &win));
+	KT_ASSERT_EQ(wm_self_check(), 0);
+}
+
 EXPORT void ktest_prcobj( void )
 {
 	KT_RUN(test_program);
@@ -553,6 +786,10 @@ EXPORT void ktest_prcobj( void )
 	KT_RUN_SCREEN(test_kill_draw);
 	KT_RUN_SCREEN(test_kill_menu);
 	KT_RUN_SCREEN(test_kill_win);
+	KT_RUN_SCREEN(test_surf);
 	KT_RUN(test_dt_ptr);
 	KT_RUN(test_parallel);
+	KT_RUN(test_task_churn);
+	KT_RUN(test_slice);
+	KT_RUN(test_slice_rt);
 }

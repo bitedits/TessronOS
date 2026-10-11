@@ -1,0 +1,12 @@
+<tad version="1.0" encoding="UTF-8" filename="かな入力練習の練習">
+<document>
+<p>かな入力練習の練習</p>
+<p>練習の開始とリセット、先読みキー数。メニューの定義。</p>
+</document>
+<menu>
+<item code="start">開始</item>
+<item code="reset">リセット</item>
+<line/>
+<item code="lookahead">先読みキー数...</item>
+</menu>
+</tad>

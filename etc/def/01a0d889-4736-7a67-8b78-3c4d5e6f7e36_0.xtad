@@ -1,0 +1,10 @@
+<tad version="1.0" encoding="UTF-8" filename="マイクロカードの印刷">
+<document>
+<p>マイクロカードの印刷</p>
+<p>差し込み(結果を新しい実身に作る)と印刷設定。メニューの定義。</p>
+</document>
+<menu>
+<item code="print" key="P">印刷</item>
+<item code="print.setup">印刷設定</item>
+</menu>
+</tad>

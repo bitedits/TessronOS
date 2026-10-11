@@ -422,3 +422,64 @@ EXPORT ER om_obj_link_del( CONST TS_UUID *box, CONST TS_UUID *uuid )
 	}
 	return box_write(box, doc);
 }
+
+/*
+ * The links of a box made to be one to each of the objects given, in one
+ * write: links to others taken out, those it has kept where they are,
+ * the missing ones added below the lowest. E_OK at once when it has
+ * them all already.
+ */
+EXPORT ER om_obj_links_set( CONST TS_UUID *box, CONST TS_UUID *uuids, INT n )
+{
+	T_TAD	*doc;
+	T_VOBJ	v;
+	TS_UUID	id;
+	BOOL	*have;
+	INT	i, j, low = 0, changed = 0;
+	ER	er;
+
+	doc = box_read(box, &er);
+	if ( doc == NULL ) {
+		return er;
+	}
+	have = (BOOL *)Kcalloc((size_t)( n + 1 ), sizeof(BOOL));
+	if ( have == NULL ) {
+		tad_free(doc);
+		return E_NOMEM;
+	}
+	for ( i = tad_lnk_count(doc) - 1; i >= 0; i-- ) {
+		if ( tad_lnk_get(doc, i, &v) < E_OK ) continue;
+		for ( j = 0; j < n && ts_uuid_cmp(&v.target, &uuids[j]) != 0; j++ ) ;
+		if ( j == n || have[j] ) {
+			if ( tad_lnk_del(doc, &v.vobjid) >= E_OK ) changed++;
+		} else {
+			have[j] = TRUE;
+			if ( v.bottom > low ) low = v.bottom;
+		}
+	}
+	for ( j = 0; j < n; j++ ) {
+		if ( have[j] ) continue;
+		knl_memset(&v, 0, sizeof(v));
+		v.target = uuids[j];
+		v.left = 8;
+		v.top = low + 8;
+		v.right = 248;
+		v.bottom = v.top + 25;
+		low = v.bottom;
+		v.chsz = 14;
+		v.frcol = 0x000000;
+		v.chcol = 0x000000;
+		v.tbcol = 0xffffff;
+		v.bgcol = 0xffffff;
+		v.height = 25;
+		v.zoom = 100;
+		v.disp = TAD_D_PICT | TAD_D_NAME | TAD_D_FRAME;
+		if ( tad_lnk_add(doc, &v, &id) >= E_OK ) changed++;
+	}
+	Kfree(have);
+	if ( changed == 0 ) {
+		tad_free(doc);
+		return E_OK;
+	}
+	return box_write(box, doc);
+}

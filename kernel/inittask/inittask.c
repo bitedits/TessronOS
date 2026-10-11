@@ -20,6 +20,7 @@
 #include <sys/inittask.h>
 
 #include "kernel.h"
+#include <ts/lockup.h>
 
 #if !USE_IMALLOC
 INT	init_task_stack[INITTASK_STKSZ/sizeof(INT)];
@@ -85,6 +86,9 @@ LOCAL ER start_system( void )
  */
 LOCAL void shutdown_system( INT fin )
 {
+	/* no more looking for a stopped machine, and no watchdog to reset it while it goes down */
+	knl_lockup_stop();
+
 #if USE_SHUTDOWN
 	/* Platform dependent finalize sequence */
 	knl_finish_device();
@@ -129,6 +133,7 @@ LOCAL void init_task_main(void)
 		fin = (*(MAIN_FP)RI_USERINIT)(0, NULL);
 #endif
 		if ( fin > 0 ) {
+			knl_lockup_arm();	/* every processor watched from now on (lockup.c) */
 			fin = usermain();	/* User Main Program */
 		}
 #if USE_USERINIT

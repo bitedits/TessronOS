@@ -1,0 +1,314 @@
+# マイクロカード (design 11.18), for tools/ui_run.py: the template カード用紙 opened on
+# 設計画面, three fields named (one made a number of 3 digits), the cards typed in
+# through かな漢字変換, a card added and one duplicated, a mark, the list window
+# following the card shown; 検索条件画面: a new search with <, a narrowing with
+# ≒, a regular expression; 並べ替え and 重複検索 from the menu; 表示設定; saved,
+# closed and opened again. Then the sample 住所録: ≒ finding katakana by hiragana,
+# 差し込み into the label layout and the letter, and the found cards written out
+# in @形式. The card window is at 120,90 (its work area from 131,118), the
+# list window right of it.
+open 01a0d8c4-5334-7e95-8a06-b1c2d3e4f534
+expect mcard: ready カード用紙
+wait 800
+win カード用紙
+# 設計画面: なまえ, ねんれい (a number of 3), でんわ
+click 220 195
+key 88
+text namae
+key 28
+key 28
+expect mcard: design name 1 なまえ
+text nenrei
+key 28
+key 28
+text dennwa
+key 28
+key 28
+hold 320 220
+wait 400
+move 310 240
+wait 150
+move 300 254
+wait 150
+up
+expect mcard: design kind number
+click 390 220
+key 39
+text 3
+key 28
+wait 300
+shot mc_design
+click 615 136
+expect mcard: designed 3 fields
+# the cards
+click 400 170
+wait 200
+key 88
+text yamada
+key 28
+key 28
+key 39
+text 34
+key 28
+text 03-1234-5678
+key 28
+expect mcard: set 1 3 03-1234-5678
+key 11 01
+wait 300
+expect mcard: new card 2 of 2
+click 400 170
+wait 200
+key 88
+text suzuki
+key 28
+key 28
+key 39
+text 28
+key 28
+expect mcard: set 2 2 28
+key 07 01
+wait 300
+expect mcard: duplicated 3 of 3
+click 147 136
+expect mcard: mark 3 on
+wait 300
+shot mc_card
+# the list follows the card shown, and the other way round
+click 660 136
+expect mcard: list on
+wait 600
+win カード用紙（一覧）
+click 800 172
+expect mcard: card 1 of 3
+wait 300
+shot mc_list
+# 検索条件画面: ねんれい < 30
+click 605 136
+expect mcard: screen find
+click 400 195
+wait 200
+click 240 136
+key 39
+text 30
+click 592 136
+expect mcard: search new found 2 of 3
+wait 300
+shot mc_found
+# narrowed: なまえ ≒ず (the kana partly, as 異形字ゆらぎ同一視 reads it)
+click 605 136
+expect mcard: screen find
+click 400 170
+wait 200
+click 325 136
+key 88
+text zu
+key 28
+wait 300
+shot mc_find2
+click 524 136
+expect mcard: search narrow found 2 of 3
+click 537 136
+expect mcard: search off
+# a regular expression on でんわ, the other conditions emptied
+click 605 136
+expect mcard: screen find
+click 400 170
+wait 200
+key 2A
+click 400 195
+wait 200
+key 2A
+click 400 220
+wait 200
+click 356 136
+key 39
+text 03-
+click 592 136
+expect mcard: search new found 1 of 3
+click 537 136
+expect mcard: search off
+# 並べ替え from the menu: なまえ, 昇順
+click 400 250 1
+wait 400
+move 410 350
+wait 150
+move 470 350
+wait 150
+move 500 550
+wait 150
+click 500 550
+expect mcard: sort panel
+wait 500
+click 290 241
+click 525 465
+wait 500
+shot mc_sortok
+click 534 369
+expect mcard: sorted 1 up
+wait 300
+shot mc_sorted
+# 重複検索 on なまえ: the menu opens with 編集 where it was chosen
+click 400 250 1
+wait 400
+move 410 250
+wait 150
+move 470 250
+wait 150
+move 500 470
+wait 150
+click 500 470
+expect mcard: dups panel
+wait 500
+wait 300
+shot mc_dups_panel
+click 290 259
+click 530 447
+expect mcard: dups 1 found 2
+wait 300
+shot mc_dups
+click 537 136
+expect mcard: search off
+# 表示設定: the card's letters at 14 points
+click 400 250 1
+wait 400
+move 410 210
+wait 150
+move 470 210
+wait 150
+move 500 230
+wait 150
+click 500 230
+expect mcard: view panel
+wait 500
+click 430 270
+click 570 440
+expect mcard: view card 14 list 10 names on
+wait 300
+shot mc_view
+# マーク付カード新規検索: the menu opens with 表示 where it was chosen
+click 400 250 1
+wait 400
+move 410 330
+wait 150
+move 470 330
+wait 150
+move 500 530
+wait 150
+click 500 530
+expect mcard: mark search new found 1
+wait 300
+shot mc_marked
+click 537 136
+expect mcard: search off
+# saved, closed, opened again as it was
+key 16 01
+expect mcard: saved
+key 08 01
+expect mcard: closed
+open 01a0d8c4-5334-7e95-8a06-b1c2d3e4f534
+expect mcard: ready カード用紙 fields 3 cards 3
+wait 800
+shot mc_reopened
+key 08 01
+expect mcard: closed
+# the sample 住所録: 氏名 ≒たなか finds タナカ
+open 01a0d8c4-5336-7a17-8c28-d3e4f5a6b736
+expect mcard: ready 住所録 fields 8 cards 12
+wait 800
+win 住所録
+click 605 136
+expect mcard: screen find
+click 400 170
+wait 200
+click 325 136
+key 88
+text tanaka
+key 28
+click 592 136
+expect mcard: search new found 1 of 12
+wait 300
+shot mc_sample_fold
+click 537 136
+expect mcard: search off
+# 電話 /03- : three cards
+click 605 136
+click 400 170
+wait 200
+key 2A
+click 400 270
+wait 200
+click 356 136
+key 39
+text 03-
+click 592 136
+expect mcard: search new found 3 of 12
+wait 300
+# 差し込み: the three cards found into 宛名ラベル, a figure of labels two across,
+# printed through the desktop's panel (印刷)
+click 400 250 1
+wait 400
+move 410 270
+wait 150
+move 470 270
+wait 150
+click 500 270
+expect mcard: print panel
+wait 500
+click 290 256
+wait 300
+shot mc_print_panel
+click 560 465
+expect mcard: print 宛名ラベル cards 3 pages 1 (0)
+wait 1500
+shot mc_merged_label
+click 863 511
+expect mcard: print answered 0
+wait 800
+click 400 500
+wait 500
+# 新しい実身へ: the cards found in ＠形式, the link to the tray
+click 400 250 1
+wait 400
+move 410 130
+wait 150
+move 470 130
+wait 150
+move 500 150
+wait 150
+click 500 150
+expect mcard: export panel
+wait 500
+click 348 310
+wait 300
+shot mc_export_panel
+click 622 401
+expect mcard: exported 1
+wait 500
+shot mc_exported
+# 差し込み of the card shown into the letter 案内状, a text
+click 400 250 1
+wait 400
+move 410 370
+wait 150
+move 470 370
+wait 150
+click 500 370
+expect mcard: print panel
+wait 500
+click 290 273
+wait 200
+click 318 390
+wait 300
+shot mc_print_letter
+click 560 465
+expect mcard: print 案内状 cards 1 pages 1 (0)
+wait 1500
+shot mc_merged_letter
+click 863 511
+expect mcard: print answered 0
+wait 800
+click 400 500
+key 08 01
+expect mcard: closed
+# nothing it did was refused for want of a right
+absent !OACV!

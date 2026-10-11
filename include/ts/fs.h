@@ -38,7 +38,13 @@ extern "C" {
 #define FS_DEVNM_MAX		16		/* bytes of a device name, NUL included */
 #define FS_FIMPNM_MAX		16		/* bytes of a fimp name, NUL included */
 
-#define FS_MAX_MOUNT		8		/* mounts at a time */
+/*
+ * Mounts at a time (CNF_MAX_VOL). A mount's entry is made the first time
+ * it is wanted and kept for the next, so what is held is what has been
+ * used at once, not this many. A caller that lists the mounts asks how
+ * many there are first (fs_mounts(NULL, 0)).
+ */
+#define FS_MAX_MOUNT		4096
 #define FS_MAX_FILE		4096		/* descriptors, the whole system's */
 #define FS_PRC_FILE		1024		/* of them one process may hold at a time */
 
@@ -75,6 +81,11 @@ extern "C" {
 #define EX_NOTEMPTY		(-39)
 #define EX_NOTSUP		(-95)
 #define EX_INTR			(-4)
+#define EX_AGAIN		(-11)		/* FS_O_NONBLOCK: nothing to read, no room to write */
+#define EX_NOTTY		(-25)		/* not a terminal */
+#define EX_PIPE			(-32)		/* a pipe no one reads any more */
+#define EX_NXIO			(-6)		/* a terminal whose other side is gone */
+#define EX_NOEXEC		(-8)		/* not a program that can be run */
 
 /*
  * Open flags (fs_open)
@@ -88,6 +99,8 @@ extern "C" {
 #define O_TRUNC			0x0400
 #define O_APPEND		0x0800
 #define O_DIRECTORY		0x1000
+#define FS_O_NONBLOCK		0x2000		/* a pipe or a terminal: EX_AGAIN instead of waiting */
+#define FS_O_NOCTTY		0x4000		/* a terminal opened does not become the controlling one */
 
 /*
  * Mount flags (fs_attach, fs_attach_dev)
@@ -107,6 +120,8 @@ extern "C" {
 #define FS_IFMT			0xF000
 #define FS_IFREG		0x8000
 #define FS_IFDIR		0x4000
+#define FS_IFCHR		0x2000		/* a device of characters: /dev, a terminal */
+#define FS_IFIFO		0x1000		/* a pipe */
 #define FS_IRWXU		0x01C0
 
 typedef struct {
@@ -116,6 +131,24 @@ typedef struct {
 	UD	ino;			/* first cluster, or another fimp key */
 	TS_UUID	dev;			/* the device object of the volume, zero for none */
 } T_FSTAT;
+
+/*
+ * The longer answer of fs_xstat and fs_fxstat, for the POSIX layer
+ * (lib/libposix): T_FSTAT and what a fimp may say beyond it -- the
+ * links to it, its owner's numbers (knl_fs_uid_of), which device of
+ * characters it is. What a fimp leaves 0 the layer fills in: nlink 1,
+ * the owner the system (0). T_FSTAT itself keeps its size: programs
+ * built before hand it to fs_stat.
+ */
+typedef struct {
+	T_FSTAT	st;
+	UINT	nlink;
+	UINT	uid, gid;
+	UINT	rdev;			/* FS_IFCHR: which one (devfs) */
+	UD	atime, ctime;		/* TS_TIME, 0: as mtime */
+	UINT	blksize;
+	UINT	resv[7];
+} T_FSXSTAT;
 
 typedef struct {
 	UD	ino;
@@ -161,6 +194,20 @@ typedef struct fs_fimp {
 	ER	(*statvfs)( T_MOUNT *m, T_FSSTAT *st );
 	ER	(*sync)( T_MOUNT *m );
 	ER	(*utime)( T_MOUNT *m, CONST char *path, UD mtime );	/* NULL: times are not set */
+
+	/*
+	 * What the POSIX layer needs besides (NULL where a fimp has none of
+	 * it): the longer stat, of a path and of an open file; a request of
+	 * a device (FS_IOC_*, arg in the kernel's memory); which of
+	 * FS_POLL_* an open file is ready for, without waiting; a second
+	 * name for a file (link); and the permission bits set (chmod).
+	 */
+	ER	(*xstat)( T_MOUNT *m, CONST char *path, T_FSXSTAT *st );
+	ER	(*fxstat)( T_FILE *f, T_FSXSTAT *st );
+	ER	(*ioctl)( T_FILE *f, UINT cmd, void *arg );
+	UINT	(*poll)( T_FILE *f, UINT events );
+	ER	(*link)( T_MOUNT *m, CONST char *from, CONST char *to );
+	ER	(*chmod)( T_MOUNT *m, CONST char *path, UINT mode );
 } T_FIMP;
 
 struct fs_mount {
@@ -205,6 +252,17 @@ struct fs_file {
 	UD	hint_clus;
 	ID	owner;			/* the process it was opened for, 0 for the kernel */
 	BOOL	used;
+
+	/*
+	 * An open file is shared: every descriptor made from it -- by
+	 * fs_dup, or handed to a child (knl_fs_give) -- names this one, with
+	 * its offset and flags, as POSIX's open file description. refs
+	 * counts the descriptors, busy the calls at work on it; the fimp's
+	 * close comes when both are gone. obj is the fimp's own.
+	 */
+	INT	refs;
+	INT	busy;
+	void	*obj;
 };
 
 /*
@@ -235,6 +293,125 @@ IMPORT ER  fs_statvfs( CONST char *path, T_FSSTAT *st );
 IMPORT ER  fs_sync( void );
 
 /*
+ * The POSIX layer's (design 5.8): a second descriptor of the same open
+ * file, a pipe, the longer stat, a request of a device, the flags of an
+ * open file, waiting for several at once, a second name and the
+ * permission bits.
+ */
+IMPORT INT fs_dup( INT fd );
+IMPORT ER  fs_pipe( INT fd[2] );
+IMPORT ER  fs_xstat( CONST char *path, T_FSXSTAT *st );
+IMPORT ER  fs_fxstat( INT fd, T_FSXSTAT *st );
+IMPORT ER  fs_ioctl( INT fd, UINT cmd, void *arg );
+IMPORT INT fs_fcntl( INT fd, INT cmd, INT arg );
+IMPORT ER  fs_link( CONST char *from, CONST char *to );
+IMPORT ER  fs_chmod( CONST char *path, UINT mode );
+
+/* fs_fcntl: the flags of the open file (O_APPEND and FS_O_NONBLOCK may be set) */
+#define FS_F_GETFL		3
+#define FS_F_SETFL		4
+
+/* fs_poll: as POSIX's poll */
+#define FS_POLL_IN		0x0001
+#define FS_POLL_PRI		0x0002
+#define FS_POLL_OUT		0x0004
+#define FS_POLL_ERR		0x0008
+#define FS_POLL_HUP		0x0010
+#define FS_POLL_NVAL		0x0020
+
+typedef struct {
+	INT	fd;
+	UINT	events;
+	UINT	revents;		/* out */
+} T_FSPOLL;
+
+/* How many are ready (0 when the time ran out), EX_INTR on a signal; tmout in ms, TMO_FEVR */
+IMPORT INT fs_poll( T_FSPOLL *fds, INT n, TMO tmout );
+
+/*
+ * Requests of a device (fs_ioctl). A terminal (devfs, design 5.8.4)
+ * takes the termios ones, its size, its foreground group and becoming
+ * the session's terminal; a pipe and a terminal say what can be read.
+ */
+#define FS_IOC_TCGETS		1	/* T_FSTERMIOS * */
+#define FS_IOC_TCSETS		2	/* now */
+#define FS_IOC_TCSETSW		3	/* once what was written has gone out */
+#define FS_IOC_TCSETSF		4	/* and what came in thrown away */
+#define FS_IOC_GWINSZ		5	/* T_FSWINSZ * */
+#define FS_IOC_SWINSZ		6	/* the foreground group is told SIGWINCH */
+#define FS_IOC_GPGRP		7	/* INT *: the foreground group */
+#define FS_IOC_SPGRP		8	/* INT *: one of the caller's session */
+#define FS_IOC_SCTTY		9	/* the caller's session's terminal from now on */
+#define FS_IOC_NOTTY		10	/* and no longer */
+#define FS_IOC_GPTN		11	/* INT *: the number of the pty (/dev/pts/N) */
+#define FS_IOC_NREAD		12	/* INT *: bytes that can be read now */
+#define FS_IOC_FLUSH		13	/* INT *: 0 what came in, 1 what goes out, 2 both */
+#define FS_IOC_DRAIN		14	/* wait until what was written has been read */
+#define FS_IOC_GSID		15	/* INT *: the session whose terminal it is */
+#define FS_IOC_ISTTY		16	/* E_OK for a terminal, EX_NOTTY otherwise */
+
+/* The termios of a terminal: NetBSD's flag values and indexes of c_cc */
+#define FS_NCCS			20
+typedef struct {
+	UINT	c_iflag;
+	UINT	c_oflag;
+	UINT	c_cflag;
+	UINT	c_lflag;
+	UB	c_cc[FS_NCCS];
+	INT	c_ispeed;
+	INT	c_ospeed;
+} T_FSTERMIOS;
+
+typedef struct {
+	UH	ws_row, ws_col;
+	UH	ws_xpixel, ws_ypixel;
+} T_FSWINSZ;
+
+/*
+ * Descriptors handed to another process (the child ts_spn_prc starts):
+ * a new descriptor of each open file, owned by 'to', in out[] in the
+ * same order. EX_BADF when one is not the owner's 'from'.
+ */
+IMPORT ER   knl_fs_give( CONST INT *fds, INT n, ID from, ID to, INT *out );
+IMPORT INT  knl_fs_dup_as( INT fd, ID owner );
+IMPORT ER   knl_fs_pipe_as( INT fd[2], ID owner );
+
+/*
+ * Something a waiter of fs_poll or of a pipe or terminal may want
+ * changed: they look again. Called holding none of the layer's locks.
+ */
+IMPORT void knl_fs_wake( void );
+
+/* Waiting a slice for knl_fs_wake: FALSE when the caller is to stop (a signal, its end) */
+IMPORT BOOL knl_fs_wait_slice( TMO ms );
+
+/* The kinds of file the layer keeps besides the volumes (peripheral_kernel/fs) */
+IMPORT CONST T_FIMP knl_fimp_pipe;
+IMPORT CONST T_FIMP knl_fimp_ttydev;	/* null, tty, ptmx ... opened (devfs.c) */
+IMPORT CONST T_FIMP knl_fimp_obj;	/* the object world at "/" */
+
+/* Mounted at the start (devinit): the object world at "/" */
+IMPORT void knl_fs_posix_mounts( void );
+
+/*
+ * The devices of characters of the POSIX programs as device objects
+ * (devfs.c): added at the start; whether an object is one of them; one
+ * opened as a file, the open file's calls then knl_fimp_ttydev's.
+ */
+IMPORT void knl_ttydev_start( void );
+IMPORT BOOL knl_ttydev_is( CONST TS_UUID *u );
+IMPORT ER   knl_ttydev_open( CONST TS_UUID *u, UINT oflags, T_FILE *f );
+
+/* dev (objfs.c) made to list the devices there are now; waits up to tmo ms (TMO_POL: not) */
+IMPORT void knl_objfs_dev_sync( TMO tmo );
+
+/* The program object a path of the object world names (E_NOEXS: none, EX_ISDIR...) */
+IMPORT ER   knl_objfs_lookup( CONST char *path, TS_UUID *p_uuid );
+
+/* The number POSIX shows for a user or a group object (0 the system) */
+IMPORT UINT knl_fs_uid_of( CONST TS_UUID *who );
+
+/*
  * Mounting through a device object (design 12.2.3): the volume of the
  * disk whose object devkey names, at FS_MEDIA_DIR "/" and the device's
  * name. The key is the caller's and must allow reading record 1 (the
@@ -248,6 +425,40 @@ IMPORT ER  fs_sync( void );
  */
 IMPORT ER  fs_attach_dev( ID devkey, CONST char *fimpnm, UINT flags );
 IMPORT ER  fs_detach_dev( ID devkey );
+
+/*
+ * What is on a disk or a partition (design 7.6), as its first blocks
+ * say. fs_attach_dev with no fimp (NULL) mounts with the fimp of the
+ * kind found, and answers EX_NOTSUP for a kind no fimp mounts: TSFS,
+ * which is attached as a volume of objects instead (ob_att_vol), exFAT,
+ * NTFS, ext2/3/4, ISO 9660 and the BTRON file system, which file
+ * conversion reads without mounting. The device object of a disk tells
+ * the kind among its attributes (tessronos.format).
+ */
+#define FS_KIND_NONE		0		/* not looked at */
+#define FS_KIND_FAT12		1
+#define FS_KIND_FAT16		2
+#define FS_KIND_FAT32		3
+#define FS_KIND_EXFAT		4
+#define FS_KIND_NTFS		5
+#define FS_KIND_EXT		6		/* ext2, ext3, ext4 */
+#define FS_KIND_TSFS		7		/* the native TSFS */
+#define FS_KIND_BTRON		8		/* the BTRON file system, or a CD-ROM carrying one */
+#define FS_KIND_ISO9660		9
+#define FS_KIND_PARTED		10		/* a whole disk: the volumes are in its partitions */
+#define FS_KIND_BLANK		11		/* nothing written at its start */
+#define FS_KIND_UNKNOWN		12
+
+typedef struct {
+	UINT	kind;			/* FS_KIND_* */
+	UB	name[16];		/* "FAT32", "TSFS", ... */
+	UB	label[64];		/* the volume's own name, UTF-8; empty for none */
+	UB	fimp[FS_FIMPNM_MAX];	/* the fimp that mounts it, empty for none */
+	UD	bytes;			/* how large the disk or partition is */
+	BOOL	rdonly;			/* the medium is protected from writing */
+	TS_UUID	vuuid;			/* TSFS: the volume's own UUID */
+	TS_UUID	top;			/* TSFS: its top object, zero for none */
+} T_FSPROBE;
 
 /*
  * The mounts there are, up to max of them into buf; answers how many
@@ -284,6 +495,13 @@ IMPORT ER   knl_fs_attach_media( CONST char *fimpnm, CONST char *devnm, UINT fla
 IMPORT ER   knl_fs_detach_media( CONST char *devnm );
 IMPORT BOOL knl_fs_mount_of( CONST char *devnm, T_FSMNT *p_mnt );
 IMPORT INT  knl_fs_revoke( CONST char *devnm );
+
+/* Entries of the mount table made so far, and (p_used) how many are mounts now */
+IMPORT INT  knl_fs_slots( INT *p_used );
+
+/* What is on a device, by its name (kernel/fs/fsprobe.c); the fimp of a kind, "" for none */
+IMPORT ER   knl_fs_probe( CONST char *devnm, T_FSPROBE *p );
+IMPORT CONST char *knl_fs_kind_fimp( UINT kind );
 
 /*
  * FAT file system (kernel/fs/fatfs.c)

@@ -34,6 +34,12 @@
  *	the binner of one job beside the renderer of the one before, as the
  *	hardware could, is left for later.
  *
+ *	Address spaces. A backend may give page tables of its own besides
+ *	the kernel's (T_GPUOPS as_create). A job submitted in one holds a
+ *	reference to it, so that the table outlives every queued job that
+ *	runs on it; the backend switches its MMU to the job's table when the
+ *	job starts.
+ *
  *	A waiter clears the "a fence is over" bit, looks at the last fence
  *	that is over, and only then waits for the bit. The task sets the
  *	number before the bit, so a fence that ends between the look and the
@@ -76,9 +82,15 @@ struct gpubo {
 	CONST T_GPUOPS	*bound;		/* the backend whose MMU holds it */
 };
 
+struct gpuas {
+	void		*priv;		/* the backend's */
+	UINT		refcnt;
+};
+
 typedef struct qjob {
 	struct qjob	*next;
 	D		fence;
+	T_GPUAS		*as;		/* NULL: the kernel's space */
 	T_GPUJOB	job;
 	INT		nbo;
 	T_GPUBO		*bo[1];		/* nbo of them */
@@ -103,6 +115,7 @@ LOCAL D			failed[NFAILED];
 LOCAL INT		failed_at;
 LOCAL volatile ER	end_result;	/* what the backend said of the running job */
 LOCAL UINT		bound_bos;	/* live BOs in the backend's MMU */
+LOCAL UINT		live_as;	/* address spaces of the backend's that are alive */
 
 /* ---------------------------------------------------------------- caches */
 
@@ -130,7 +143,7 @@ LOCAL void bo_free( T_GPUBO *bo )
 		bound_bos--;
 		ISpinUnlock(&gpu_lock, &imask);
 	}
-	for ( i = 0; i < bo->npages; i++ ) {
+	for ( i = 0; i < bo->npages && ( bo->flags & GPU_BO_WRAPPED ) == 0; i++ ) {
 		if ( bo->pa[i] != 0 ) {
 			knl_free_pages(knl_pa_to_pf(bo->pa[i]), 0);
 		}
@@ -207,6 +220,73 @@ EXPORT T_GPUBO *knl_gpu_bo_create( SZ size, UINT flags, ER *p_er )
 		bound_bos++;
 		ISpinUnlock(&gpu_lock, &imask);
 	}
+	if ( p_er != NULL ) *p_er = E_OK;
+	return bo;
+
+out:
+	if ( p_er != NULL ) *p_er = er;
+	return NULL;
+}
+
+/*
+ * Memory that is someone else's -- the screen's back buffer, a window's
+ * pixels -- entered in the GPU's MMU as it is. The pages stay where and
+ * whose they are: letting the BO go takes them out of the MMU and frees
+ * nothing. The owner keeps them alive while a job can use them, and has
+ * to make what it wrote through the processor's caches reach memory
+ * before the GPU reads it.
+ */
+EXPORT T_GPUBO *knl_gpu_bo_wrap( CONST UD *pa, UD npages, ER *p_er )
+{
+	T_GPUBO		*bo;
+	CONST T_GPUOPS	*ops;
+	UD		i;
+	UINT		imask;
+	ER		er = E_OK;
+
+	ISpinLock(&gpu_lock, &imask);
+	ops = gpu_ops;
+	ISpinUnlock(&gpu_lock, &imask);
+	if ( ops == NULL ) {
+		er = E_NOEXS;
+		goto out;
+	}
+	if ( npages == 0 || ( npages << PAGE_SHIFT ) > GPU_BO_MAXSIZE ) {
+		er = E_PAR;
+		goto out;
+	}
+	for ( i = 0; i < npages; i++ ) {
+		if ( ( pa[i] & ( PAGE_SIZE - 1 ) ) != 0
+		  || ( ops->pa_limit != 0 && pa[i] + PAGE_SIZE > ops->pa_limit ) ) {
+			er = E_PAR;		/* where the GPU cannot reach */
+			goto out;
+		}
+	}
+	bo = (T_GPUBO *)Kmalloc(sizeof(T_GPUBO));
+	if ( bo == NULL ) {
+		er = E_NOMEM;
+		goto out;
+	}
+	knl_memset(bo, 0, sizeof(T_GPUBO));
+	bo->npages = npages;
+	bo->flags = GPU_BO_WRAPPED;
+	bo->refcnt = 1;
+	bo->pa = (UD *)Kmalloc(sizeof(UD) * npages);
+	if ( bo->pa == NULL ) {
+		Kfree(bo);
+		er = E_NOMEM;
+		goto out;
+	}
+	knl_memcpy(bo->pa, pa, sizeof(UD) * npages);
+	er = ops->bo_bind(gpu_priv, bo, npages, &bo->offset);
+	if ( er < E_OK ) {
+		bo_free(bo);
+		goto out;
+	}
+	bo->bound = ops;
+	ISpinLock(&gpu_lock, &imask);
+	bound_bos++;
+	ISpinUnlock(&gpu_lock, &imask);
 	if ( p_er != NULL ) *p_er = E_OK;
 	return bo;
 
@@ -397,9 +477,94 @@ EXPORT ER knl_gpu_bo_wait( T_GPUBO *bo, TMO_U tmout )
 	return wait_until(bo_idle, bo, tmout);
 }
 
+/* ---------------------------------------------------------------- address spaces */
+
+EXPORT T_GPUAS *knl_gpu_as_create( ER *p_er )
+{
+	CONST T_GPUOPS	*ops;
+	T_GPUAS		*as;
+	UINT		imask;
+	ER		er;
+
+	ISpinLock(&gpu_lock, &imask);
+	ops = gpu_ops;
+	ISpinUnlock(&gpu_lock, &imask);
+	if ( ops == NULL || ops->as_create == NULL ) {
+		er = ( ops == NULL ) ? E_NOEXS : E_NOSPT;
+		goto out;
+	}
+	as = (T_GPUAS *)Kmalloc(sizeof(T_GPUAS));
+	if ( as == NULL ) {
+		er = E_NOMEM;
+		goto out;
+	}
+	as->refcnt = 1;
+	er = ops->as_create(gpu_priv, &as->priv);
+	if ( er < E_OK ) {
+		Kfree(as);
+		goto out;
+	}
+	ISpinLock(&gpu_lock, &imask);
+	live_as++;
+	ISpinUnlock(&gpu_lock, &imask);
+	if ( p_er != NULL ) *p_er = E_OK;
+	return as;
+
+out:
+	if ( p_er != NULL ) *p_er = er;
+	return NULL;
+}
+
+EXPORT void knl_gpu_as_get( T_GPUAS *as )
+{
+	UINT	imask;
+
+	ISpinLock(&gpu_lock, &imask);
+	as->refcnt++;
+	ISpinUnlock(&gpu_lock, &imask);
+}
+
+EXPORT void knl_gpu_as_put( T_GPUAS *as )
+{
+	UINT	imask;
+	BOOL	last;
+
+	if ( as == NULL ) return;
+	ISpinLock(&gpu_lock, &imask);
+	last = ( --as->refcnt == 0 );
+	if ( last ) live_as--;
+	ISpinUnlock(&gpu_lock, &imask);
+	if ( last ) {
+		gpu_ops->as_destroy(gpu_priv, as->priv);
+		Kfree(as);
+	}
+}
+
+EXPORT void *knl_gpu_as_priv( T_GPUAS *as )
+{
+	return ( as != NULL ) ? as->priv : NULL;
+}
+
+EXPORT ER knl_gpu_as_bind( T_GPUAS *as, T_GPUBO *bo, UW *p_va )
+{
+	if ( as == NULL || bo == NULL || p_va == NULL || gpu_ops == NULL ) return E_PAR;
+	return gpu_ops->as_bind(gpu_priv, as->priv, bo, bo->npages, p_va);
+}
+
+EXPORT void knl_gpu_as_unbind( T_GPUAS *as, T_GPUBO *bo, UW va )
+{
+	if ( as == NULL || bo == NULL || va == 0 || gpu_ops == NULL ) return;
+	gpu_ops->as_unbind(gpu_priv, as->priv, va, bo->npages);
+}
+
 /* ---------------------------------------------------------------- jobs */
 
 EXPORT D knl_gpu_submit( CONST T_GPUJOB *job, T_GPUBO *CONST *bo, INT nbo )
+{
+	return knl_gpu_submit_as(job, bo, nbo, NULL);
+}
+
+EXPORT D knl_gpu_submit_as( CONST T_GPUJOB *job, T_GPUBO *CONST *bo, INT nbo, T_GPUAS *as )
 {
 	QJOB	*q;
 	INT	i;
@@ -423,7 +588,9 @@ EXPORT D knl_gpu_submit( CONST T_GPUJOB *job, T_GPUBO *CONST *bo, INT nbo )
 	if ( q == NULL ) return E_NOMEM;
 	q->next = NULL;
 	q->job = *job;
+	q->as = as;
 	q->nbo = nbo;
+	if ( as != NULL ) knl_gpu_as_get(as);
 	for ( i = 0; i < nbo; i++ ) {
 		q->bo[i] = bo[i];
 		knl_gpu_bo_get(bo[i]);
@@ -433,6 +600,7 @@ EXPORT D knl_gpu_submit( CONST T_GPUJOB *job, T_GPUBO *CONST *bo, INT nbo )
 	if ( job->after < 0 || job->after > fence_next ) {
 		ISpinUnlock(&gpu_lock, &imask);
 		for ( i = 0; i < nbo; i++ ) knl_gpu_bo_put(bo[i]);
+		knl_gpu_as_put(as);
 		Kfree(q);
 		return E_PAR;
 	}
@@ -467,7 +635,7 @@ LOCAL ER run_job( QJOB *q )
 	}
 	tk_clr_flg(gpu_flg, ~FLG_END);
 	end_result = E_OK;
-	er = gpu_ops->kick(gpu_priv, &q->job);
+	er = gpu_ops->kick(gpu_priv, &q->job, ( q->as != NULL ) ? q->as->priv : NULL);
 	if ( er < E_OK ) {
 		return er;
 	}
@@ -513,6 +681,7 @@ LOCAL void gpu_task( INT stacd, void *exinf )
 			ISpinUnlock(&gpu_lock, &imask);
 
 			for ( i = 0; i < q->nbo; i++ ) knl_gpu_bo_put(q->bo[i]);
+			knl_gpu_as_put(q->as);
 			Kfree(q);
 			tk_set_flg(gpu_flg, FLG_DONE);
 		}
@@ -573,7 +742,7 @@ EXPORT ER knl_gpu_unregister( void )
 	UINT	imask;
 
 	ISpinLock(&gpu_lock, &imask);
-	if ( q_head != NULL || q_running || bound_bos != 0 ) {
+	if ( q_head != NULL || q_running || bound_bos != 0 || live_as != 0 ) {
 		ISpinUnlock(&gpu_lock, &imask);
 		return E_BUSY;
 	}

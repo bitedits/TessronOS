@@ -15,11 +15,27 @@
  *	  〈機器〉〈機器情報〉 the devices; [表示] opens the page of the one
  *			      chosen -- the screen's size, the network card,
  *			      the USB devices, the disks, the video, the
- *			      keyboard, the sound
+ *			      keyboard, the sound: where it goes (chosen at
+ *			      once and kept), what plays, its volume, and
+ *			      〈試聴〉
  *	  〈機器〉〈電源管理〉 how the machine is powered, and 再起動 and
- *			      電源を切る
+ *			      電源を切る; the limit of the processors' clock,
+ *			      the clock now with the temperature, what the
+ *			      firmware says of the supply, and the watchdog,
+ *			      the limit and the watchdog
+ *			      kept with [設定]
  *	  〈画面〉〈背景〉	   the wallpaper, one of the wallpaper box's pictures
  *	  〈画面〉〈配色〉	   the colour scheme
+ *	  〈画面〉〈ウィンドウ〉 the windows' look: how far the frame, or the
+ *			      whole window, is seen through, the colours
+ *			      washed over the frame and the title band, the
+ *			      corners, the shadow, the spread of what shows
+ *			      through, the opening and closing, and whether a
+ *			      window dragged moves as it goes; each takes at
+ *			      once, and is kept a moment after the last change
+ *			      and when the window closes; 初期値 and 取り消し
+ *			      put back what nothing says and what there was
+ *			      when the window opened
  *	  〈書体〉		   the faces of the font box
  *	  〈バージョン〉	   the system and the programs of the program box,
  *			   each with its version (R1.000) at the right end;
@@ -45,6 +61,7 @@
 #include <ts/look.h>
 #include <ts/json.h>
 #include <ts/dtreq.h>
+#include <ts/snd.h>
 
 #define TICK_MS		20
 #define TEXT_MAX	4096
@@ -55,8 +72,9 @@
 #define S_POWER		2
 #define S_WALL		3
 #define S_SCHEME	4
-#define S_FONT		5
-#define S_VERSION	6
+#define S_LOOK		5
+#define S_FONT		6
+#define S_VERSION	7
 #define S_D_SCREEN	8
 #define S_D_NET		9
 #define S_D_USB		10
@@ -100,6 +118,38 @@
 #define P_KBD_SET	42
 #define P_SND_1		43
 #define P_PROG_INFO	46
+#define P_SND_OUTS	47
+#define P_SND_TEST	48
+#define P_SND_VOL	49
+#define P_SND_VOL_BOX	81
+#define P_SND_KEEP	82
+
+/* 〈ウィンドウ〉: a volume's value is shown in the box numbered after it */
+#define P_LK_ON		50
+#define P_LK_OPA	51
+#define P_LK_WHOLE	53
+#define P_LK_WASH	54
+#define P_LK_WASH_STR	55
+#define P_LK_BAR	57
+#define P_LK_BAR_STR	58
+#define P_LK_ROUND	60
+#define P_LK_SHD_DARK	62
+#define P_LK_SHD_XY	64
+#define P_LK_SHD_SIZE	65
+#define P_LK_BLUR	67
+#define P_LK_MOTION	69
+#define P_LK_LIVE	71
+#define P_LK_DEFAULT	72
+#define P_LK_CANCEL	73
+#define P_LK_GPU	74	/* GPUで合成: whatever the look, so never turned off with it */
+
+/* 〈電源管理〉: the processors' clock and the watchdog */
+#define P_CPU_MAX	75
+#define P_CPU_NOW	76
+#define P_SUPPLY	77
+#define P_WD_ON		78
+#define P_WD_SEC	79
+#define P_PERF_SET	80
 
 #define PN_MAIN		1
 #define PN_TELL		10
@@ -341,6 +391,8 @@ LOCAL void fill_version( void )
 	ui_set_value(&ui, P_PROGS, 0);
 }
 
+LOCAL void fill_perf( void );
+
 LOCAL void fill_power( void )
 {
 	char	v[CF_VAL_MAX];
@@ -353,6 +405,119 @@ LOCAL void fill_power( void )
 		ui_off(&ui, P_RESTART, TRUE);
 		ui_off(&ui, P_OFF, TRUE);
 	}
+	fill_perf();
+}
+
+/*
+ * 〈電源管理〉's clock and watchdog. The machine's settings CPU_MHZ (the
+ * limit in MHz, 0 the most the firmware allows, CPU_DEFAULT with no
+ * line) and WATCHDOG (seconds, 0 off) are what the system takes; what
+ * it made of them is read back from the system object's record of the
+ * hardware (OB_SYS_HW), which the firmware's answers fill.
+ */
+#define CPU_DEFAULT	1800
+#define WD_DEFAULT	30
+#define PERF_TICKS	100		/* the state read again every two seconds while shown */
+#define PERF_SOON	30		/* and soon after a setting, once the system has taken it */
+
+LOCAL CONST INT	cpu_mhz_of[] = { 1500, 1800, 2000, 2200, 0 };
+#define NCPU		( (INT)( sizeof(cpu_mhz_of) / sizeof(cpu_mhz_of[0]) ) )
+
+LOCAL INT	perf_tick;
+LOCAL char	perf_said[CF_VAL_MAX * 2];
+
+/* A rate in Hz of the record, in MHz: 2.4GHz is beyond what cf_num's INT holds; 0 when not a number */
+LOCAL INT mhz_of( INT len, CONST char *key )
+{
+	char	v[CF_VAL_MAX];
+	UINT	u = 0;
+	INT	i;
+
+	if ( len <= 0 || !cf_get(text, len, key, 0, v, sizeof(v)) ) return 0;
+	for ( i = 0; v[i] >= '0' && v[i] <= '9'; i++ ) u = u * 10 + (UINT)( v[i] - '0' );
+	return ( i > 0 && v[i] == 0 ) ? (INT)( u / 1000000 ) : 0;
+}
+
+LOCAL void fill_perf_state( void )
+{
+	char	v[CF_VAL_MAX], s[CF_VAL_MAX * 2], w[CF_VAL_MAX + 16];
+	INT	len = sys_rec(OB_SYS_HW), hz, lim, mx;
+	UINT	thr;
+
+	perf_tick = 0;
+	hz = mhz_of(len, "ARM_HZ");
+	mx = mhz_of(len, "ARM_MAX_HZ");
+	lim = ( len > 0 && cf_get(text, len, "ARM_LIMIT_MHZ", 0, v, sizeof(v)) ) ? cf_num(v, -1) : -1;
+	if ( hz > 0 ) {
+		snprintf(s, sizeof(s), "%dMHz", hz);
+	} else {
+		snprintf(s, sizeof(s), "（不明）");
+	}
+	if ( lim == 0 ) {
+		strncat(s, "　上限 最大", sizeof(s) - strlen(s) - 1);
+	} else if ( lim > 0 ) {
+		snprintf(w, sizeof(w), "　上限 %dMHz", lim);
+		strncat(s, w, sizeof(s) - strlen(s) - 1);
+	}
+	if ( mx > 0 ) {
+		snprintf(w, sizeof(w), "（最大 %dMHz）", mx);
+		strncat(s, w, sizeof(s) - strlen(s) - 1);
+	}
+	if ( len > 0 && cf_get(text, len, "TEMPERATURE", 0, v, sizeof(v)) && strcmp(v, "unknown") != 0 ) {
+		snprintf(w, sizeof(w), "　%s℃", v);
+		strncat(s, w, sizeof(s) - strlen(s) - 1);
+	}
+	ui_set_text(&ui, P_CPU_NOW, s);
+	if ( strcmp(s, perf_said) != 0 ) {
+		/* told when it changes, for the tests of the screen */
+		snprintf(perf_said, sizeof(perf_said), "%s", s);
+		tm_putstring((CONST UB *)"sysenv: clock ");
+		tm_putstring((CONST UB *)s);
+		tm_putstring((CONST UB *)"\n");
+	}
+
+	thr = ( len > 0 && cf_get(text, len, "THROTTLED", 0, v, sizeof(v)) ) ? (UINT)cf_num(v, 0) : 0;
+	if ( len <= 0 || !cf_get(text, len, "UNDERVOLT", 0, v, sizeof(v)) || strcmp(v, "unknown") == 0 ) {
+		snprintf(s, sizeof(s), "（不明）");
+	} else if ( strcmp(v, "now") == 0 ) {
+		snprintf(s, sizeof(s), "低電圧（電源が足りません）");
+	} else if ( strcmp(v, "before") == 0 ) {
+		snprintf(s, sizeof(s), "正常（起動後に低電圧がありました）");
+	} else {
+		snprintf(s, sizeof(s), "正常");
+	}
+	if ( thr & 0x6U ) {
+		strncat(s, "　クロック制限中", sizeof(s) - strlen(s) - 1);
+	}
+	ui_set_text(&ui, P_SUPPLY, s);
+}
+
+LOCAL void fill_perf( void )
+{
+	char	v[CF_VAL_MAX];
+	INT	mhz = CPU_DEFAULT, wd = WD_DEFAULT, i, f[1];
+
+	if ( dev_get("CPU_MHZ", v, sizeof(v)) ) {
+		mhz = cf_num(v, CPU_DEFAULT);
+		if ( mhz < 0 ) mhz = CPU_DEFAULT;
+	}
+	for ( i = 0; i < NCPU && cpu_mhz_of[i] != mhz; i++ ) ;
+	ui_set_value(&ui, P_CPU_MAX, ( i < NCPU ) ? i + 1 : 0);
+	if ( dev_get("WATCHDOG", v, sizeof(v)) ) {
+		wd = cf_num(v, WD_DEFAULT);
+		if ( wd < 0 ) wd = WD_DEFAULT;
+	}
+	ui_set_value(&ui, P_WD_ON, wd > 0);
+	f[0] = ( wd > 0 ) ? wd : WD_DEFAULT;
+	ui_set_fields(&ui, P_WD_SEC, f, 1);
+	ui_off(&ui, P_WD_SEC, wd <= 0);
+	{
+		char	s[80];
+
+		snprintf(s, sizeof(s), "sysenv: settings CPU_MHZ %d WATCHDOG %d\n", mhz, wd);
+		tm_putstring((CONST UB *)s);
+	}
+	fill_perf_state();
 }
 
 LOCAL void fill_walls( void )
@@ -559,18 +724,259 @@ LOCAL void fill_kbd( void )
 	ui_set_value(&ui, P_KBD_MODE, ( dev_get("KBMODE", v, sizeof(v)) && ( cf_num(v, 1) & 3 ) == 0 ) ? 1 : 2);
 }
 
+/*
+ * 〈サウンド〉: the outputs the system object's record of sound has
+ * (OUT, OUT_KIND, OUT_FLAGS, OUT_NAME, a set for each), "auto" first.
+ * Choosing one takes it at once (the record written SELECT and the id)
+ * and keeps it for the next start (the machine's settings' SOUND_OUT).
+ * An output chosen that is not there now is shown after the others, so
+ * what is chosen can always be seen. The page is read again every
+ * second while it shows, so a USB device plugged in or out shows up.
+ * 〈試聴〉 has the system play half a second of a tone, as it plays its
+ * buzzer, on whatever it plays on; the volume is the whole's volume of
+ * the mixer (both sides together; 音量ミキサー sets them apart), the
+ * same on every output.
+ */
+#define SND_MAX		10
+LOCAL void tell( CONST char *line );
+#define SND_TICKS	50		/* the page read again every second */
+
+LOCAL char	snd_id[SND_MAX][SND_ID_MAX];
+LOCAL char	snd_line[SND_MAX][96];
+LOCAL INT	nsnd, snd_tick;
+LOCAL char	snd_said[TEXT_MAX / 4];	/* the record as last shown */
+LOCAL ID	snd_key = 0;		/* the sound device's object, while a tone may play */
+
+/* The sound device's object, opened once */
+LOCAL ID snd_dev( void )
+{
+	TS_UUID	u;
+	INT	cnt = 0;
+
+	if ( snd_key > 0 ) return snd_key;
+	if ( ob_lst_obj(OB_T_DEVICE, OB_S_SOUND, NULL, &u, 1, &cnt) < E_OK || cnt < 1 ) return E_NOEXS;
+	snd_key = ob_opn_obj(&u, OB_OP_R | OB_OP_WRITE);
+	return snd_key;
+}
+
+/* An output as a person reads it */
+LOCAL void snd_name( CONST char *id, CONST char *kind, CONST char *name, INT flags, char *out, INT max )
+{
+	CONST char *at = strchr(id, '@');
+
+	if ( strcmp(id, "auto") == 0 ) {
+		snprintf(out, max, "自動（ＵＳＢ、Ｉ２Ｓ、ＨＤＭＩの順）");
+	} else if ( strcmp(kind, "i2s") == 0 ) {
+		snprintf(out, max, "Ｉ２ＳのＤＡＣ（ＧＰＩＯ１８〜２１）");
+	} else if ( strcmp(kind, "hdmi") == 0 ) {
+		snprintf(out, max, "%s：%s", ( strcmp(id, "hdmi1") == 0 ) ? "ＨＤＭＩ１" : "ＨＤＭＩ０",
+			 ( name[0] != 0 ) ? name : "画面");
+	} else {
+		snprintf(out, max, "ＵＳＢ：%s（%s）", ( name[0] != 0 ) ? name : "オーディオ機器",
+			 ( at != NULL ) ? at + 1 : "");
+	}
+	if ( ( flags & SND_OF_NOSOUND ) != 0 ) {
+		strncat(out, "　音を出せません", max - strlen(out) - 1);
+	}
+}
+
+/* The volume of the output in use, or its part off */
+/* The whole's volume, as the mixer has it (the left's; 音量ミキサー sets the two apart) */
+LOCAL SDMix	snd_mix;
+
+LOCAL BOOL mix_read( void )
+{
+	SZ	asz = 0;
+	ID	k = snd_dev();
+
+	return (BOOL)( k > 0 && ob_rea_rec(k, OB_SND_MIX, 0, &snd_mix, sizeof(snd_mix), &asz) >= E_OK
+		       && asz >= (SZ)sizeof(snd_mix) );
+}
+
+LOCAL void snd_volume( void )
+{
+	char	t[16];
+
+	if ( mix_read() ) {
+		ui_off(&ui, P_SND_VOL, FALSE);
+		ui_set_range(&ui, P_SND_VOL, (INT)snd_mix.lv, 100, 0);
+		snprintf(t, sizeof(t), "%d％", (INT)snd_mix.lv);
+		ui_set_text(&ui, P_SND_VOL_BOX, t);
+	} else {
+		ui_set_range(&ui, P_SND_VOL, 0, 100, 0);
+		ui_off(&ui, P_SND_VOL, TRUE);
+		ui_set_text(&ui, P_SND_VOL_BOX, "なし");
+	}
+}
+
 LOCAL void fill_sound( void )
 {
-	char	v[CF_VAL_MAX];
-	INT	len = sys_rec(OB_SYS_SOUND);
+	char	v[CF_VAL_MAX], kind[16], name[CF_VAL_MAX], sel[SND_ID_MAX], now[SND_ID_MAX], fl[16];
+	CONST char *nm[SND_MAX];
+	INT	len = sys_rec(OB_SYS_SOUND), k, cur = 0, playing = 0, flags;
 
-	val_of(len, "OUTPUT", v, sizeof(v));
-	ui_set_text(&ui, P_SND_1, v);
+	snd_tick = 0;
+	if ( len > 0 ) {
+		snprintf(snd_said, sizeof(snd_said), "%.*s", len, (CONST char *)text);
+	} else {
+		snd_said[0] = 0;
+	}
+	if ( len <= 0 || !cf_get(text, len, "SELECT", 0, sel, sizeof(sel)) ) strcpy(sel, "auto");
+	if ( len <= 0 || !cf_get(text, len, "OUTPUT", 0, now, sizeof(now)) ) strcpy(now, "none");
+	nsnd = 0;
+	for ( k = 0; len > 0 && nsnd < SND_MAX - 1 && cf_get(text, len, "OUT", k, v, sizeof(v)); k++ ) {
+		if ( !cf_get(text, len, "OUT_KIND", k, kind, sizeof(kind)) ) strcpy(kind, "none");
+		if ( !cf_get(text, len, "OUT_NAME", k, name, sizeof(name)) ) name[0] = 0;
+		flags = cf_get(text, len, "OUT_FLAGS", k, fl, sizeof(fl)) ? cf_num(fl, 0) : 0;
+		snprintf(snd_id[nsnd], SND_ID_MAX, "%s", v);
+		snd_name(v, kind, name, flags, snd_line[nsnd], sizeof(snd_line[nsnd]));
+		if ( ( flags & SND_OF_CHOSEN ) != 0 ) cur = nsnd + 1;
+		if ( strcmp(v, now) == 0 ) playing = nsnd + 1;
+		nm[nsnd] = snd_line[nsnd];
+		nsnd++;
+	}
+	if ( cur == 0 && nsnd < SND_MAX ) {
+		/* chosen, and not there now: shown all the same */
+		snprintf(snd_id[nsnd], SND_ID_MAX, "%s", sel);
+		snprintf(snd_line[nsnd], sizeof(snd_line[nsnd]), "%s（つながっていません）",
+			 ( strncmp(sel, "usb:", 4) == 0 ) ? "前に選んだＵＳＢ機器" : sel);
+		nm[nsnd] = snd_line[nsnd];
+		cur = ++nsnd;
+	}
+	ui_names(&ui, P_SND_OUTS, nm, nsnd);
+	ui_set_now(&ui, P_SND_OUTS, cur, playing);
+	ui_set_value(&ui, P_SND_KEEP, ( len > 0 && cf_get(text, len, "KEEP", 0, v, sizeof(v)) && cf_num(v, 0) != 0 ));
+
+	if ( playing > 0 ) {
+		ui_set_text(&ui, P_SND_1, snd_line[playing - 1]);
+	} else {
+		ui_set_text(&ui, P_SND_1, ( strcmp(now, "none") == 0 ) ? "（いまは鳴っていません）" : now);
+	}
 	val_of(len, "RATE", v, sizeof(v));
-	strncat(v, " Hz", sizeof(v) - strlen(v) - 1);
+	if ( cf_num(v, 0) > 0 ) {
+		strncat(v, " Hz", sizeof(v) - strlen(v) - 1);
+	} else {
+		snprintf(v, sizeof(v), "－");
+	}
 	ui_set_text(&ui, ( P_SND_1 + 1 ), v);
 	val_of(len, "CHANNELS", v, sizeof(v));
-	ui_set_text(&ui, ( P_SND_1 + 2 ), v);
+	ui_set_text(&ui, ( P_SND_1 + 2 ), ( cf_num(v, 0) == 2 ) ? "ステレオ" : ( cf_num(v, 0) == 1 ) ? "モノラル" : "－");
+	snd_volume();
+	{
+		char	s[96];
+
+		snprintf(s, sizeof(s), "sysenv: sound %d outputs, chosen %s, playing %s\n", nsnd, sel, now);
+		tm_putstring((CONST UB *)s);
+	}
+}
+
+/* The page read again while it shows; shown again only when the record changed */
+LOCAL void sound_tick( void )
+{
+	INT	len;
+
+	if ( ++snd_tick < SND_TICKS ) return;
+	snd_tick = 0;
+	len = sys_rec(OB_SYS_SOUND);
+	if ( len > 0 && ( (INT)strlen(snd_said) != len || memcmp(snd_said, text, len) != 0 ) ) {
+		fill_sound();
+	}
+}
+
+/* An output chosen: taken now, kept for the next start */
+LOCAL void sound_set( void )
+{
+	INT	k = ui_value(&ui, P_SND_OUTS) - 1;
+	char	v[SND_ID_MAX + 8], s[96];
+	ER	er;
+
+	if ( k < 0 || k >= nsnd ) return;
+	snprintf(v, sizeof(v), "SELECT %s", snd_id[k]);
+	er = sys_write(OB_SYS_SOUND, v);
+	if ( er >= E_OK ) er = dev_put("SOUND_OUT", snd_id[k]);
+	snprintf(s, sizeof(s), "sysenv: sound output %s (%d)\n", snd_id[k], (INT)er);
+	tm_putstring((CONST UB *)s);
+	if ( er == E_OACV ) {
+		tell("機器の設定を変更する権限がありません。");
+	} else if ( er < E_OK ) {
+		tell("設定した内容が保存できません。");
+	}
+	(void)tk_dly_tsk(100);			/* the stream moved, then read */
+	fill_sound();
+}
+
+/*
+ * Half a second of 880Hz, played as the system plays its sounds, on the
+ * output chosen: asked of the system object's record 8 (PLAY test),
+ * which answers whether it sounds.
+ */
+LOCAL void sound_test( void )
+{
+	ER	er = sys_write(OB_SYS_SOUND, "PLAY test");
+	char	s[64];
+
+	snprintf(s, sizeof(s), "sysenv: sound test %d\n", (INT)er);
+	tm_putstring((CONST UB *)s);
+	if ( er == E_NOSPT || er == E_NOEXS ) {
+		tell("音を出せる出力先がありません。");
+		return;
+	} else if ( er < E_OK ) {
+		tell("音を鳴らせませんでした。");
+		return;
+	}
+	(void)tk_dly_tsk(100);
+	fill_sound();
+}
+
+/*
+ * 出力を止めずに流し続ける: the stream kept going in silence while
+ * nothing plays (for a screen that would cut the start of a short
+ * sound), taken at once and kept for the next start.
+ */
+LOCAL void sound_keep( void )
+{
+	BOOL	on = ( ui_value(&ui, P_SND_KEEP) != 0 );
+	char	s[64];
+	ER	er;
+
+	er = sys_write(OB_SYS_SOUND, on ? "KEEP 1" : "KEEP 0");
+	if ( er >= E_OK ) er = dev_put("SOUND_KEEP", on ? "1" : "0");
+	snprintf(s, sizeof(s), "sysenv: sound keep %d (%d)", (INT)on, (INT)er);
+	tm_putstring((CONST UB *)s);
+	tm_putstring((CONST UB *)"\n");
+	if ( er == E_OACV ) {
+		tell("機器の設定を変更する権限がありません。");
+	} else if ( er < E_OK ) {
+		tell("設定した内容が保存できません。");
+	}
+}
+
+/* The volume worked: the output in use has it at once */
+LOCAL void sound_level( void )
+{
+	SDMixSet	v;
+	SZ		asz = 0;
+	ID		k = snd_dev();
+	INT		pct = ui_value(&ui, P_SND_VOL);
+	char		t[16];
+	ER		er;
+
+	if ( k <= 0 ) return;
+	if ( pct < 0 ) pct = 0;
+	if ( pct > 100 ) pct = 100;
+	memset(&v, 0, sizeof(v));
+	v.what = SND_MIX_ALL;
+	v.lv = v.rv = (UW)pct;
+	v.mute = ( mix_read() && snd_mix.mute != 0 );
+	er = ob_wri_rec(k, OB_SND_MIXSET, 0, &v, sizeof(v), &asz);
+	snprintf(t, sizeof(t), "%d％", pct);
+	ui_set_text(&ui, P_SND_VOL_BOX, t);
+	{
+		char	s[64];
+
+		snprintf(s, sizeof(s), "sysenv: sound volume %d (%d)\n", pct, (INT)er);
+		tm_putstring((CONST UB *)s);
+	}
 }
 
 /* ---------------------------------------------------------------- what is done */
@@ -596,6 +1002,39 @@ LOCAL void power( BOOL restart )
 		return;
 	}
 	closing = TRUE;
+}
+
+/*
+ * The limit of the clock and the watchdog kept in the machine's
+ * settings, which the system takes as it sees them written: the person
+ * at the machine may set both (design 8.7.1), as the settings object
+ * lets the users' group write it.
+ */
+LOCAL void perf_set( void )
+{
+	INT	k = ui_value(&ui, P_CPU_MAX) - 1, f[1] = { WD_DEFAULT }, wd;
+	char	v[16], s[80];
+	ER	er = E_OK;
+
+	if ( k >= 0 && k < NCPU ) {
+		snprintf(v, sizeof(v), "%d", cpu_mhz_of[k]);
+		er = dev_put("CPU_MHZ", v);
+	}
+	(void)ui_fields(&ui, P_WD_SEC, f, 1);
+	wd = ( ui_value(&ui, P_WD_ON) != 0 ) ? f[0] : 0;
+	if ( wd != 0 && wd < 5 ) wd = 5;
+	if ( wd > 3600 ) wd = 3600;
+	snprintf(v, sizeof(v), "%d", wd);
+	if ( er >= E_OK ) er = dev_put("WATCHDOG", v);
+	snprintf(s, sizeof(s), "sysenv: performance CPU_MHZ %d WATCHDOG %d (%d)\n",
+		 ( k >= 0 && k < NCPU ) ? cpu_mhz_of[k] : -1, wd, (INT)er);
+	tm_putstring((CONST UB *)s);
+	if ( er == E_OACV ) {
+		tell("機器の設定を変更する権限がありません。");
+	} else if ( er < E_OK ) {
+		tell("設定した内容が保存できません。");
+	}
+	perf_tick = PERF_TICKS - PERF_SOON;	/* the state read again once it is taken */
 }
 
 LOCAL void open_page( INT sheet )
@@ -689,6 +1128,283 @@ LOCAL void scheme_set( void )
 	ui_set_now(&ui, P_SCHEMES, k + 1, k + 1);
 }
 
+/* ---------------------------------------------------------------- 〈ウィンドウ〉 */
+
+/*
+ * The windows' look is entries of the look table (LK_LOOK..LK_OPA_WHOLE)
+ * written with wm_set_look: the window layer takes each at once, on
+ * every window with a frame. What is set is kept as the machine's
+ * settings' lines that cf_look_items names (WIN_*): a second after the
+ * last change rather than at every step of a volume, and when the
+ * window closes.
+ *
+ * How far a frame is seen through is shown as a percentage, up to
+ * ninety -- a frame not there at all is not a frame; the strengths and
+ * the shadow's darkness as percentages of their 255.
+ */
+#define LK_N		24
+#define LK_KEEP_TICKS	50		/* a second with nothing changed */
+#define WASH_ON		72		/* the strength a colour comes with */
+#define BAR_ON		110
+
+LOCAL CONST UW	wash_col[3] = { 0x00202838U, 0x00303030U, 0x00F0F0F0U };	/* 青 墨 白 */
+LOCAL CONST UW	bar_col[3] = { 0x00405878U, 0x00303030U, 0x00F0F0F0U };
+
+LOCAL INT	lk_was[LK_N];		/* as the window found them, for 取り消し */
+LOCAL BOOL	lk_unkept;		/* changed since last kept */
+LOCAL INT	lk_quiet;		/* ticks since the last change */
+
+LOCAL INT lk_get( UINT num )
+{
+	return (INT)wm_look(num);
+}
+
+LOCAL void lk_put( UINT num, INT v )
+{
+	ER	er;
+
+	if ( lk_get(num) == v ) return;
+	er = wm_set_look(num, (UW)v);
+	if ( er < E_OK ) {
+		char	s[80];
+
+		snprintf(s, sizeof(s), "sysenv: look %d = %d refused (%d)\n", (INT)num, v, (INT)er);
+		tm_putstring((CONST UB *)s);
+		return;
+	}
+	lk_unkept = TRUE;
+	lk_quiet = 0;
+}
+
+LOCAL INT pct_of( INT v255 )
+{
+	return ( v255 * 100 + 127 ) / 255;
+}
+
+LOCAL INT v255_of( INT pct )
+{
+	return ( pct * 255 + 50 ) / 100;
+}
+
+LOCAL INT clamp( INT v, INT lo, INT hi )
+{
+	return ( v < lo ) ? lo : ( v > hi ) ? hi : v;
+}
+
+/* A volume's value, in the box after it */
+LOCAL void lk_box( INT num, INT v, CONST char *unit )
+{
+	char	t[32];
+
+	if ( num == P_LK_MOTION ) {
+		snprintf(t, sizeof(t), "%d.%02d秒", v / 1000, ( v % 1000 ) / 10);
+	} else {
+		snprintf(t, sizeof(t), "%d%s", v, unit);
+	}
+	ui_set_text(&ui, num + 1, t);
+}
+
+/* A volume, its left end the least, and its value in the box after it */
+LOCAL void lk_vol( INT num, INT v, INT lo, INT hi, CONST char *unit )
+{
+	ui_set_range(&ui, num, v, hi, lo);
+	lk_box(num, v, unit);
+}
+
+/* Which of 配色 青 墨 白 a wash stands at, counted from one */
+LOCAL INT colour_choice( CONST UW *col, INT c, BOOL scheme )
+{
+	INT	k;
+
+	if ( scheme ) return 1;
+	for ( k = 0; k < 3; k++ ) {
+		if ( ( (UW)c & 0x00FFFFFFU ) == col[k] ) return k + 2;
+	}
+	return 2;
+}
+
+/*
+ * Which parts can be worked: with the look off nothing but the switch
+ * counts, and a wash left to the scheme has no strength. A part is
+ * written only when that changes -- every write is a round trip to the
+ * window, and a volume worked meanwhile would be written back over.
+ */
+LOCAL CONST INT	lk_parts[] = { P_LK_OPA, P_LK_WHOLE, P_LK_WASH, P_LK_WASH_STR, P_LK_BAR, P_LK_BAR_STR,
+			       P_LK_ROUND, P_LK_SHD_DARK, P_LK_SHD_XY, P_LK_SHD_SIZE, P_LK_BLUR,
+			       P_LK_MOTION, P_LK_LIVE };
+#define LK_NPART	( (INT)( sizeof(lk_parts) / sizeof(lk_parts[0]) ) )
+LOCAL INT	lk_off[LK_NPART];	/* 1 off, 0 on, -1 not yet written */
+
+LOCAL void look_offs( void )
+{
+	INT	on = ( lk_get(LK_LOOK) != 0 ), from = lk_get(LK_FROM), k, off;
+
+	for ( k = 0; k < LK_NPART; k++ ) {
+		off = !on;
+		if ( on && lk_parts[k] == P_LK_WASH_STR ) off = ( ( from & 1 ) != 0 );
+		if ( on && lk_parts[k] == P_LK_BAR_STR ) off = ( ( from & 2 ) != 0 );
+		if ( lk_off[k] != off ) {
+			ui_off(&ui, lk_parts[k], off);
+			lk_off[k] = off;
+		}
+	}
+}
+
+/* The parts from the look as it is */
+LOCAL void look_fill( void )
+{
+	INT	on = ( lk_get(LK_LOOK) != 0 ), from = lk_get(LK_FROM), solid = lk_get(LK_OPACITY);
+	INT	f[2];
+
+	ui_set_value(&ui, P_LK_ON, on);
+	lk_vol(P_LK_OPA, ( solid >= 255 ) ? 0 : clamp(( ( 255 - solid ) * 100 + 127 ) / 255, 0, 90), 0, 90, "％");
+	ui_set_value(&ui, P_LK_WHOLE, ( lk_get(LK_OPA_WHOLE) != 0 ) ? 2 : 1);
+	ui_set_value(&ui, P_LK_WASH, colour_choice(wash_col, lk_get(LK_WASH), ( from & 1 ) != 0));
+	lk_vol(P_LK_WASH_STR, pct_of(lk_get(LK_WASH_STR)), 0, 100, "％");
+	ui_set_value(&ui, P_LK_BAR, colour_choice(bar_col, lk_get(LK_BAR_WASH), ( from & 2 ) != 0));
+	lk_vol(P_LK_BAR_STR, pct_of(lk_get(LK_BAR_STR)), 0, 100, "％");
+	lk_vol(P_LK_ROUND, clamp(lk_get(LK_ROUND), 0, 16), 0, 16, "ドット");
+	lk_vol(P_LK_SHD_DARK, pct_of(lk_get(LK_SHD_DARK)), 0, 100, "％");
+	f[0] = clamp(lk_get(LK_SHD_DX), 0, 16);
+	f[1] = clamp(lk_get(LK_SHD_DY), 0, 16);
+	ui_set_fields(&ui, P_LK_SHD_XY, f, 2);
+	lk_vol(P_LK_SHD_SIZE, clamp(lk_get(LK_SHD_SIZE), 0, 16), 0, 16, "ドット");
+	lk_vol(P_LK_BLUR, clamp(lk_get(LK_BLUR), 0, 16), 0, 16, "ドット");
+	lk_vol(P_LK_MOTION, clamp(lk_get(LK_MOTION), 0, 1000), 0, 1000, "");
+	ui_set_value(&ui, P_LK_LIVE, ( lk_get(LK_LIVE) != 0 ) ? 1 : 2);
+	ui_set_value(&ui, P_LK_GPU, lk_get(LK_GPU) != 0);
+	look_offs();
+}
+
+/* As the window found it, kept for 取り消し */
+LOCAL void look_start( void )
+{
+	INT	i;
+
+	for ( i = 0; i < cf_look_nitem && i < LK_N; i++ ) lk_was[i] = lk_get(cf_look_items[i].look);
+	for ( i = 0; i < LK_NPART; i++ ) lk_off[i] = -1;
+	lk_unkept = FALSE;
+	look_fill();
+}
+
+/* All of it at once: what nothing says (初期値), or what there was (取り消し) */
+LOCAL void look_all( BOOL dflt )
+{
+	INT	i;
+
+	for ( i = 0; i < cf_look_nitem && i < LK_N; i++ ) {
+		lk_put(cf_look_items[i].look, dflt ? cf_look_items[i].dflt : lk_was[i]);
+	}
+	look_fill();
+}
+
+/* What is set, into the machine's settings: one write for all the lines */
+LOCAL void look_keep( void )
+{
+	TS_UUID	u;
+	ID	k;
+	SZ	asz = 0;
+	INT	len, i;
+	char	v[16];
+	ER	er;
+
+	if ( !lk_unkept ) return;
+	lk_unkept = FALSE;
+	if ( ui_uuid(SYSDEF_CONF_DEV, &u) < E_OK ) return;
+	k = ob_opn_obj(&u, OB_OP_R | OB_OP_WRITE);
+	if ( k < E_OK ) return;
+	er = ob_rea_rec(k, 1, 0, text, TEXT_MAX, &asz);
+	len = ( er >= E_OK ) ? (INT)asz : 0;
+	for ( i = 0; i < cf_look_nitem && len >= 0; i++ ) {
+		CONST CF_ITEM	*it = &cf_look_items[i];
+		INT		n = lk_get(it->look);
+
+		if ( it->look == LK_WASH || it->look == LK_BAR_WASH ) {
+			snprintf(v, sizeof(v), "0x%06x", (UINT)n & 0x00FFFFFFU);
+		} else {
+			snprintf(v, sizeof(v), "%d", n);
+		}
+		len = cf_put(text, len, TEXT_MAX, it->key, 0, v);
+	}
+	er = ( len < 0 ) ? E_LIMIT : ob_wri_rec(k, 1, 0, text, len, &asz);
+	if ( er >= E_OK ) er = ob_trn_rec(k, 1, (UD)len);
+	ob_cls_obj(k);
+	if ( er < E_OK ) tell("設定した内容が保存できません。");
+}
+
+/* A wash chosen: the scheme's colours, or one of the three with a strength that shows */
+LOCAL void look_colour( BOOL bar )
+{
+	INT	c = ui_value(&ui, bar ? P_LK_BAR : P_LK_WASH);
+	INT	bit = bar ? 2 : 1, from = lk_get(LK_FROM);
+	UINT	str = bar ? LK_BAR_STR : LK_WASH_STR;
+
+	if ( c <= 1 ) {
+		lk_put(LK_FROM, from | bit);
+		return;
+	}
+	if ( c > 4 ) c = 4;
+	lk_put(bar ? LK_BAR_WASH : LK_WASH, (INT)( bar ? bar_col : wash_col )[c - 2]);
+	if ( lk_get(str) <= 0 ) lk_put(str, bar ? BAR_ON : WASH_ON);
+	lk_put(LK_FROM, from & ~bit);
+}
+
+/*
+ * A part of 〈ウィンドウ〉 worked: TRUE when it was one. A volume being
+ * dragged has only its box written, not its range, which would move the
+ * knob under the hand; a choice has the parts it governs shown again.
+ */
+LOCAL BOOL look_changed( INT id )
+{
+	INT	v = ui_value(&ui, id), f[2];
+
+	switch ( id ) {
+	case P_LK_OPA:
+		v = clamp(v, 0, 90);
+		lk_put(LK_OPACITY, 255 - v255_of(v));
+		lk_box(id, v, "％");
+		return TRUE;
+	case P_LK_WASH_STR:
+	case P_LK_BAR_STR:
+	case P_LK_SHD_DARK:
+		v = clamp(v, 0, 100);
+		lk_put(( id == P_LK_WASH_STR ) ? LK_WASH_STR : ( id == P_LK_BAR_STR ) ? LK_BAR_STR : LK_SHD_DARK,
+		       v255_of(v));
+		lk_box(id, v, "％");
+		return TRUE;
+	case P_LK_ROUND:
+	case P_LK_SHD_SIZE:
+	case P_LK_BLUR:
+		v = clamp(v, 0, 16);
+		lk_put(( id == P_LK_ROUND ) ? LK_ROUND : ( id == P_LK_SHD_SIZE ) ? LK_SHD_SIZE : LK_BLUR, v);
+		lk_box(id, v, "ドット");
+		return TRUE;
+	case P_LK_MOTION:
+		v = ( clamp(v, 0, 1000) + 25 ) / 50 * 50;
+		lk_put(LK_MOTION, v);
+		lk_box(id, v, "");
+		return TRUE;
+	case P_LK_SHD_XY:
+		(void)ui_fields(&ui, P_LK_SHD_XY, f, 2);
+		lk_put(LK_SHD_DX, clamp(f[0], 0, 16));
+		lk_put(LK_SHD_DY, clamp(f[1], 0, 16));
+		return TRUE;
+	case P_LK_WASH:
+	case P_LK_BAR:
+		look_colour(id == P_LK_BAR);
+		id = ( id == P_LK_BAR ) ? P_LK_BAR_STR : P_LK_WASH_STR;
+		lk_vol(id, pct_of(lk_get(( id == P_LK_BAR_STR ) ? LK_BAR_STR : LK_WASH_STR)), 0, 100, "％");
+		break;
+	case P_LK_ON:		lk_put(LK_LOOK, v != 0);		break;
+	case P_LK_WHOLE:	lk_put(LK_OPA_WHOLE, v == 2);		break;
+	case P_LK_LIVE:		lk_put(LK_LIVE, v == 1);		break;
+	case P_LK_GPU:		lk_put(LK_GPU, v != 0);			break;
+	default:		return FALSE;
+	}
+	look_offs();
+	return TRUE;
+}
+
 /* ---------------------------------------------------------------- the programs */
 
 /*
@@ -721,10 +1437,12 @@ LOCAL ER desk_ask( UINT req, CONST TS_UUID *target, INT recno, T_DTANS *an )
 	rq.target = *target;
 	rq.recno = recno;
 	rq.reply = reply;
+	rq.win = ui.win;		/* the window that asks */
 	k = ob_opn_obj(&d, OB_OP_WRITE);
 	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, &rq, sizeof(rq), &asz) : (ER)k;
 	if ( k > 0 ) ob_cls_obj(k);
-	for ( i = 0; er >= E_OK && i < 1500; i++ ) {
+	/* long enough for the person to type the administrator's password */
+	for ( i = 0; er >= E_OK && i < 30000; i++ ) {
 		if ( ob_rea_rec(ka, 0, 0, an, sizeof(*an), &asz) >= E_OK && asz == (SZ)sizeof(*an)
 		  && an->seq == rq.seq ) {
 			er = an->er;
@@ -732,7 +1450,7 @@ LOCAL ER desk_ask( UINT req, CONST TS_UUID *target, INT recno, T_DTANS *an )
 		}
 		(void)tk_dly_tsk(20);
 	}
-	if ( i >= 1500 ) er = E_TMOUT;
+	if ( i >= 30000 ) er = E_TMOUT;
 	ob_cls_obj(ka);
 	(void)ob_del_obj(&reply);
 	return er;
@@ -800,7 +1518,11 @@ LOCAL void prog_delete( void )
 	er = desk_ask(DT_RQ_REMOVE, &prog_id[k], 0, &an);
 	snprintf(s, sizeof(s), "sysenv: remove %s %d\n", prog_info[k].id, (INT)er);
 	tm_putstring((CONST UB *)s);
-	if ( er < E_OK ) tell("削除できませんでした。");
+	if ( er == E_OACV ) {
+		tell("アプリケーションを削除する権限がありません。");
+	} else if ( er < E_OK && er != E_ABORT ) {
+		tell("削除できませんでした。");
+	}
 	fill_version();
 }
 
@@ -832,6 +1554,10 @@ LOCAL void prog_drop( void )
 			tell("アプリケーションのパッケージではありません。");
 		} else if ( er == E_PAR ) {
 			tell("システムに組み込みのアプリケーションは置き換えられません。");
+		} else if ( er == E_OACV ) {
+			tell("アプリケーションをインストールする権限がありません。");
+		} else if ( er == E_ABORT ) {
+			continue;		/* the administrator's password was not given */
 		} else if ( er < E_OK ) {
 			tell("インストールできませんでした。");
 		} else {
@@ -882,6 +1608,7 @@ LOCAL void menu( CONST T_OBNTM *m )
 		fill_power();
 		fill_walls();
 		fill_schemes();
+		look_fill();
 		fill_fonts();
 		fill_version();
 	}
@@ -889,6 +1616,9 @@ LOCAL void menu( CONST T_OBNTM *m )
 
 LOCAL void changed( INT id )
 {
+	if ( look_changed(id) ) {
+		return;
+	}
 	switch ( id ) {
 	case P_WALLS:
 	case P_WALL_MODE:
@@ -899,6 +1629,18 @@ LOCAL void changed( INT id )
 		break;
 	case P_FONTS:
 		font_info(ui_value(&ui, P_FONTS) - 1);
+		break;
+	case P_WD_ON:
+		ui_off(&ui, P_WD_SEC, ui_value(&ui, P_WD_ON) == 0);
+		break;
+	case P_SND_OUTS:
+		sound_set();
+		break;
+	case P_SND_VOL:
+		sound_level();
+		break;
+	case P_SND_KEEP:
+		sound_keep();
 		break;
 	default:
 		break;
@@ -926,17 +1668,29 @@ LOCAL void pressed( INT id )
 	case P_KBD_SET:
 		kbd_set();
 		break;
+	case P_PERF_SET:
+		perf_set();
+		break;
 	case P_USB_AGAIN:
 		fill_usb();
 		break;
 	case P_PROG_INFO:
 		prog_detail();
 		break;
+	case P_SND_TEST:
+		sound_test();
+		break;
 	case P_RESTART:
 		power(TRUE);
 		break;
 	case P_OFF:
 		power(FALSE);
+		break;
+	case P_LK_DEFAULT:
+		look_all(TRUE);
+		break;
+	case P_LK_CANCEL:
+		look_all(FALSE);
 		break;
 	default:
 		break;
@@ -959,6 +1713,7 @@ int main( void )
 	fill_power();
 	fill_walls();
 	fill_schemes();
+	look_start();
 	fill_fonts();
 	fill_version();
 	tm_putstring((CONST UB *)"sysenv: ready\n");
@@ -995,8 +1750,19 @@ int main( void )
 		}
 		if ( !closing ) {
 			(void)tk_dly_tsk(TICK_MS);
+			if ( lk_unkept && ++lk_quiet >= LK_KEEP_TICKS ) {
+				look_keep();		/* the look, once the hand has stopped */
+			}
+			if ( ui_sheet(&ui) == S_POWER && ++perf_tick >= PERF_TICKS ) {
+				fill_perf_state();	/* the clock and the temperature as they go */
+			}
+			if ( ui_sheet(&ui) == S_D_SOUND ) {
+				sound_tick();		/* outputs plugged in and out */
+			}
 		}
 	}
+	look_keep();
+	if ( snd_key > 0 ) ob_cls_obj(snd_key);
 	ui_close(&ui);
 	tm_putstring((CONST UB *)"sysenv: closed\n");
 	return 0;

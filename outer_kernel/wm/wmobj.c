@@ -45,6 +45,7 @@
 #include "obj/obj.h"
 #include <ts/img.h>
 #include <ts/om.h>
+#include <ts/keymap.h>
 #include "wmobj.h"
 
 #define H_WIN		1
@@ -59,8 +60,12 @@
 #define WO_REC_MAX	( 1024 * 1024 )	/* bytes of a drawing or a shape */
 #define WO_NREC		OB_WR_KIND	/* the records every window has */
 
-/* The bytes of a drop of n links, as its record holds them */
-#define DROP_LEN(n)	( (SZ)sizeof(T_OBDROP) - (SZ)sizeof(T_OBDROPV) * (SZ)( OB_DROP_MAX - (n) ) )
+/*
+ * The bytes of a drop as its record holds them: a drop of n links up to
+ * its last link, a drop of letters (no links) whole, its letters last
+ */
+#define DROP_LEN(n)	( ( (n) > 0 ) ? (SZ)sizeof(T_OBDROP) - (SZ)OB_DROP_TEXT \
+			  - (SZ)sizeof(T_OBDROPV) * (SZ)( OB_DROP_MAX - (n) ) : (SZ)sizeof(T_OBDROP) )
 
 /* The protection of a window: its maker's, and nobody else's */
 typedef struct {
@@ -81,9 +86,13 @@ typedef struct {
 	ID	taker;			/* the process granted that drop's objects */
 	BOOL	answered;		/* that drop was answered */
 	ID	maker;			/* the process that made it, 0 the system */
+	ID	forpid;			/* one of the system's opened for a process's
+					   request: that process (knl_wmobj_act_for) */
 	UINT	seq;			/* drops so far */
 	INT	back;			/* a panel of a process's own: the window that had
 					   the keys before it, given them back when it goes */
+	BOOL	nofocus;		/* it never has the keys (WM_ATTR_NOFOCUS): a screen
+					   keyboard, told every key and typing them */
 } WOWIN;
 
 typedef struct {
@@ -131,6 +140,9 @@ LOCAL FP_WMPAINT	wo_paint = NULL;
 LOCAL FP_WMSHAPE	wo_shape = NULL;
 LOCAL INT		wo_hover = 0;	/* the window the pointer was last over */
 LOCAL INT		wo_down = 0;	/* the window the last press went down on */
+LOCAL UD		wo_down_ms = 0;	/* and when, ms since start */
+LOCAL volatile ID	wo_for_tsk = 0;	/* a task of the system's doing what a process asked */
+LOCAL volatile ID	wo_for_pid = 0;	/* and that process */
 
 #define LOCK()		tk_loc_mtx(wo_mtx, TMO_FEVR)
 #define UNLOCK()	tk_unl_mtx(wo_mtx)
@@ -251,16 +263,23 @@ EXPORT void knl_wmobj_open( INT wid )
 {
 	TS_UUID	u;
 	WOPRT	p;
+	T_WMWIN	w;
+	BOOL	nofocus;
 
 	if ( wo_mtx <= 0 || wid < 1 || wid > WM_MAX_WIN || ts_gen_uuid(&u) < E_OK ) {
 		return;
 	}
 	prt_of_maker(&p);
+	nofocus = (BOOL)( wm_ref(wid, &w) >= E_OK && ( w.attr & WM_ATTR_NOFOCUS ) != 0 );
 	LOCK();
 	knl_memset(&wo_win[wid], 0, sizeof(WOWIN));
 	wo_win[wid].uuid = u;
 	wo_win[wid].prt = p;
 	wo_win[wid].used = TRUE;
+	wo_win[wid].nofocus = nofocus;
+	if ( wo_for_pid > 0 && wo_for_tsk == tk_get_tid() ) {
+		wo_win[wid].forpid = wo_for_pid;
+	}
 	UNLOCK();
 }
 
@@ -303,7 +322,8 @@ EXPORT void knl_wmobj_close( INT wid )
  * A process ended: the windows it made are closed. A program closes its
  * windows itself as it ends; one taken down by a fault or by ts_ter_prc
  * cannot, and its windows (a sub window among them) would stay on the
- * screen with nobody to draw them or to close them.
+ * screen with nobody to draw them or to close them. The surfaces it drew
+ * any window in go first.
  */
 EXPORT void knl_wmobj_prc_end( ID pid )
 {
@@ -312,6 +332,7 @@ EXPORT void knl_wmobj_prc_end( ID pid )
 	if ( wo_mtx <= 0 || pid <= 0 ) {
 		return;
 	}
+	knl_wm_surf_prc_end(pid);
 	LOCK();
 	for ( i = 1; i <= WM_MAX_WIN; i++ ) {
 		if ( wo_win[i].used && wo_win[i].maker == pid ) {
@@ -325,6 +346,71 @@ EXPORT void knl_wmobj_prc_end( ID pid )
 	if ( n > 0 ) {
 		wm_update();
 	}
+}
+
+/*
+ * The calling task (the desktop's) does what process pid asked, until
+ * it is called again with 0: the windows it opens meanwhile -- a panel,
+ * the page of 印刷 -- are that process's to 強制終了 (design 5.5.1).
+ */
+EXPORT void knl_wmobj_act_for( ID pid )
+{
+	if ( pid > 0 ) {
+		wo_for_pid = 0;
+		wo_for_tsk = tk_get_tid();
+		wo_for_pid = pid;
+	} else {
+		wo_for_pid = 0;
+		wo_for_tsk = 0;
+	}
+}
+
+/*
+ * Who a window is for, for 強制終了: the process that made it, and the
+ * process a window of the system's was opened for (0 none). E_TMOUT
+ * when the lock is not had within tmo, E_NOEXS for no such window.
+ */
+EXPORT ER knl_wmobj_who( INT wid, TMO tmo, ID *p_maker, ID *p_for )
+{
+	ER	er = E_NOEXS;
+
+	*p_maker = 0;
+	*p_for = 0;
+	if ( wo_mtx <= 0 || wid < 1 || wid > WM_MAX_WIN ) {
+		return E_NOEXS;
+	}
+	if ( tk_loc_mtx(wo_mtx, tmo) < E_OK ) {
+		return E_TMOUT;
+	}
+	if ( wo_win[wid].used ) {
+		*p_maker = wo_win[wid].maker;
+		*p_for = wo_win[wid].forpid;
+		er = E_OK;
+	}
+	UNLOCK();
+
+	return er;
+}
+
+/* How many windows process pid has made */
+EXPORT INT knl_wmobj_count( ID pid, TMO tmo )
+{
+	INT	i, n = 0;
+
+	if ( wo_mtx <= 0 || pid <= 0 ) {
+		return 0;
+	}
+	if ( tk_loc_mtx(wo_mtx, tmo) < E_OK ) {
+		return E_TMOUT;
+	}
+	for ( i = 1; i <= WM_MAX_WIN; i++ ) {
+		if ( wo_win[i].used && wo_win[i].maker == pid ) {
+			n++;
+		}
+	}
+	UNLOCK();
+
+	return n;
 }
 
 /* The process that made a window, 0 for one of the system's own or none */
@@ -519,9 +605,9 @@ LOCAL void drive_panels( CONST T_WMEV *ev )
  * A menu a program running as a process has opened on its window
  * (mn_pop_men). Nothing in the process reads the input, so the menu is
  * worked from here as each input arrives, the way the desktop works its
- * own: a click leaves it up and a second press chooses, a press held
- * and let go over an item chooses it, a press elsewhere or Escape puts
- * it away. The process waits for the answer.
+ * own: it stays up, a row is chosen with the first button only, a
+ * press elsewhere or Escape puts it away. The process waits for the
+ * answer.
  */
 #define WO_MSESS	4
 #define KEY_ESCAPE	0x29
@@ -662,6 +748,26 @@ EXPORT INT knl_wmobj_menu_run( INT pid, UD when )
 	return cmd;
 }
 
+LOCAL UD now_ms( void )
+{
+	SYSTIM	t;
+
+	(void)tk_get_otm(&t);
+	return ( (UD)(UW)t.hi << 32 ) | (UD)(UW)t.lo;
+}
+
+/* While the desktop asks something over a program's window, the input is its panel's */
+LOCAL volatile INT	wo_quiet = 0;
+
+EXPORT void wm_obj_quiet( BOOL on )
+{
+	if ( on ) {
+		wo_quiet++;
+	} else if ( wo_quiet > 0 ) {
+		wo_quiet--;
+	}
+}
+
 /*
  * One input, addressed to a window. The pointer arriving over another
  * window is told to both, the one it left first; a press on the
@@ -672,7 +778,7 @@ EXPORT void knl_wmobj_event( CONST T_WMEV *ev )
 	UINT	event;
 	INT	was;
 
-	if ( wo_mtx <= 0 || ev == NULL ) {
+	if ( wo_mtx <= 0 || ev == NULL || wo_quiet > 0 ) {
 		return;
 	}
 	switch ( ev->type ) {
@@ -681,6 +787,19 @@ EXPORT void knl_wmobj_event( CONST T_WMEV *ev )
 	case HID_EV_MOVE:	event = OB_E_MOVE;	break;
 	case HID_EV_KEY_DOWN:	event = OB_E_KEY;	break;
 	case HID_EV_WHEEL:	event = OB_E_WHEEL;	break;
+	case HID_EV_KEY_UP:
+		/*
+		 * A key let go goes to the window with the keys and to no
+		 * menu or panel, marked so that only a request that asked
+		 * for it (OB_N_KEYUP) hears it.
+		 */
+		if ( ev->wid > 0 && !menu_open() ) {
+			T_WMEV	up = *ev;
+
+			up.mods |= OB_KEY_UP;
+			win_post(ev->wid, OB_E_KEY, &up);
+		}
+		return;
 	default:		return;
 	}
 	/*
@@ -694,6 +813,7 @@ EXPORT void knl_wmobj_event( CONST T_WMEV *ev )
 	}
 	if ( event == OB_E_PRESS ) {
 		wo_down = ev->wid;
+		wo_down_ms = now_ms();
 	}
 	if ( ev->wid == 0 ) {
 		drive_menus(ev);		/* on the ground: only a menu cares */
@@ -730,6 +850,89 @@ EXPORT void knl_wmobj_event( CONST T_WMEV *ev )
 	drive_panels(ev);
 }
 
+/*
+ * A key as the keyboard gave it, told to the windows that never have
+ * the keys: OB_E_KEY marked OB_KEY_SEEN (and OB_KEY_UP when let go),
+ * which only a request with OB_N_KEYSEEN hears. A screen keyboard
+ * lights the keys held with it. A window that is not shown hears
+ * nothing, so what is typed is told only to a keyboard on the screen.
+ */
+#define WO_SEEN_MAX	8		/* screen keyboards told at once */
+
+EXPORT void knl_wmobj_key_seen( CONST T_WMEV *ev )
+{
+	TS_UUID	to[WO_SEEN_MAX];
+	INT	wid[WO_SEEN_MAX];
+	T_OBNTM	n;
+	T_WMWIN	w;
+	INT	i, cnt = 0;
+
+	if ( wo_mtx <= 0 || ev == NULL
+	  || ( ev->type != HID_EV_KEY_DOWN && ev->type != HID_EV_KEY_UP ) ) {
+		return;
+	}
+	LOCK();
+	for ( i = 1; i <= WM_MAX_WIN && cnt < WO_SEEN_MAX; i++ ) {
+		if ( wo_win[i].used && wo_win[i].nofocus ) {
+			to[cnt] = wo_win[i].uuid;
+			wid[cnt] = i;
+			cnt++;
+		}
+	}
+	UNLOCK();
+	if ( cnt == 0 ) {
+		return;
+	}
+	notice_of(ev, &n);
+	n.x = 0;
+	n.y = 0;
+	n.mods |= OB_KEY_SEEN | ( ( ev->type == HID_EV_KEY_UP ) ? OB_KEY_UP : 0 );
+	for ( i = 0; i < cnt; i++ ) {
+		if ( wm_ref(wid[i], &w) >= E_OK && w.visible ) {
+			knl_ob_post(&to[i], -1, OB_E_KEY, &n);
+		}
+	}
+}
+
+/* The modifiers a key typed by a screen keyboard may be held with */
+#define WO_PUT_MODS	( 0xFFU | KM_MOD_THUMB_L | KM_MOD_THUMB_R )
+
+EXPORT ER wm_obj_key_put( INT wid, UINT code, UINT mods )
+{
+	T_HIDEV	e;
+	BOOL	nofocus, pressed;
+	UD	now = now_ms();
+	ER	er;
+
+	if ( code == 0 || code > 0xFF || ( mods & ~WO_PUT_MODS ) != 0 ) {
+		return E_PAR;
+	}
+	if ( wo_mtx <= 0 || wid < 1 || wid > WM_MAX_WIN ) {
+		return E_ID;
+	}
+	LOCK();
+	nofocus = ( wo_win[wid].used && wo_win[wid].nofocus );
+	pressed = ( wo_down == wid && now - wo_down_ms <= WM_KEY_PUT_MS );
+	UNLOCK();
+	if ( !nofocus ) {
+		return E_OBJ;
+	}
+	if ( !pressed ) {
+		return E_OACV;
+	}
+	knl_memset(&e, 0, sizeof(e));
+	e.type = HID_EV_KEY_DOWN;
+	e.code = code;
+	e.mods = mods;
+	er = knl_hid_inject(0, &e);
+	if ( er < E_OK ) {
+		return er;
+	}
+	e.type = HID_EV_KEY_UP;
+	e.when = 0;
+	return knl_hid_inject(0, &e);
+}
+
 LOCAL void repaint( INT wid );
 
 /*
@@ -756,7 +959,15 @@ EXPORT void knl_wmobj_moved( INT wid, BOOL resized )
 	if ( drawn ) {
 		repaint(wid);
 	} else {
+		INT	pid;
+
 		win_post(wid, OB_E_REDRAW, NULL);
+		/* the panels placed on it are drawn again: what was drawn went with the old size */
+		for ( pid = 1; pid <= WM_PANEL_MAX; pid++ ) {
+			if ( wm_panel_wid(pid) == wid ) {
+				wm_panel_draw(pid);
+			}
+		}
 	}
 }
 
@@ -923,6 +1134,88 @@ EXPORT ER wm_obj_drop( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
 	nt.mods = mods;
 	nt.x = sx - w.work.left;
 	nt.y = sy - w.work.top;
+	if ( tk_get_otm(&now) >= E_OK ) {
+		nt.when = ( (UD)(UW)now.hi << 32 ) | (UD)now.lo;
+	}
+	knl_ob_post(&u, OB_WR_DROP, OB_E_DROP, &nt);
+
+	return E_OK;
+}
+
+EXPORT ER wm_obj_drop_text( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
+			    CONST UB *text, INT n )
+{
+	T_OBDROP	*d, *old = NULL;
+	T_WMWIN		w;
+	T_OBNTM		nt;
+	SYSTIM		now;
+	TS_UUID		u;
+	ID		taker = 0, oldtaker = 0;
+	BOOL		revoke = FALSE;
+
+	if ( wo_mtx <= 0 || wid < 1 || wid > WM_MAX_WIN || text == NULL || n <= 0 ) {
+		return E_PAR;
+	}
+	if ( n > OB_DROP_TEXT - 1 ) {
+		n = OB_DROP_TEXT - 1;
+		while ( n > 0 && ( text[n] & 0xC0 ) == 0x80 ) {
+			n--;			/* not in the middle of a letter */
+		}
+	}
+	if ( wm_obj_uuid(wid, &u) < E_OK || wm_ref(wid, &w) < E_OK ) {
+		return E_NOEXS;
+	}
+	if ( !knl_ob_taker(&u, OB_E_TEXT, &taker) ) {
+		return E_NOSPT;			/* nobody there takes letters */
+	}
+	d = (T_OBDROP *)Kmalloc(sizeof(T_OBDROP));
+	if ( d == NULL ) {
+		return E_NOMEM;
+	}
+	knl_memset(d, 0, sizeof(*d));
+	d->x = sx - w.work.left;
+	d->y = sy - w.work.top;
+	d->mods = mods;
+	knl_memcpy(d->text, text, n);
+	if ( from != NULL ) {
+		INT	fw = wm_obj_wid(from);
+
+		d->from = *from;
+		LOCK();
+		if ( fw >= 1 && fw <= WM_MAX_WIN && wo_win[fw].used ) {
+			d->fromobj = wo_win[fw].shows;
+		}
+		UNLOCK();
+	}
+
+	LOCK();
+	if ( !wo_win[wid].used || !same_uuid(&wo_win[wid].uuid, &u) ) {
+		UNLOCK();
+		Kfree(d);
+		return E_NOEXS;			/* it closed meanwhile */
+	}
+	old = wo_win[wid].drop;
+	if ( old != NULL && !wo_win[wid].answered ) {
+		oldtaker = wo_win[wid].taker;
+		revoke = TRUE;
+	}
+	d->seq = ++wo_win[wid].seq;
+	wo_win[wid].drop = d;
+	wo_win[wid].taker = taker;
+	wo_win[wid].answered = FALSE;
+	UNLOCK();
+	if ( old != NULL ) {
+		if ( revoke ) {
+			drop_ungrant(old, oldtaker);	/* the links not taken: nothing granted any more */
+		}
+		Kfree(old);
+	}
+
+	knl_memset(&nt, 0, sizeof(nt));
+	nt.code = 0;
+	nt.mods = mods;
+	nt.x = d->x;
+	nt.y = d->y;
 	if ( tk_get_otm(&now) >= E_OK ) {
 		nt.when = ( (UD)(UW)now.hi << 32 ) | (UD)now.lo;
 	}
@@ -2636,7 +2929,7 @@ LOCAL ER wo_sat( INT h, CONST UB *json, SZ size )
 			return E_OK;
 		}
 		wm_set_title(H_A(h), (CONST char *)name);
-		wm_composite();		/* the band is outside what wm_update lays */
+		wm_update();		/* the band, drawn through the frames' watched environment */
 	}
 	return E_OK;
 }
@@ -2875,7 +3168,7 @@ LOCAL ER wo_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 	} else if ( has_shows ) {
 		icon_of(wid, &shows);
 	}
-	wm_composite();			/* a new window: its frame as well as its work area */
+	wm_update();			/* a new window: its frame as well as its work area */
 
 	return er;
 }

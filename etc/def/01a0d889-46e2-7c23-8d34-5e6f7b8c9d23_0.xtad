@@ -1,0 +1,9 @@
+<tad version="1.0" encoding="UTF-8" filename="かな入力練習のキーボードレイアウト">
+<document>
+<p>かな入力練習のキーボードレイアウト</p>
+<p>表示するキーボード。実身のキーボードレイアウトの一覧から選ぶ。メニューの定義。</p>
+</document>
+<menu>
+<list code="kb.item"/>
+</menu>
+</tad>

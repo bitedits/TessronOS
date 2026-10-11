@@ -111,7 +111,13 @@ typedef struct {
 	UW	salt;			/* of this volume, mixed into every CRC */
 } TSFSJRNL;
 
-LOCAL TSFSJRNL	jrnl_tbl[TSFSJ_MAX_VOL];
+/*
+ * The journal of a volume sits at the volume's number less one. Its
+ * entry is made when that number first has a journal and is kept for
+ * whichever volume has the number next, so that the checkpointer may
+ * look at every entry without a lock of the table.
+ */
+LOCAL TSFSJRNL	*jrnl_tbl[TSFSJ_MAX_VOL];
 LOCAL ID	jrnl_tsk = 0;
 
 /* ---------------------------------------------------------------- bytes */
@@ -176,14 +182,13 @@ LOCAL void make_kind( UB *buf, CONST char *magic, UD seq, UW count )
 
 LOCAL TSFSJRNL *jrnl_find( ID vol )
 {
-	INT	i;
+	TSFSJRNL	*j;
 
-	for ( i = 0; i < TSFSJ_MAX_VOL; i++ ) {
-		if ( jrnl_tbl[i].vol == vol && vol > 0 ) {
-			return &jrnl_tbl[i];
-		}
+	if ( vol < 1 || vol > TSFSJ_MAX_VOL ) {
+		return NULL;
 	}
-	return NULL;
+	j = __atomic_load_n(&jrnl_tbl[vol - 1], __ATOMIC_ACQUIRE);
+	return ( j != NULL && j->vol == vol ) ? j : NULL;
 }
 
 LOCAL void checkpointer( INT stacd, void *exinf );
@@ -192,17 +197,26 @@ LOCAL TSFSJRNL *jrnl_make( ID vol )
 {
 	T_CMTX	cm;
 	T_CTSK	ct;
-	TSFSJRNL	*j = jrnl_find(vol);
-	INT	i;
+	TSFSJRNL	*j = jrnl_find(vol), *none = NULL;
 
 	if ( j != NULL ) {
 		return j;
 	}
-	for ( i = 0; i < TSFSJ_MAX_VOL && jrnl_tbl[i].vol != 0; i++ ) ;
-	if ( i >= TSFSJ_MAX_VOL ) {
+	if ( vol < 1 || vol > TSFSJ_MAX_VOL ) {
 		return NULL;
 	}
-	j = &jrnl_tbl[i];
+	j = __atomic_load_n(&jrnl_tbl[vol - 1], __ATOMIC_ACQUIRE);
+	if ( j == NULL ) {
+		j = (TSFSJRNL *)Kcalloc(1, sizeof(TSFSJRNL));
+		if ( j == NULL ) {
+			return NULL;
+		}
+		if ( !__atomic_compare_exchange_n(&jrnl_tbl[vol - 1], &none, j, FALSE,
+						  __ATOMIC_RELEASE, __ATOMIC_ACQUIRE) ) {
+			Kfree(j);
+			j = none;		/* made meanwhile */
+		}
+	}
 	knl_memset(j, 0, sizeof(*j));
 	cm.exinf = NULL;
 	cm.mtxatr = TA_TFIFO;
@@ -381,9 +395,9 @@ LOCAL void checkpointer( INT stacd, void *exinf )
 	for ( ;; ) {
 		tk_dly_tsk(CNF_TSFS_FLUSH_MS);
 		for ( i = 0; i < TSFSJ_MAX_VOL; i++ ) {
-			TSFSJRNL	*j = &jrnl_tbl[i];
+			TSFSJRNL	*j = __atomic_load_n(&jrnl_tbl[i], __ATOMIC_ACQUIRE);
 
-			if ( j->vol <= 0 || j->ncached == 0 ) continue;
+			if ( j == NULL || j->vol <= 0 || j->ncached == 0 ) continue;
 			if ( tk_loc_mtx(j->mtx, TMO_POL) < E_OK ) continue;
 			if ( j->vol > 0 && j->handles == 0 && !j->committing ) {
 				(void)ckpt_locked(j);
@@ -731,6 +745,45 @@ EXPORT ER ts_jrnl_checkpoint( ID vol )
 	return er;
 }
 
+EXPORT ER ts_jrnl_wipe( ID vol )
+{
+	TSFSJRNL	*j = jrnl_find(vol);
+	UB		*zero;
+	UD		pos;
+	INT		tries;
+	ER		er;
+
+	if ( j == NULL ) {
+		return E_OK;
+	}
+	zero = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	if ( zero == NULL ) {
+		return E_NOMEM;
+	}
+	knl_memset(zero, 0, TSFSBLK_BLOCK_SIZE);
+	tk_loc_mtx(j->mtx, TMO_FEVR);
+	for ( tries = 0; ( j->handles > 0 || j->committing ) && tries < 500; tries++ ) {
+		tk_unl_mtx(j->mtx);
+		tk_dly_tsk(10);
+		tk_loc_mtx(j->mtx, TMO_FEVR);
+	}
+	if ( j->handles > 0 || j->committing ) {
+		tk_unl_mtx(j->mtx);
+		Kfree(zero);
+		return E_BUSY;
+	}
+	er = ckpt_locked(j);
+	/* the ring now holds no transaction to replay: none of it is needed */
+	for ( pos = 0; er >= E_OK && !j->dead && pos < j->len; pos++ ) {
+		er = knl_tsfsblk_raw_write(j->vol, ring_blk(j, pos), zero);
+	}
+	if ( er >= E_OK ) er = knl_tsfsblk_raw_flush(j->vol);
+	tk_unl_mtx(j->mtx);
+	Kfree(zero);
+
+	return er;
+}
+
 EXPORT ER ts_jrnl_ref( ID vol, T_TSFSJRNL *p_jrnl )
 {
 	TSFSJRNL	*j;
@@ -864,6 +917,18 @@ EXPORT void knl_jrnl_revoke( ID vol, UD start, UD count )
 		(void)ckpt_locked(j);
 	}
 	tk_unl_mtx(j->mtx);
+}
+
+/*
+ * Whether the volume's log has been read at open, so that a transaction
+ * knows where in the ring it goes. A volume opened with an error
+ * recorded is not replayed and has none until it is.
+ */
+EXPORT BOOL knl_jrnl_ready( ID vol )
+{
+	TSFSJRNL	*j = jrnl_find(vol);
+
+	return (BOOL)( j != NULL && j->blocks > 0 );
 }
 
 EXPORT ER knl_jrnl_close( ID vol )

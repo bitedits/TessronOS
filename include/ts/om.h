@@ -159,6 +159,13 @@ IMPORT void  om_store_empty( void );
 
 /* One record, and one name, by identity. What comes back is the store's */
 IMPORT T_TAD *om_store_get( CONST TS_UUID *id, INT recno );
+
+/*
+ * The object a record being drawn belongs to: a picture it names as
+ * "{realId}_0_1.png" (a record written by TADjs Desktop, 実時間制御TAD
+ * 9.1.1) is that object's resource "_0_1.png". NULL: none.
+ */
+IMPORT void  om_store_self( CONST TS_UUID *id );
 IMPORT INT   om_store_name( CONST TS_UUID *id, UB *buf, INT max );
 
 /*
@@ -289,6 +296,9 @@ IMPORT ER    om_obj_link_add( CONST TS_UUID *box, CONST TS_UUID *uuid );
 /* Every link of a box to an object taken out */
 IMPORT ER    om_obj_link_del( CONST TS_UUID *box, CONST TS_UUID *uuid );
 
+/* The links of a box made to be one to each of these, in one write */
+IMPORT ER    om_obj_links_set( CONST TS_UUID *box, CONST TS_UUID *uuids, INT n );
+
 /*
  * A real object copied under a new identity and given a name. 'deep'
  * copies what it links to as well; otherwise the copy's links point at
@@ -313,7 +323,9 @@ IMPORT T_TAD *om_store_restore( CONST TS_UUID *id, INT recno,
  *   om_store_bump	one object's count moved (never below nought)
  *   om_store_refs	one object's count; -1 when the metadata has none
  *   om_store_links	what the links of a record's text point at
- *   om_store_relink	counts moved from one text of a record to another
+ *   om_store_relink	counts moved from one text of a record of 'host' to
+ *			another: only those of objects on host's volume
+ *			(design 8.3); a NULL host counts every one
  *   om_store_objects	every object in the store
  *   om_store_delete	an object thrown away for good, with its files
  *   om_store_recount	every count made again from the records, with
@@ -327,13 +339,29 @@ IMPORT BOOL  om_store_counts( CONST TS_UUID *id );
 IMPORT void  om_store_bump( CONST TS_UUID *id, INT more );
 IMPORT INT   om_store_refs( CONST TS_UUID *id );
 IMPORT INT   om_store_links( CONST UB *buf, SZ len, TS_UUID *ids, INT max );
-IMPORT void  om_store_relink( CONST UB *was, SZ was_len, CONST UB *now,
+IMPORT void  om_store_relink( CONST TS_UUID *host, CONST UB *was, SZ was_len, CONST UB *now,
 			      SZ now_len );
 IMPORT INT   om_store_objects( TS_UUID *ids, INT max );
 IMPORT ER    om_store_delete( CONST TS_UUID *id );
 IMPORT ER    om_store_recount( CONST TS_UUID *roots, INT nroot,
 			       INT *p_total, INT *p_changed );
 IMPORT void  om_store_forget( CONST TS_UUID *id );
+
+/*
+ * The ids of the links of an xmlTAD text of the object 'host' made to
+ * say where their objects are (design 8.3): bare for an object of the
+ * same volume, the volume's UUID before it for one of another. *p_buf
+ * is replaced when the text changes. How many changed.
+ */
+IMPORT INT   om_link_fix( UB **p_buf, SZ *p_len, CONST TS_UUID *host );
+
+/*
+ * The volumes attached changed (design 7.6): what is held of objects
+ * that cannot be found now is let go, and so is the memory of those
+ * that could not be found before. The windows of what went are to be
+ * closed first: a record a window shows is the store's.
+ */
+IMPORT void  om_store_recheck( void );
 
 /* A record as last written, whole; the caller frees it */
 IMPORT UB   *om_store_read( CONST TS_UUID *id, INT recno, SZ *p_len );
@@ -380,7 +408,12 @@ typedef struct {
 	CONST UB	*text;
 	CONST UW	*icon;
 	INT		icon_w, icon_h;
+	UINT		state;		/* OM_LOOK_*: a 虚身, or on another volume */
 } T_OMLOOK;
+
+/* The same bits as TV_ST_GONE and TV_ST_OTHER (ts/tadview.h) */
+#define OM_LOOK_GONE	0x0001		/* pale, and nothing inside an opened one */
+#define OM_LOOK_OTHER	0x0002		/* its top left corner filled */
 
 /*
  * The room an opened object keeps from its edge when it has no frame,

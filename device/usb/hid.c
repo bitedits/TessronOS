@@ -41,6 +41,7 @@
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
 #include <ts/hid.h>
+#include <ts/keymap.h>
 #include <ts/disp.h>
 #include <ts/time.h>
 #include "usbdev.h"
@@ -140,6 +141,30 @@ LOCAL T_HIDATTR		hid_attr = { 0, 0, 12, 7, 0, 1, 1, 0, 0, 0, 1, 800, 100, 0, 0 }
  * ring fills, that one is dropped rather than the newest: what just
  * happened matters more than what happened a while ago.
  */
+/*
+ * The window manager's compositor, told the pointer moved: it lays the
+ * pointer where it now is at its next build, whatever the program that
+ * reads the events is busy with. Not there when there are no windows.
+ */
+IMPORT void knl_wm_pointer_hint( void ) __attribute__((weak));
+
+/*
+ * 強制終了 (outer_kernel/wm/fquit.c): every event is shown to it before
+ * the ring, with the keys as the keyboard's layout made them. Shift+Pause
+ * and Ctrl+Shift+Pause, and everything while its window is up, are its
+ * own and go no further: it answers whether it took the event. Taken
+ * here, they work whatever the reader of the ring is doing. Not there
+ * without windows.
+ */
+IMPORT BOOL knl_fq_input( CONST T_HIDEV *ev, BOOL inj ) __attribute__((weak));
+
+LOCAL void moved_hint( CONST T_HIDEV *ev )
+{
+	if ( ev->type == HID_EV_MOVE && knl_wm_pointer_hint != NULL ) {
+		knl_wm_pointer_hint();
+	}
+}
+
 LOCAL void ring_put_as( CONST T_HIDEV *ev, BOOL inj, UINT src )
 {
 	UINT	next;
@@ -148,6 +173,12 @@ LOCAL void ring_put_as( CONST T_HIDEV *ev, BOOL inj, UINT src )
 	tap_ev[tap_seq % HID_TAP] = *ev;
 	tap_src[tap_seq % HID_TAP] = src;
 	tap_seq++;
+	if ( knl_fq_input != NULL && knl_fq_input(ev, inj) ) {
+		hid_count.events++;
+		tk_unl_mtx(hid_mtxid);
+		moved_hint(ev);
+		return;
+	}
 	/*
 	 * A move after a move not yet taken: only where the pointer now is
 	 * matters, so the waiting one is brought up to date. A pointer that
@@ -162,6 +193,7 @@ LOCAL void ring_put_as( CONST T_HIDEV *ev, BOOL inj, UINT src )
 			hid_ring[last] = *ev;
 			hid_count.events++;
 			tk_unl_mtx(hid_mtxid);
+			moved_hint(ev);
 			return;
 		}
 	}
@@ -177,11 +209,80 @@ LOCAL void ring_put_as( CONST T_HIDEV *ev, BOOL inj, UINT src )
 	hid_tail = next;
 	hid_count.events++;
 	tk_unl_mtx(hid_mtxid);
+	moved_hint(ev);
+}
+
+/*
+ * A keyboard's event with the keys given other numbers (キー配列): the
+ * key's number changed, and the modifiers held made what they are after
+ * it -- a key made a modifier holds that modifier while it is down, and
+ * a modifier made another key no longer holds its own.
+ */
+LOCAL UINT	km_held = 0;		/* modifier bits held by keys made modifiers */
+LOCAL UINT	km_thumbs = 0;		/* KM_MOD_THUMB_* held, in a thumb-shift kana layout */
+LOCAL UINT	km_thumb_used = 0;	/* those of them a key was pressed with */
+
+/*
+ * The thumbs of a thumb-shift kana layout: a thumb key's press kept back,
+ * the keys pressed while it is held marked with it, and it let through,
+ * pressed and let go, only when nothing was pressed with it.
+ */
+LOCAL BOOL thumb_take( CONST HIDDEV *d, T_HIDEV *e )
+{
+	INT	k = km_kana();
+	UINT	bit;
+
+	if ( k != KM_KANA_TRON && k != KM_KANA_NICOLA ) {
+		km_thumbs = km_thumb_used = 0;
+		return FALSE;
+	}
+	if ( e->code == KM_THUMB_L_KEY || e->code == KM_THUMB_R_KEY ) {
+		bit = ( e->code == KM_THUMB_L_KEY ) ? KM_MOD_THUMB_L : KM_MOD_THUMB_R;
+		if ( e->type == HID_EV_KEY_DOWN ) {
+			km_thumbs |= bit;
+			km_thumb_used &= ~bit;
+			return TRUE;			/* kept back */
+		}
+		km_thumbs &= ~bit;
+		if ( ( km_thumb_used & bit ) == 0 ) {
+			T_HIDEV	down = *e;
+
+			down.type = HID_EV_KEY_DOWN;
+			ring_put_as(&down, FALSE, d->id);
+			return FALSE;			/* alone: pressed, and this let go */
+		}
+		km_thumb_used &= ~bit;
+		return TRUE;
+	}
+	if ( e->type == HID_EV_KEY_DOWN && km_thumbs != 0 ) {
+		km_thumb_used |= km_thumbs;
+	}
+	return FALSE;
 }
 
 LOCAL void ring_put( CONST HIDDEV *d, CONST T_HIDEV *ev )
 {
-	ring_put_as(ev, FALSE, d->id);
+	T_HIDEV	e = *ev;
+
+	if ( e.type == HID_EV_KEY_DOWN || e.type == HID_EV_KEY_UP ) {
+		UINT	to = km_remap(e.code);
+
+		if ( to != e.code ) {
+			if ( to >= 0xE0 && to <= 0xE7 ) {
+				UINT	bit = 1U << ( to - 0xE0 );
+
+				if ( e.type == HID_EV_KEY_DOWN ) km_held |= bit;
+				else km_held &= ~bit;
+			}
+			e.code = to;
+		}
+	}
+	e.mods = ( e.mods & ~km_mods_away() ) | km_held;
+	if ( ( e.type == HID_EV_KEY_DOWN || e.type == HID_EV_KEY_UP ) && thumb_take(d, &e) ) {
+		return;
+	}
+	e.mods |= km_thumbs;
+	ring_put_as(&e, FALSE, d->id);
 }
 
 LOCAL BOOL ring_take( T_HIDEV *ev, BOOL *p_inj )
@@ -950,6 +1051,25 @@ LOCAL void hid_xfer( void *ctx, DMABUF *b, INT off, INT len, INT err )
 
 /* ---------------------------------------------------------------- attach */
 
+#ifdef USE_KTEST
+/*
+ * For the tests: a device of this product name that comes from now on is
+ * not taken, and is left to the programs (SVC class 12, WebHID); NULL
+ * takes them all again.
+ */
+LOCAL UB	hid_leave_name[32];
+
+EXPORT void knl_hid_leave( CONST UB *product )
+{
+	INT	i;
+
+	for ( i = 0; i < (INT)sizeof(hid_leave_name) - 1 && product != NULL && product[i] != 0; i++ ) {
+		hid_leave_name[i] = product[i];
+	}
+	hid_leave_name[i] = 0;
+}
+#endif
+
 EXPORT BOOL knl_hid_match( USBDEV *dev )
 {
 	UB	*p, *end;
@@ -957,6 +1077,11 @@ EXPORT BOOL knl_hid_match( USBDEV *dev )
 	if ( !hid_ready || dev->cfg == NULL ) {
 		return FALSE;
 	}
+#ifdef USE_KTEST
+	if ( hid_leave_name[0] != 0 && knl_strcmp((CONST char *)dev->product, (CONST char *)hid_leave_name) == 0 ) {
+		return FALSE;
+	}
+#endif
 	end = dev->cfg + dev->cfglen;
 	for ( p = dev->cfg; p != NULL; p = knl_usb_next_desc(p, end) ) {
 		if ( p[1] == USB_DT_INTERFACE && p[0] >= 9 && p[3] == 0
@@ -1489,6 +1614,16 @@ EXPORT ER ts_hid_setattr( CONST T_HIDATTR *a )
 	if ( !hid_attr.krp ) sh_rep_key = 0;
 	if ( hid_attr.speed < 1 || hid_attr.speed > 15 ) hid_attr.speed = 12;
 	return E_OK;
+}
+
+/*
+ * The key held stops repeating: the window it was going to is gone, and
+ * what it repeated would go on to whichever window has the keys next
+ * (Ctrl+E closing one window and then the one behind it).
+ */
+EXPORT void knl_hid_repeat_cut( void )
+{
+	sh_rep_key = 0;
 }
 
 EXPORT ER ts_hid_getattr( T_HIDATTR *a )

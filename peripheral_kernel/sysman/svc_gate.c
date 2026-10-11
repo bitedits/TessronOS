@@ -13,13 +13,27 @@
  *	to the kernel functions. Runs on the task's system stack as a quasi
  *	task part with interrupts enabled, so the callee may block.
  *
- *	The user pages of a process are readable and writable from EL1 (PAN
- *	is not used). The calls of the classes below that take a buffer --
- *	tk_, ts_, ob_, fs_, so_, the drawing and window calls -- first make
- *	sure it lies in the calling process's own pages (knl_prc_user_ok);
- *	dt_ and tm_putstring still use pointer arguments as they are. The calls of the core
- *	from a process are served by svc_tk.c. The protection level 3
- *	permission table is added with TessronOS/PM.
+ *	Every call of a process that takes a pointer -- of every class: tk_,
+ *	ts_, dt_, tm_, ob_, fs_, so_, gp_, the drawing and window calls --
+ *	goes through a wrapper of its class that first makes sure the
+ *	memory lies in the calling process's own pages, writable when
+ *	something is to come back in it (knl_prc_user_ok), and answers
+ *	E_MACV (EX_FAULT for fs_) otherwise. What the kernel acts on is
+ *	copied into its own memory first; a buffer that is only carried
+ *	is used where it is, once checked. The calls of the core from a
+ *	process are served by svc_tk.c, the objects by obsvc.c, the
+ *	sockets by so_prc.c and the GPU by gpu_svc.c.
+ *
+ *	The kernel reaches a process's pages only with the way to them
+ *	open (PAN, kernel/sysdepend/cpu/core/armv8a/sysdepend.h): the
+ *	wrappers open it with UACCESS, knl_ua_get and knl_ua_put for what
+ *	they have made sure of, and nowhere else. A task of the system
+ *	process at EL0 is the system's own; its calls run with the way
+ *	open, and what it hands is taken as it is.
+ *
+ *	A call that acts on the whole system needs the right the table of
+ *	rights gives it (svc_rights, include/ts/svc.h TSN_RIGHT_*), looked
+ *	at here before the call is made.
  */
 
 #include <sys/machine.h>
@@ -28,6 +42,7 @@
 #include "sysdepend/cpu/core/armv8a/cpu_task.h"
 #include <tm/tmonitor.h>
 #include <ts/svc.h>
+#include <ts/time.h>
 #include <ts/proc.h>
 #include <ts/ob.h>
 #include <ts/fs.h>
@@ -44,13 +59,19 @@
 #include <ts/hid.h>
 #include <ts/conf.h>
 #include <ts/umem.h>
+#include <ts/tray.h>
+#include <ts/keymap.h>
+#include <ts/sysdef.h>
+#include <ts/psx.h>
 
 typedef UBINT (*SVCFN)( UBINT, UBINT, UBINT, UBINT, UBINT, UBINT, UBINT, UBINT );
 
 #define F(fn)	((FP)(fn))
 
+LOCAL ID svc_sys_cre_tsk( CONST T_CTSK *pk );
+
 LOCAL const FP tk_svc_tbl[TSN_TK_MAX + 1] = {
-	[TSN_NUMBER(TSN_TK_CRE_TSK)]	= F(tk_cre_tsk),
+	[TSN_NUMBER(TSN_TK_CRE_TSK)]	= F(svc_sys_cre_tsk),
 	[TSN_NUMBER(TSN_TK_DEL_TSK)]	= F(tk_del_tsk),
 	[TSN_NUMBER(TSN_TK_STA_TSK)]	= F(tk_sta_tsk),
 	[TSN_NUMBER(TSN_TK_EXT_TSK)]	= F(tk_ext_tsk),
@@ -129,6 +150,7 @@ LOCAL const FP tk_svc_tbl[TSN_TK_MAX + 1] = {
 	[TSN_NUMBER(TSN_TK_SET_UTC)]	= F(tk_set_utc),
 	[TSN_NUMBER(TSN_TK_GET_UTC)]	= F(tk_get_utc),
 	[TSN_NUMBER(TSN_TK_GET_PRC)]	= F(tk_get_prc),
+	[TSN_NUMBER(TSN_TK_CHG_SLT)]	= F(tk_chg_slt),
 };
 
 /* Whether the calling process may use its memory at p..p+len for this */
@@ -142,7 +164,7 @@ LOCAL SZ svc_ts_get_arg( void *buf, SZ size )
 	if ( size < 0 || ( size > 0 && !knl_prc_user_ok(ts_get_pid(), buf, size, TRUE) ) ) {
 		return E_MACV;
 	}
-	return ts_get_arg(buf, size);
+	return UACCESS(ts_get_arg(buf, size));
 }
 
 LOCAL ER svc_ts_gen_uuid( TS_UUID *p_uuid )
@@ -155,7 +177,7 @@ LOCAL ER svc_ts_gen_uuid( TS_UUID *p_uuid )
 	}
 	er = ts_gen_uuid(&u);
 	if ( er >= E_OK ) {
-		*p_uuid = u;
+		knl_ua_put(p_uuid, &u, sizeof(u));
 	}
 	return er;
 }
@@ -182,7 +204,7 @@ LOCAL ER svc_ts_get_random( void *buf, SZ len )
 	if ( key < E_OK ) {
 		return (ER)key;
 	}
-	er = ob_rea_rec(key, OB_RND_DATA, 0, buf, len, &asz);
+	er = UACCESS(ob_rea_rec(key, OB_RND_DATA, 0, buf, len, &asz));
 	(void)ob_cls_obj(key);
 	return ( er < E_OK ) ? er : ( asz == len ) ? E_OK : E_IO;
 }
@@ -227,7 +249,7 @@ LOCAL ER svc_ts_wai_prc( ID pid, T_PSTS *pk_psts, TMO tmout )
 	}
 	er = ts_wai_prc(pid, &s, tmout);
 	if ( er >= E_OK && pk_psts != NULL ) {
-		*pk_psts = s;
+		knl_ua_put(pk_psts, &s, sizeof(s));
 	}
 	return er;
 }
@@ -246,7 +268,7 @@ LOCAL ER svc_ts_ref_prc( ID pid, T_RPRC *pk_rprc )
 	}
 	er = ts_ref_prc(pid, &r);
 	if ( er >= E_OK ) {
-		*pk_rprc = r;
+		knl_ua_put(pk_rprc, &r, sizeof(r));
 	}
 	return er;
 }
@@ -263,7 +285,7 @@ LOCAL ER svc_ts_snd_msg( ID pid, CONST T_TSMSG *msg, TMO tmout )
 	if ( ts_get_pid() > 0 && ( er = knl_obprc_may(pid, OB_OP_WRITE, OBP_PARENT | OBP_CHILD) ) < E_OK ) {
 		return er;
 	}
-	m = *msg;
+	knl_ua_get(&m, msg, sizeof(m));
 	return ts_snd_msg(pid, &m, tmout);
 }
 
@@ -277,7 +299,22 @@ LOCAL ER svc_ts_rcv_msg( T_TSMSG *buf, TMO tmout )
 	}
 	er = ts_rcv_msg(&m, tmout);
 	if ( er >= E_OK ) {
-		*buf = m;
+		knl_ua_put(buf, &m, sizeof(m));
+	}
+	return er;
+}
+
+LOCAL ER svc_ts_ref_cpu( T_TSCPU *pk )
+{
+	T_TSCPU	c;
+	ER	er;
+
+	if ( !user_ok(pk, sizeof(*pk), TRUE) ) {
+		return E_MACV;
+	}
+	er = ts_ref_cpu(&c);
+	if ( er >= E_OK ) {
+		knl_ua_put(pk, &c, sizeof(c));
 	}
 	return er;
 }
@@ -292,7 +329,7 @@ LOCAL ER svc_ts_get_mono( UD *p_ns )
 	}
 	er = ts_get_mono(&ns);
 	if ( er >= E_OK ) {
-		*p_ns = ns;
+		knl_ua_put(p_ns, &ns, sizeof(ns));
 	}
 	return er;
 }
@@ -306,16 +343,215 @@ LOCAL ER svc_ts_map_mem( void **p_adr, SZ size, SZ align, UINT prot )
 	if ( !user_ok(p_adr, sizeof(void *), TRUE) ) {
 		return E_MACV;
 	}
-	a = *p_adr;
+	knl_ua_get(&a, p_adr, sizeof(a));
 	er = ts_map_mem(&a, size, align, prot);
 	if ( er == E_OK ) {
-		*p_adr = a;
+		knl_ua_put(p_adr, &a, sizeof(a));
 	}
 	return er;
 }
 
+/* ---------------------------------------------------------------- POSIX processes (design 5.8) */
+
+LOCAL ER user_cstr( CONST char *src, char *dst, INT max );
+
+/*
+ * A spawn: the path, the T_SPAWN, its start-up argument and descriptors
+ * all copied into the kernel's memory before anything is looked at.
+ */
+LOCAL ID svc_ts_spn_prc( CONST char *path, CONST T_SPAWN *usp )
+{
+	T_SPAWN	sp;
+	char	*p;
+	void	*arg = NULL;
+	INT	*fds = NULL;
+	ID	pid;
+	ER	er;
+
+	if ( !user_ok(usp, sizeof(sp), FALSE) ) {
+		return E_MACV;
+	}
+	knl_ua_get(&sp, usp, sizeof(sp));
+	if ( sp.argsz < 0 || sp.argsz > TS_SPN_ARG_MAX || sp.nfd < 0 || sp.nfd > TS_SPN_FD_MAX ) {
+		return E_PAR;
+	}
+	p = (char *)Kmalloc(FS_PATH_MAX);
+	if ( p == NULL ) {
+		return E_NOMEM;
+	}
+	er = user_cstr(path, p, FS_PATH_MAX);
+	if ( er >= EX_OK && !knl_fs_path_let(p, knl_ob_crd_of(ts_get_pid())) ) {
+		er = EX_ACCES;
+	}
+	if ( er < EX_OK ) {
+		Kfree(p);
+		return ( er == EX_FAULT ) ? E_MACV : E_PAR;
+	}
+	if ( sp.argsz > 0 ) {
+		if ( sp.arg == NULL || !user_ok(sp.arg, sp.argsz, FALSE) ) {
+			Kfree(p);
+			return E_MACV;
+		}
+		arg = Kmalloc((size_t)sp.argsz);
+		if ( arg == NULL ) {
+			Kfree(p);
+			return E_NOMEM;
+		}
+		knl_ua_get(arg, sp.arg, (SZ)sp.argsz);
+	}
+	if ( sp.nfd > 0 ) {
+		if ( sp.fds == NULL || !user_ok(sp.fds, (SZ)sp.nfd * (SZ)sizeof(INT), FALSE) ) {
+			er = E_MACV;
+		} else if ( ( fds = (INT *)Kmalloc(sizeof(INT) * (SZ)sp.nfd) ) == NULL ) {
+			er = E_NOMEM;
+		} else {
+			knl_ua_get(fds, sp.fds, (SZ)sp.nfd * (SZ)sizeof(INT));
+		}
+		if ( er < E_OK ) {
+			Kfree(p);
+			if ( arg != NULL ) Kfree(arg);
+			return er;
+		}
+	}
+	sp.arg = arg;
+	sp.fds = fds;
+	pid = ts_spn_prc(p, &sp);
+	Kfree(p);
+	if ( arg != NULL ) Kfree(arg);
+	if ( fds != NULL ) Kfree(fds);
+	return pid;
+}
+
+LOCAL INT svc_ts_get_inh( INT *fds, INT max )
+{
+	INT	*k, n;
+
+	if ( max < 0 || max > TS_SPN_FD_MAX ) {
+		return E_PAR;
+	}
+	if ( max == 0 ) {
+		return ts_get_inh(NULL, 0);
+	}
+	if ( !user_ok(fds, (SZ)max * (SZ)sizeof(INT), TRUE) ) {
+		return E_MACV;
+	}
+	k = (INT *)Kmalloc(sizeof(INT) * (SZ)max);
+	if ( k == NULL ) {
+		return E_NOMEM;
+	}
+	n = ts_get_inh(k, max);
+	if ( n > 0 ) {
+		knl_ua_put(fds, k, (SZ)( ( n < max ) ? n : max ) * (SZ)sizeof(INT));
+	}
+	Kfree(k);
+	return n;
+}
+
+LOCAL ID svc_ts_wai_psx( ID pid, UINT options, INT *p_status )
+{
+	INT	st = 0;
+	ID	r;
+
+	if ( p_status != NULL && !user_ok(p_status, sizeof(INT), TRUE) ) {
+		return E_MACV;
+	}
+	r = ts_wai_psx(pid, options, &st);
+	if ( r > 0 && p_status != NULL ) {
+		knl_ua_put(p_status, &st, sizeof(st));
+	}
+	return r;
+}
+
+LOCAL ER svc_ts_sig_set( UINT what, CONST T_TSSIG *in, T_TSSIG *old )
+{
+	T_TSSIG	i, o;
+	ER	er;
+
+	if ( ( in != NULL && !user_ok(in, sizeof(i), FALSE) )
+	  || ( old != NULL && !user_ok(old, sizeof(o), TRUE) ) ) {
+		return E_MACV;
+	}
+	if ( in != NULL ) knl_ua_get(&i, in, sizeof(i));
+	er = ts_sig_set(what, ( in != NULL ) ? &i : NULL, ( old != NULL ) ? &o : NULL);
+	if ( er >= E_OK && old != NULL ) {
+		knl_ua_put(old, &o, sizeof(o));
+	}
+	return er;
+}
+
+LOCAL ER svc_ts_slp_psx( UD ns, UD *p_left )
+{
+	UD	left = 0;
+	ER	er;
+
+	if ( p_left != NULL && !user_ok(p_left, sizeof(UD), TRUE) ) {
+		return E_MACV;
+	}
+	er = ts_slp_psx(ns, &left);
+	if ( p_left != NULL ) {
+		knl_ua_put(p_left, &left, sizeof(left));
+	}
+	return er;
+}
+
+LOCAL ER svc_ts_ref_psx( ID pid, T_PSXREF *pk )
+{
+	T_PSXREF r;
+	ER	er;
+
+	if ( !user_ok(pk, sizeof(r), TRUE) ) {
+		return E_MACV;
+	}
+	er = ts_ref_psx(pid, &r);
+	if ( er >= E_OK ) {
+		knl_ua_put(pk, &r, sizeof(r));
+	}
+	return er;
+}
+
+#define LST_PRC_MAX	4096
+
+LOCAL INT svc_ts_lst_prc( ID *pids, INT max )
+{
+	ID	*k;
+	INT	n;
+
+	if ( max <= 0 ) return 0;
+	if ( max > LST_PRC_MAX ) max = LST_PRC_MAX;
+	if ( !user_ok(pids, sizeof(ID) * (SZ)max, TRUE) ) {
+		return E_MACV;
+	}
+	k = (ID *)Kmalloc(sizeof(ID) * (SZ)max);
+	if ( k == NULL ) return E_NOMEM;
+	n = ts_lst_prc(k, max);
+	if ( n > 0 ) {
+		knl_ua_put(pids, k, sizeof(ID) * (SZ)n);
+	}
+	Kfree(k);
+	return n;
+}
+
 LOCAL const FP ts_svc_tbl[TSN_TS_MAX + 1] = {
+	[TSN_NUMBER(TSN_TS_SPN_PRC)]	= F(svc_ts_spn_prc),
+	[TSN_NUMBER(TSN_TS_GET_INH)]	= F(svc_ts_get_inh),
+	[TSN_NUMBER(TSN_TS_WAI_PSX)]	= F(svc_ts_wai_psx),
+	[TSN_NUMBER(TSN_TS_KIL_PRC)]	= F(ts_kil_prc),
+	[TSN_NUMBER(TSN_TS_SIG_SET)]	= F(svc_ts_sig_set),
+	[TSN_NUMBER(TSN_TS_SIG_RET)]	= F(ts_sig_ret),	/* taken by the gateway itself */
+	[TSN_NUMBER(TSN_TS_SIG_SUS)]	= F(ts_sig_sus),
+	[TSN_NUMBER(TSN_TS_SLP_PSX)]	= F(svc_ts_slp_psx),
+	[TSN_NUMBER(TSN_TS_SIG_ALM)]	= F(ts_sig_alm),
+	[TSN_NUMBER(TSN_TS_SET_PGID)]	= F(ts_set_pgid),
+	[TSN_NUMBER(TSN_TS_GET_PGID)]	= F(ts_get_pgid),
+	[TSN_NUMBER(TSN_TS_SET_SID)]	= F(ts_set_sid),
+	[TSN_NUMBER(TSN_TS_GET_SID)]	= F(ts_get_sid),
+	[TSN_NUMBER(TSN_TS_GET_PPID)]	= F(ts_get_ppid),
+	[TSN_NUMBER(TSN_TS_REF_PSX)]	= F(svc_ts_ref_psx),
+	[TSN_NUMBER(TSN_TS_LST_PRC)]	= F(svc_ts_lst_prc),
 	[TSN_NUMBER(TSN_TS_GET_MONO)]	= F(svc_ts_get_mono),
+	[TSN_NUMBER(TSN_TS_REF_CPU)]	= F(svc_ts_ref_cpu),
+	[TSN_NUMBER(TSN_TS_DEF_FLT)]	= F(ts_def_flt),
+	[TSN_NUMBER(TSN_TS_FLT_RET)]	= F(ts_flt_ret),	/* taken by the gateway itself */
 	[TSN_NUMBER(TSN_TS_EXT_PRC)]	= F(ts_ext_prc),
 	[TSN_NUMBER(TSN_TS_TER_PRC)]	= F(svc_ts_ter_prc),
 	[TSN_NUMBER(TSN_TS_WAI_PRC)]	= F(svc_ts_wai_prc),
@@ -346,7 +582,7 @@ LOCAL ER svc_dt_gettime( TS_TIME *p_t )
 	}
 	er = dt_gettime(&t);
 	if ( er >= E_OK ) {
-		*p_t = t;
+		knl_ua_put(p_t, &t, sizeof(t));
 	}
 	return er;
 }
@@ -361,10 +597,10 @@ LOCAL ER dt_fields( CONST TS_TIME *t, TS_TM *tm, BOOL local )
 	if ( !user_ok(t, sizeof(*t), FALSE) || !user_ok(tm, sizeof(*tm), TRUE) ) {
 		return E_MACV;
 	}
-	v = *t;
+	knl_ua_get(&v, t, sizeof(v));
 	er = local ? dt_localtime(&v, &f) : dt_gmtime(&v, &f);
 	if ( er >= E_OK ) {
-		*tm = f;
+		knl_ua_put(tm, &f, sizeof(f));
 	}
 	return er;
 }
@@ -388,10 +624,10 @@ LOCAL ER svc_dt_mktime( CONST TS_TM *tm, TS_TIME *p_t )
 	if ( !user_ok(tm, sizeof(*tm), FALSE) || !user_ok(p_t, sizeof(*p_t), TRUE) ) {
 		return E_MACV;
 	}
-	f = *tm;
+	knl_ua_get(&f, tm, sizeof(f));
 	er = dt_mktime(&f, &t);
 	if ( er >= E_OK ) {
-		*p_t = t;
+		knl_ua_put(p_t, &t, sizeof(t));
 	}
 	return er;
 }
@@ -406,9 +642,38 @@ LOCAL ER svc_dt_getsystz( INT *p_minutes )
 	}
 	er = dt_getsystz(&z);
 	if ( er >= E_OK ) {
-		*p_minutes = z;
+		knl_ua_put(p_minutes, &z, sizeof(z));
 	}
 	return er;
+}
+
+LOCAL INT svc_dt_getsyszone( char *name, INT max )
+{
+	char	z[DT_ZONE_MAX];
+	INT	n;
+
+	if ( max <= 0 || !user_ok(name, (SZ)max, TRUE) ) {
+		return E_MACV;
+	}
+	n = dt_getsyszone(z, sizeof(z));
+	if ( n >= 0 ) {
+		if ( n >= max ) return E_PAR;
+		knl_ua_put(name, z, n + 1);
+	}
+	return n;
+}
+
+LOCAL ER svc_dt_setsyszone( CONST char *name, INT minutes )
+{
+	char	z[DT_ZONE_MAX];
+	INT	i;
+
+	for ( i = 0; i < DT_ZONE_MAX; i++ ) {
+		if ( !user_ok(name + i, 1, FALSE) ) return E_MACV;
+		knl_ua_get(&z[i], name + i, 1);
+		if ( z[i] == '\0' ) return dt_setsyszone(z, minutes);
+	}
+	return E_PAR;
 }
 
 LOCAL const FP dt_prc_tbl[TSN_DT_MAX + 1] = {
@@ -419,6 +684,8 @@ LOCAL const FP dt_prc_tbl[TSN_DT_MAX + 1] = {
 	[TSN_NUMBER(TSN_DT_MKTIME)]	= F(svc_dt_mktime),
 	[TSN_NUMBER(TSN_DT_GETSYSTZ)]	= F(svc_dt_getsystz),
 	[TSN_NUMBER(TSN_DT_SETSYSTZ)]	= F(dt_setsystz),
+	[TSN_NUMBER(TSN_DT_GETSYSZONE)]	= F(svc_dt_getsyszone),
+	[TSN_NUMBER(TSN_DT_SETSYSZONE)]	= F(svc_dt_setsyszone),
 };
 
 LOCAL const FP dt_svc_tbl[TSN_DT_MAX + 1] = {
@@ -429,6 +696,8 @@ LOCAL const FP dt_svc_tbl[TSN_DT_MAX + 1] = {
 	[TSN_NUMBER(TSN_DT_MKTIME)]	= F(dt_mktime),
 	[TSN_NUMBER(TSN_DT_GETSYSTZ)]	= F(dt_getsystz),
 	[TSN_NUMBER(TSN_DT_SETSYSTZ)]	= F(dt_setsystz),
+	[TSN_NUMBER(TSN_DT_GETSYSZONE)]	= F(dt_getsyszone),
+	[TSN_NUMBER(TSN_DT_SETSYSZONE)]	= F(dt_setsyszone),
 };
 
 /* ob_ (class 7): peripheral_kernel/obj/obsvc.c, which makes sure of every pointer */
@@ -483,7 +752,7 @@ LOCAL ER user_cstr( CONST char *src, char *dst, INT max )
 		  && !user_ok(src + i, 1, FALSE) ) {
 			return EX_FAULT;
 		}
-		dst[i] = src[i];
+		dst[i] = UACCESS(src[i]);
 		if ( dst[i] == '\0' ) {
 			return EX_OK;
 		}
@@ -543,7 +812,7 @@ LOCAL INT fs_pieces( INT fd, UB *buf, SZ len, BOOL wr )
 
 	do {
 		want = ( len - done > FS_PRC_PIECE ) ? FS_PRC_PIECE : len - done;
-		n = wr ? fs_write(fd, buf + done, want) : fs_read(fd, buf + done, want);
+		n = UACCESS(wr ? fs_write(fd, buf + done, want) : fs_read(fd, buf + done, want));
 		if ( n <= 0 ) {
 			return ( done > 0 ) ? (INT)done : n;
 		}
@@ -581,14 +850,14 @@ LOCAL ER svc_fs_stat( CONST char *path, T_FSTAT *st )
 
 	if ( er < EX_OK ) return er;
 	if ( !user_ok(st, sizeof(*st), TRUE) ) return EX_FAULT;
-	return fs_stat(p, st);
+	return UACCESS(fs_stat(p, st));
 }
 
 LOCAL ER svc_fs_fstat( INT fd, T_FSTAT *st )
 {
 	if ( !fd_mine(fd) ) return EX_BADF;
 	if ( !user_ok(st, sizeof(*st), TRUE) ) return EX_FAULT;
-	return fs_fstat(fd, st);
+	return UACCESS(fs_fstat(fd, st));
 }
 
 LOCAL ER svc_fs_ftruncate( INT fd, UD len )
@@ -611,7 +880,7 @@ LOCAL INT svc_fs_getdents( INT fd, T_DIRENT *buf, INT nent )
 	if ( !fd_mine(fd) ) return EX_BADF;
 	if ( nent <= 0 || nent > GETDENTS_MAX ) return EX_INVAL;
 	if ( !user_ok(buf, (SZ)nent * (SZ)sizeof(T_DIRENT), TRUE) ) return EX_FAULT;
-	return fs_getdents(fd, buf, nent);
+	return UACCESS(fs_getdents(fd, buf, nent));
 }
 
 LOCAL ER svc_fs_mkdir( CONST char *path )
@@ -655,20 +924,20 @@ LOCAL ER svc_fs_statvfs( CONST char *path, T_FSSTAT *st )
 
 	if ( er < EX_OK ) return er;
 	if ( !user_ok(st, sizeof(*st), TRUE) ) return EX_FAULT;
-	return fs_statvfs(p, st);
+	return UACCESS(fs_statvfs(p, st));
 }
 
 /*
  * Mounting through a device object's key (design 12.2.3): the key and
  * its rights say everything, so nothing more is looked at here than
- * the fimp's name, copied in.
+ * the fimp's name, copied in. No name: the kind on the disk says.
  */
 LOCAL ER svc_fs_attach_dev( ID devkey, CONST char *fimpnm, UINT flags )
 {
 	char	f[FS_FIMPNM_MAX];
 	ER	er;
 
-	if ( fimpnm == NULL ) return EX_INVAL;
+	if ( fimpnm == NULL ) return fs_attach_dev(devkey, NULL, flags);
 	if ( ( er = user_cstr(fimpnm, f, sizeof(f)) ) < EX_OK ) return er;
 	return fs_attach_dev(devkey, f, flags);
 }
@@ -685,10 +954,167 @@ LOCAL INT svc_fs_mounts( T_FSMNT *buf, INT max )
 {
 	if ( max < 0 || max > FS_MAX_MOUNT * 4 ) return EX_INVAL;
 	if ( max > 0 && !user_ok(buf, (SZ)max * (SZ)sizeof(T_FSMNT), TRUE) ) return EX_FAULT;
-	return fs_mounts(buf, max);
+	return UACCESS(fs_mounts(buf, max));
+}
+
+/* ---------------------------------------------------------------- the POSIX layer's (design 5.8) */
+
+LOCAL INT svc_fs_dup( INT fd )
+{
+	return fd_mine(fd) ? knl_fs_dup_as(fd, ts_get_pid()) : EX_BADF;
+}
+
+LOCAL ER svc_fs_pipe( INT *ufd )
+{
+	INT	fd[2];
+	ER	er;
+
+	if ( !user_ok(ufd, sizeof(fd), TRUE) ) return EX_FAULT;
+	er = knl_fs_pipe_as(fd, ts_get_pid());
+	if ( er >= EX_OK ) {
+		knl_ua_put(ufd, fd, sizeof(fd));
+	}
+	return er;
+}
+
+LOCAL ER svc_fs_xstat( CONST char *path, T_FSXSTAT *st )
+{
+	char		p[FS_PATH_MAX];
+	T_FSXSTAT	x;
+	ER		er = user_path(path, p);
+
+	if ( er < EX_OK ) return er;
+	if ( !user_ok(st, sizeof(*st), TRUE) ) return EX_FAULT;
+	er = fs_xstat(p, &x);
+	if ( er >= EX_OK ) knl_ua_put(st, &x, sizeof(x));
+	return er;
+}
+
+LOCAL ER svc_fs_fxstat( INT fd, T_FSXSTAT *st )
+{
+	T_FSXSTAT	x;
+	ER		er;
+
+	if ( !fd_mine(fd) ) return EX_BADF;
+	if ( !user_ok(st, sizeof(*st), TRUE) ) return EX_FAULT;
+	er = fs_fxstat(fd, &x);
+	if ( er >= EX_OK ) knl_ua_put(st, &x, sizeof(x));
+	return er;
+}
+
+/* What a request takes in and gives out through its argument */
+LOCAL INT ioc_size( UINT cmd, BOOL *p_in, BOOL *p_out )
+{
+	*p_in = *p_out = FALSE;
+	switch ( cmd ) {
+	  case FS_IOC_TCGETS:	*p_out = TRUE; return sizeof(T_FSTERMIOS);
+	  case FS_IOC_TCSETS:
+	  case FS_IOC_TCSETSW:
+	  case FS_IOC_TCSETSF:	*p_in = TRUE; return sizeof(T_FSTERMIOS);
+	  case FS_IOC_GWINSZ:	*p_out = TRUE; return sizeof(T_FSWINSZ);
+	  case FS_IOC_SWINSZ:	*p_in = TRUE; return sizeof(T_FSWINSZ);
+	  case FS_IOC_GPGRP:
+	  case FS_IOC_GPTN:
+	  case FS_IOC_NREAD:
+	  case FS_IOC_GSID:	*p_out = TRUE; return sizeof(INT);
+	  case FS_IOC_SPGRP:
+	  case FS_IOC_FLUSH:	*p_in = TRUE; return sizeof(INT);
+	  case FS_IOC_SCTTY:
+	  case FS_IOC_NOTTY:
+	  case FS_IOC_DRAIN:
+	  case FS_IOC_ISTTY:	return 0;
+	  default:		return -1;
+	}
+}
+
+LOCAL ER svc_fs_ioctl( INT fd, UINT cmd, void *arg )
+{
+	UB	k[sizeof(T_FSTERMIOS) + sizeof(T_FSWINSZ) + 16];
+	BOOL	in, out;
+	INT	n;
+	ER	er;
+
+	if ( !fd_mine(fd) ) return EX_BADF;
+	n = ioc_size(cmd, &in, &out);
+	if ( n < 0 ) return EX_NOTTY;
+	if ( n > 0 && !user_ok(arg, n, out) ) return EX_FAULT;
+	knl_memset(k, 0, sizeof(k));
+	if ( in ) knl_ua_get(k, arg, n);
+	er = fs_ioctl(fd, cmd, k);
+	if ( er >= EX_OK && out ) knl_ua_put(arg, k, n);
+	return er;
+}
+
+LOCAL INT svc_fs_fcntl( INT fd, INT cmd, INT arg )
+{
+	return fd_mine(fd) ? fs_fcntl(fd, cmd, arg) : EX_BADF;
+}
+
+#define POLL_MAX	256
+
+LOCAL INT svc_fs_poll( T_FSPOLL *ufds, INT n, TMO tmout )
+{
+	T_FSPOLL	*k;
+	BOOL		*bad;
+	INT		i, r;
+	ID		pid = ts_get_pid();
+
+	if ( n < 0 || n > POLL_MAX ) return EX_INVAL;
+	if ( n > 0 && !user_ok(ufds, (SZ)n * (SZ)sizeof(T_FSPOLL), TRUE) ) return EX_FAULT;
+	k = (T_FSPOLL *)Kmalloc(sizeof(T_FSPOLL) * (SZ)( n + 1 ) + sizeof(BOOL) * (SZ)( n + 1 ));
+	if ( k == NULL ) return EX_NOMEM;
+	bad = (BOOL *)( k + n + 1 );
+	if ( n > 0 ) knl_ua_get(k, ufds, (SZ)n * (SZ)sizeof(T_FSPOLL));
+	for ( i = 0; i < n; i++ ) {
+		bad[i] = ( k[i].fd >= 0 && !knl_fs_mine(k[i].fd, pid) );
+		if ( bad[i] ) k[i].fd = -1;
+	}
+	r = fs_poll(k, n, tmout);
+	if ( r >= 0 ) {
+		for ( i = 0; i < n; i++ ) {
+			if ( bad[i] ) {
+				k[i].revents = FS_POLL_NVAL;
+				r++;
+			}
+		}
+		if ( n > 0 ) {
+			for ( i = 0; i < n; i++ ) {
+				knl_ua_put(&ufds[i].revents, &k[i].revents, sizeof(k[i].revents));
+			}
+		}
+	}
+	Kfree(k);
+	return r;
+}
+
+LOCAL ER svc_fs_link( CONST char *from, CONST char *to )
+{
+	char	f[FS_PATH_MAX], t[FS_PATH_MAX];
+	ER	er = user_path(from, f);
+
+	if ( er < EX_OK ) return er;
+	er = user_path(to, t);
+	return ( er < EX_OK ) ? er : fs_link(f, t);
+}
+
+LOCAL ER svc_fs_chmod( CONST char *path, UINT mode )
+{
+	char	p[FS_PATH_MAX];
+	ER	er = user_path(path, p);
+
+	return ( er < EX_OK ) ? er : fs_chmod(p, mode);
 }
 
 LOCAL const FP fs_svc_tbl[TSN_FS_MAX + 1] = {
+	[TSN_NUMBER(TSN_FS_DUP)]	= F(svc_fs_dup),
+	[TSN_NUMBER(TSN_FS_PIPE)]	= F(svc_fs_pipe),
+	[TSN_NUMBER(TSN_FS_XSTAT)]	= F(svc_fs_xstat),
+	[TSN_NUMBER(TSN_FS_FXSTAT)]	= F(svc_fs_fxstat),
+	[TSN_NUMBER(TSN_FS_IOCTL)]	= F(svc_fs_ioctl),
+	[TSN_NUMBER(TSN_FS_FCNTL)]	= F(svc_fs_fcntl),
+	[TSN_NUMBER(TSN_FS_POLL)]	= F(svc_fs_poll),
+	[TSN_NUMBER(TSN_FS_LINK)]	= F(svc_fs_link),
+	[TSN_NUMBER(TSN_FS_CHMOD)]	= F(svc_fs_chmod),
 	[TSN_NUMBER(TSN_FS_OPEN)]	= F(svc_fs_open),
 	[TSN_NUMBER(TSN_FS_CLOSE)]	= F(svc_fs_close),
 	[TSN_NUMBER(TSN_FS_READ)]	= F(svc_fs_read),
@@ -770,7 +1196,7 @@ LOCAL BOOL user_str( CONST UB *src, UB *dst, INT max )
 		  && !user_ok(src + i, 1, FALSE) ) {
 			return FALSE;
 		}
-		dst[i] = src[i];
+		dst[i] = UACCESS(src[i]);
 		if ( dst[i] == 0 ) {
 			return TRUE;
 		}
@@ -784,7 +1210,7 @@ LOCAL ER user_rect( CONST T_DPRECT *r, T_DPRECT *out )
 	if ( !user_ok(r, sizeof(*r), FALSE) ) {
 		return E_MACV;
 	}
-	*out = *r;
+	knl_ua_get(out, r, sizeof(*out));
 	return E_OK;
 }
 
@@ -818,7 +1244,7 @@ LOCAL ER svc_dp_put_argb( INT gid, INT x, INT y, CONST UW *pixels, INT pitch, IN
 	if ( !granted(gid) ) return E_ID;
 	if ( w <= 0 || h <= 0 || pitch < w ) return E_PAR;
 	if ( !user_ok(pixels, (SZ)pitch * ( h - 1 ) * 4 + (SZ)w * 4, FALSE) ) return E_MACV;
-	return dp_put_argb(gid, x, y, pixels, pitch, w, h, clear);
+	return UACCESS(dp_put_argb(gid, x, y, pixels, pitch, w, h, clear));
 }
 
 #define TEXT_MAX	512
@@ -884,11 +1310,11 @@ LOCAL ER svc_dp_draw_tad( INT gid, CONST T_DPRECT *clip, INT ox, INT oy,
 	if ( !granted(gid) ) return E_ID;
 	if ( len <= 0 || len > TAD_DRAW_MAX ) return E_PAR;
 	if ( !user_ok(clip, sizeof(*clip), FALSE) || !user_ok(xml, len, FALSE) ) return E_MACV;
-	r = *clip;
+	knl_ua_get(&r, clip, sizeof(r));
 	if ( r.right <= r.left || r.bottom <= r.top ) return E_OK;
 	copy = (UB *)Kmalloc(len);
 	if ( copy == NULL ) return E_NOMEM;
-	knl_memcpy(copy, xml, (INT)len);
+	knl_ua_get(copy, xml, len);
 	er = tad_parse(copy, len, NULL, &doc);
 	if ( er >= E_OK ) {
 		if ( tv_kind(doc) == TV_KIND_FIG && ( er = tv_fig(doc, &f) ) >= E_OK ) {
@@ -969,6 +1395,49 @@ LOCAL ER svc_wm_obj_flush( ID key, CONST T_DPRECT *r )
 	return wm_update();
 }
 
+/*
+ * A surface the process draws its window's work area in, mapped into the
+ * process (wm_surf_get); from a key that may write the window
+ */
+LOCAL ER svc_wm_obj_surf( ID key, T_WMSURF *s )
+{
+	TS_UUID		u;
+	T_WMSURF	k;
+	ID		pid = ts_get_pid();
+	INT		wid;
+	ER		er = knl_ob_key_uuid(key, OB_OP_WRITE, &u);
+
+	if ( er < E_OK ) return er;
+	if ( pid <= 0 ) return E_OBJ;
+	if ( !user_ok(s, sizeof(*s), TRUE) ) return E_MACV;
+	wid = wm_obj_wid(&u);
+	if ( wid <= 0 ) return E_OBJ;
+	er = wm_surf_get(wid, pid, &k);
+	if ( er >= E_OK ) knl_ua_put(s, &k, sizeof(k));
+	return er;
+}
+
+/* Rectangles of the work area drawn in the surface, put in the window and shown */
+LOCAL ER svc_wm_obj_put( ID key, CONST T_DPRECT *r, INT n )
+{
+	TS_UUID		u;
+	T_DPRECT	k[WM_PUT_MAX];
+	ID		pid = ts_get_pid();
+	INT		wid;
+	ER		er = knl_ob_key_uuid(key, OB_OP_WRITE, &u);
+
+	if ( er < E_OK ) return er;
+	if ( pid <= 0 ) return E_OBJ;
+	if ( n <= 0 || n > WM_PUT_MAX ) return E_PAR;
+	if ( !user_ok(r, (SZ)n * (SZ)sizeof(T_DPRECT), FALSE) ) return E_MACV;
+	knl_ua_get(k, r, (SZ)n * (SZ)sizeof(T_DPRECT));
+	wid = wm_obj_wid(&u);
+	if ( wid <= 0 ) return E_OBJ;
+	er = wm_surf_put(wid, pid, k, n);
+	if ( er < E_OK ) return er;
+	return wm_update();
+}
+
 #define IMG_FILE_MAX	( 32 * 1024 * 1024 )
 
 /*
@@ -989,20 +1458,20 @@ LOCAL ER svc_dp_img_decode( CONST UB *data, SZ size, UW *px, SZ maxpx, INT *p_w,
 	if ( px != NULL && !user_ok(px, maxpx * (SZ)sizeof(UW), TRUE) ) return E_MACV;
 	copy = (UB *)Kmalloc(size);
 	if ( copy == NULL ) return E_NOMEM;
-	knl_memcpy(copy, data, (INT)size);
+	knl_ua_get(copy, data, size);
 	er = img_size(copy, size, &w, &h);
 	if ( er >= E_OK && px != NULL ) {
 		if ( (SZ)w * h > maxpx ) {
 			er = E_LIMIT;
 		} else if ( ( er = img_decode(copy, size, &pix, &w, &h) ) >= E_OK ) {
-			knl_memcpy(px, pix, (INT)( (SZ)w * h * sizeof(UW) ));
+			knl_ua_put(px, pix, (SZ)w * h * (SZ)sizeof(UW));
 			Kfree(pix);
 		}
 	}
 	Kfree(copy);
 	if ( er >= E_OK || er == E_LIMIT ) {
-		*p_w = w;
-		*p_h = h;
+		knl_ua_put(p_w, &w, sizeof(w));
+		knl_ua_put(p_h, &h, sizeof(h));
 	}
 	return er;
 }
@@ -1051,7 +1520,7 @@ LOCAL ER svc_mn_cre_men( CONST TS_UUID *def, ID *p_mid )
 			mn_owner[i] = 0;
 		}
 	}
-	d = *def;
+	knl_ua_get(&d, def, sizeof(d));
 	er = mn_cre_men(&d, &mid);
 	if ( er < E_OK ) {
 		return er;
@@ -1061,7 +1530,7 @@ LOCAL ER svc_mn_cre_men( CONST TS_UUID *def, ID *p_mid )
 		return E_LIMIT;
 	}
 	mn_owner[mid] = ts_get_pid();
-	*p_mid = mid;
+	knl_ua_put(p_mid, &mid, sizeof(mid));
 	return E_OK;
 }
 
@@ -1078,7 +1547,7 @@ LOCAL ER user_def( CONST TS_UUID *def, TS_UUID *out, CONST TS_UUID **p )
 	*p = NULL;
 	if ( def != NULL ) {
 		if ( !user_ok(def, sizeof(*def), FALSE) ) return E_MACV;
-		*out = *def;
+		knl_ua_get(out, def, sizeof(*out));
 		*p = out;
 	}
 	return E_OK;
@@ -1113,7 +1582,7 @@ LOCAL ER svc_mn_set_lst( ID mid, CONST TS_UUID *def, CONST char *code,
 	}
 	l = (UB *)Kmalloc((SZ)stride * ( n > 0 ? n : 1 ));
 	if ( l == NULL ) return E_NOMEM;
-	if ( n > 0 ) knl_memcpy(l, labels, stride * n);
+	if ( n > 0 ) knl_ua_get(l, labels, (SZ)stride * n);
 	er = mn_set_lst(mid, pd, (CONST char *)c, l, stride, n);
 	Kfree(l);
 	return er;
@@ -1147,22 +1616,23 @@ LOCAL ER svc_mn_pop_men( ID mid, ID wkey, INT x, INT y, UD when, T_MNSEL *sel )
 	wid = wm_obj_wid(&u);
 	if ( wid <= 0 ) return E_OBJ;
 	mn_winlist_fill(mid);			/* ウインドウ, when the menu has it */
+	mn_tail_fill(mid);			/* 小物 and 実行 */
 	pid = mn_opn_men(mid, wid, x, y);
 	if ( pid < 0 ) return (ER)pid;
 	wm_panel_draw(pid);
-	wm_composite();
+	wm_update();
 	cmd = knl_wmobj_menu_run(pid, when);
 	wm_panel_close(pid);
-	wm_composite();
+	wm_update();
 	if ( cmd <= 0 ) {
 		return ( cmd < 0 ) ? (ER)cmd : E_NOEXS;
 	}
 	er = mn_get_sel(mid, cmd, &s);
-	if ( er >= E_OK && mn_winlist_do(&s) ) {
+	if ( er >= E_OK && ( mn_winlist_do(&s) || mn_tail_do(&s) ) ) {
 		return E_NOEXS;			/* the system's: nothing for the program to do */
 	}
 	if ( er >= E_OK ) {
-		*sel = s;
+		knl_ua_put(sel, &s, sizeof(s));
 	}
 	return er;
 }
@@ -1230,7 +1700,7 @@ LOCAL UINT svc_kc_mode( void )
 LOCAL INT kc_answer( INT r, CONST T_KCOUT *o, T_KCOUT *out )
 {
 	if ( r >= 0 && r != KC_NOTMINE ) {
-		knl_memcpy(out, o, sizeof(T_KCOUT));
+		knl_ua_put(out, o, sizeof(T_KCOUT));
 	}
 	return r;
 }
@@ -1262,7 +1732,7 @@ LOCAL INT svc_kc_hid_key( INT kid, UINT key, UINT mods, T_KCOUT *out )
 	code = kc_code_key(key, mods);
 	if ( code == 0 ) {
 		ch = wm_key_char(key, mods);
-		code = roman ? ( ( ch > 0x20 && ch < 0x7F ) ? ch : 0 ) : kc_kana_key(key, shift);
+		code = roman ? ( ( ch > 0x20 && ch < 0x7F ) ? ch : 0 ) : kc_kana_key_m(key, mods);
 		if ( code == 0 ) return KC_NOTMINE;
 	}
 	o = (T_KCOUT *)Kmalloc(sizeof(T_KCOUT));
@@ -1299,10 +1769,10 @@ LOCAL INT svc_kc_list( INT kid, UB *buf, INT size, INT *p_count, INT *p_first, I
 	if ( b == NULL ) return E_NOMEM;
 	r = kc_list(kid, b, size, &count, &first, &total);
 	if ( r >= 0 ) {
-		knl_memcpy(buf, b, size);
-		*p_count = count;
-		*p_first = first;
-		*p_total = total;
+		knl_ua_put(buf, b, size);
+		knl_ua_put(p_count, &count, sizeof(count));
+		knl_ua_put(p_first, &first, sizeof(first));
+		knl_ua_put(p_total, &total, sizeof(total));
 	}
 	Kfree(b);
 	return r;
@@ -1329,10 +1799,10 @@ LOCAL ER svc_wm_msg_put( CONST UB *utf8 )
 		  && !user_ok(utf8 + n, 1, FALSE) ) {
 			return E_MACV;
 		}
-		if ( utf8[n] == 0 || utf8[n] == '\n' ) {
+		line[n] = UACCESS(utf8[n]);
+		if ( line[n] == 0 || line[n] == '\n' ) {
 			break;
 		}
-		line[n] = utf8[n];
 		n++;
 	}
 	line[n] = 0;
@@ -1341,17 +1811,34 @@ LOCAL ER svc_wm_msg_put( CONST UB *utf8 )
 
 /*
  * The look table: read by anyone, since everything drawn on the screen
- * shows it anyway; written only by an administrator, since it is what
- * every window of every person is drawn with.
+ * shows it anyway. An entry ユーザ環境設定 sets (the pointer, the
+ * keyboard, the sizes and times, the sound) is written by whoever may
+ * write the user information it is kept in; the windows' look by
+ * whoever may write the machine's settings; any other only by an
+ * administrator, since it is what every window is drawn with.
  */
 LOCAL UW svc_wm_look( UINT num )
 {
 	return wm_look(num);
 }
 
+/* Whether the credentials let ops on the object named by the string s */
+LOCAL BOOL may_on( CONST char *s, CONST T_OBCRD *crd, UINT ops );
+
 LOCAL ER svc_wm_set_look( UINT num, UW value )
 {
-	if ( !knl_ob_is_admin(knl_ob_crd_of(ts_get_pid())) ) {
+	CONST T_OBCRD	*crd = knl_ob_crd_of(ts_get_pid());
+	BOOL		may;
+
+	if ( cf_user_look(num) != NULL ) {
+		may = may_on(SYSDEF_CONF_USER, crd, OB_OP_WRITE);
+	} else if ( cf_look_look(num) != NULL ) {
+		may = may_on(SYSDEF_CONF_DEV, crd, OB_OP_WRITE);
+	} else {
+		may = knl_ob_is_admin(crd);
+	}
+	if ( !may ) {
+		knl_ob_deny_note("wm_set_look", NULL, num, 0);
 		return E_OACV;
 	}
 	if ( cf_user_look(num) != NULL ) {
@@ -1362,7 +1849,99 @@ LOCAL ER svc_wm_set_look( UINT num, UW value )
 		}
 		return knl_look_setting(num, value);	/* a person's setting, not the scheme's */
 	}
+	if ( cf_look_look(num) != NULL ) {
+		/* the windows' look: on every window with a frame, at once */
+		ER	er = knl_wm_look(num, (INT)value);
+
+		if ( er > 0 ) {
+			(void)wm_composite();
+		}
+		return ( er < E_OK ) ? er : E_OK;
+	}
 	return wm_set_look(num, value);
+}
+
+/* A key typed by a screen keyboard: its window, by a key that may write it */
+LOCAL ER svc_wm_key_put( ID key, UINT code, UINT mods )
+{
+	TS_UUID	u;
+	INT	wid;
+	ER	er = knl_ob_key_uuid(key, OB_OP_WRITE, &u);
+
+	if ( er < E_OK ) return er;
+	wid = wm_obj_wid(&u);
+	if ( wid <= 0 ) return E_OBJ;
+	return wm_obj_key_put(wid, code, mods);
+}
+
+LOCAL ER svc_km_get( T_KMSTATE *st )
+{
+	T_KMSTATE	s;
+	ER		er;
+
+	if ( !user_ok(st, sizeof(*st), TRUE) ) {
+		return E_MACV;
+	}
+	er = km_get(&s);
+	if ( er >= E_OK ) {
+		knl_ua_put(st, &s, sizeof(s));
+	}
+	return er;
+}
+
+/*
+ * The layouts and the keys given others are the machine's settings: set
+ * only by a process that may write them (SYSDEF_CONF_DEV), as システム
+ * 環境設定 writes them, and asked here before anything is set.
+ */
+LOCAL ER svc_km_set( CONST T_KMSTATE *st, UINT what )
+{
+	T_KMSTATE	s;
+	TS_UUID		u;
+	ID		k;
+
+	if ( !user_ok(st, sizeof(*st), FALSE) ) {
+		return E_MACV;
+	}
+	knl_ua_get(&s, st, sizeof(s));
+	if ( ts_str_to_uuid(SYSDEF_CONF_DEV, &u) < E_OK ) {
+		return E_SYS;
+	}
+	k = ob_opn_obj(&u, OB_OP_WRITE);
+	if ( k < E_OK ) {
+		return ( k == E_NOEXS ) ? E_NOEXS : E_OACV;
+	}
+	(void)ob_cls_obj(k);
+	return km_set(&s, what);
+}
+
+LOCAL INT svc_km_label( UINT what, UINT code, UINT mods, char *buf, INT max )
+{
+	char	s[64];
+	INT	n;
+
+	if ( max <= 0 || !user_ok(buf, (SZ)max, TRUE) ) {
+		return E_MACV;
+	}
+	n = km_label(what, code, mods, s, ( max < (INT)sizeof(s) ) ? max : (INT)sizeof(s));
+	if ( n >= 0 ) {
+		knl_ua_put(buf, s, n + 1);
+	}
+	return n;
+}
+
+/* The size of the screen (a page's screen.width and height, among others) */
+LOCAL ER svc_wm_screen( INT *p_w, INT *p_h )
+{
+	INT	w = 0, h = 0;
+
+	if ( !user_ok(p_w, sizeof(*p_w), TRUE) || !user_ok(p_h, sizeof(*p_h), TRUE) ) {
+		return E_MACV;
+	}
+	wm_screen(&w, &h);
+	knl_ua_put(p_w, &w, sizeof(w));
+	knl_ua_put(p_h, &h, sizeof(h));
+	return E_OK;
 }
 
 /* A scroll bar as the windows' own are drawn, in a window of the process's */
@@ -1373,9 +1952,277 @@ LOCAL ER svc_wm_draw_bar( INT gid, CONST T_DPRECT *r, CONST T_WMBAR *b, BOOL acr
 
 	if ( !granted(gid) ) return E_ID;
 	if ( user_rect(r, &k) < E_OK || !user_ok(b, sizeof(*b), FALSE) ) return E_MACV;
-	kb = *b;
+	knl_ua_get(&kb, b, sizeof(kb));
 	return wm_draw_bar(gid, &k, &kb, across, active);
 }
+
+/*
+ * The tray for a process (design 18.16). The tray is an object of the
+ * system's, kept open with a key of the kernel's, and a key answers
+ * only the one that opened it; so a process's call is done by a task
+ * of the kernel's, one call at a time, and what goes in and comes out
+ * passes through memory of the kernel's. What a process puts in and
+ * takes out is the person's, as the desktop's windows' is.
+ */
+#define TJ_PSH		1
+#define TJ_ADD		2
+#define TJ_SET		3
+#define TJ_STS		4
+#define TJ_REF		5
+#define TJ_REA		6
+#define TJ_SEL		7
+#define TJ_MOV		8
+#define TJ_DEL		9
+#define TJ_CLR		10
+#define TJ_BYTES_MAX	( 16 * 1024 * 1024 )	/* bytes of one set going in or one record coming out */
+#define TJ_PRI		12
+
+typedef struct {
+	INT	op;
+	INT	level, rec, to, n;
+	T_TRREC	r[TR_REC_MAX];
+	UB	name[TR_NAME_MAX];
+	BOOL	named;
+	UB	*buf;
+	SZ	size, asz;
+	T_TRSTS	sts;
+	T_TRINF	inf;
+	ER	er;
+} TRJOB;
+
+LOCAL ID	tj_mtx = 0;		/* one call at a time */
+LOCAL ID	tj_go = 0, tj_done = 0;
+LOCAL ID	tj_tsk = 0;
+LOCAL TRJOB	tj;
+
+LOCAL void tj_task( INT stacd, void *exinf )
+{
+	(void)stacd;
+	(void)exinf;
+	for ( ;; ) {
+		if ( tk_wai_sem(tj_go, 1, TMO_FEVR) < E_OK ) {
+			continue;
+		}
+		switch ( tj.op ) {
+		case TJ_PSH:	tj.er = tr_psh_dat(tj.r, tj.n, tj.named ? tj.name : NULL);	break;
+		case TJ_ADD:	tj.er = tr_add_dat(tj.r, tj.n);				break;
+		case TJ_SET:	tj.er = tr_set_dat(( tj.n > 0 ) ? tj.r : NULL, tj.n);		break;
+		case TJ_STS:	tj.er = tr_get_sts(&tj.sts);					break;
+		case TJ_REF:	tj.er = tr_ref_rec(tj.level, tj.rec, &tj.inf);			break;
+		case TJ_REA:	tj.er = tr_rea_rec(tj.level, tj.rec, tj.buf, tj.size, &tj.asz);	break;
+		case TJ_SEL:	tj.er = tr_sel_dat(tj.level);					break;
+		case TJ_MOV:	tj.er = tr_mov_dat(tj.level, tj.to);				break;
+		case TJ_DEL:	tj.er = tr_del_dat(tj.level);					break;
+		case TJ_CLR:	tj.er = tr_clr_tra();						break;
+		default:	tj.er = E_PAR;							break;
+		}
+		(void)tk_sig_sem(tj_done, 1);
+	}
+}
+
+/* The task and what it waits on, made the first time a process asks; the lock taken */
+LOCAL ER tj_begin( void )
+{
+	if ( tj_mtx == 0 ) {
+		T_CMTX	c;
+		ID	id;
+
+		c.exinf = NULL;
+		c.mtxatr = TA_INHERIT;
+		c.ceilpri = 0;
+		id = tk_cre_mtx(&c);
+		if ( id <= 0 ) return E_NOMEM;
+		/* the first to set it wins; tasks on other processors race here */
+		if ( atomic_cmpxchg((UW *)&tj_mtx, (UW)id, 0) == 0 ) {
+			id = 0;
+		}
+		if ( id > 0 ) tk_del_mtx(id);
+	}
+	if ( tk_loc_mtx(tj_mtx, TMO_FEVR) < E_OK ) return E_SYS;
+	if ( tj_tsk <= 0 ) {
+		T_CSEM	cs;
+		T_CTSK	ct;
+
+		knl_memset(&cs, 0, sizeof(cs));
+		cs.sematr = TA_TFIFO | TA_FIRST;
+		cs.maxsem = 1;
+		if ( tj_go <= 0 ) tj_go = tk_cre_sem(&cs);
+		if ( tj_done <= 0 ) tj_done = tk_cre_sem(&cs);
+		knl_memset(&ct, 0, sizeof(ct));
+		ct.tskatr = TA_HLNG | TA_RNG0;
+		ct.task = (FP)tj_task;
+		ct.itskpri = TJ_PRI;
+		ct.stksz = 16 * 1024;
+		if ( tj_go > 0 && tj_done > 0 ) {
+			tj_tsk = tk_cre_tsk(&ct);
+			if ( tj_tsk > 0 && tk_sta_tsk(tj_tsk, 0) < E_OK ) {
+				(void)tk_del_tsk(tj_tsk);
+				tj_tsk = 0;
+			}
+		}
+		if ( tj_tsk <= 0 ) {
+			tj_tsk = 0;
+			(void)tk_unl_mtx(tj_mtx);
+			return E_NOMEM;
+		}
+	}
+	knl_memset(&tj, 0, sizeof(tj));
+	return E_OK;
+}
+
+/* The call done by the task; its answer, the lock still held */
+LOCAL ER tj_run( INT op )
+{
+	tj.op = op;
+	(void)tk_sig_sem(tj_go, 1);
+	(void)tk_wai_sem(tj_done, 1, TMO_FEVR);
+	return tj.er;
+}
+
+LOCAL void tj_end( void )
+{
+	INT	i;
+
+	for ( i = 0; i < tj.n && i < TR_REC_MAX; i++ ) {
+		if ( tj.r[i].data != NULL ) Kfree((void *)tj.r[i].data);
+	}
+	if ( tj.buf != NULL ) Kfree(tj.buf);
+	tj.buf = NULL;
+	tj.n = 0;
+	(void)tk_unl_mtx(tj_mtx);
+}
+
+/* The tray records of a process's set, each one's bytes copied in */
+LOCAL ER tj_recs( CONST T_TRREC *recs, INT n )
+{
+	SZ	total = 0;
+	INT	i;
+
+	if ( n <= 0 || n > TR_REC_MAX ) return E_PAR;
+	if ( !user_ok(recs, sizeof(T_TRREC) * (SZ)n, FALSE) ) return E_MACV;
+	for ( i = 0; i < n; i++ ) {
+		T_TRREC	r;
+
+		knl_ua_get(&r, &recs[i], sizeof(r));
+
+		tj.r[i] = r;
+		tj.r[i].data = NULL;
+		tj.n = i + 1;
+		if ( r.size < 0 || r.size > TJ_BYTES_MAX - total ) return E_LIMIT;
+		total += r.size;
+		if ( r.size > 0 ) {
+			if ( !user_ok(r.data, r.size, FALSE) ) return E_MACV;
+			tj.r[i].data = Kmalloc(r.size);
+			if ( tj.r[i].data == NULL ) return E_NOMEM;
+			knl_ua_get((void *)tj.r[i].data, r.data, r.size);
+		}
+	}
+	return E_OK;
+}
+
+LOCAL ER svc_tr_put( INT op, CONST T_TRREC *recs, INT n, CONST UB *name )
+{
+	ER	er = tj_begin();
+
+	if ( er < E_OK ) return er;
+	if ( op == TJ_SET && n == 0 ) {
+		er = E_OK;
+	} else {
+		er = tj_recs(recs, n);
+	}
+	if ( er >= E_OK && name != NULL ) {
+		tj.named = TRUE;
+		if ( !user_str(name, tj.name, sizeof(tj.name)) ) er = E_MACV;
+	}
+	if ( er >= E_OK ) er = tj_run(op);
+	tj_end();
+	return er;
+}
+
+LOCAL ER svc_tr_psh_dat( CONST T_TRREC *recs, INT n, CONST UB *name )
+{
+	return svc_tr_put(TJ_PSH, recs, n, name);
+}
+
+LOCAL ER svc_tr_add_dat( CONST T_TRREC *recs, INT n )
+{
+	return svc_tr_put(TJ_ADD, recs, n, NULL);
+}
+
+LOCAL ER svc_tr_set_dat( CONST T_TRREC *recs, INT n )
+{
+	return svc_tr_put(TJ_SET, recs, n, NULL);
+}
+
+LOCAL ER svc_tr_get_sts( T_TRSTS *sts )
+{
+	ER	er;
+
+	if ( !user_ok(sts, sizeof(*sts), TRUE) ) return E_MACV;
+	if ( ( er = tj_begin() ) < E_OK ) return er;
+	er = tj_run(TJ_STS);
+	if ( er >= E_OK ) knl_ua_put(sts, &tj.sts, sizeof(tj.sts));
+	tj_end();
+	return er;
+}
+
+LOCAL ER svc_tr_ref_rec( INT level, INT rec, T_TRINF *inf )
+{
+	ER	er;
+
+	if ( !user_ok(inf, sizeof(*inf), TRUE) ) return E_MACV;
+	if ( ( er = tj_begin() ) < E_OK ) return er;
+	tj.level = level;
+	tj.rec = rec;
+	er = tj_run(TJ_REF);
+	if ( er >= E_OK ) knl_ua_put(inf, &tj.inf, sizeof(tj.inf));
+	tj_end();
+	return er;
+}
+
+LOCAL ER svc_tr_rea_rec( INT level, INT rec, void *buf, SZ size, SZ *p_asize )
+{
+	ER	er;
+
+	if ( size < 0 || ( buf != NULL && size > 0 && !user_ok(buf, size, TRUE) )
+	  || ( p_asize != NULL && !user_ok(p_asize, sizeof(*p_asize), TRUE) ) ) {
+		return E_MACV;
+	}
+	if ( size > TJ_BYTES_MAX ) size = TJ_BYTES_MAX;
+	if ( ( er = tj_begin() ) < E_OK ) return er;
+	tj.level = level;
+	tj.rec = rec;
+	if ( buf != NULL && size > 0 ) {
+		tj.buf = (UB *)Kmalloc(size);
+		tj.size = ( tj.buf != NULL ) ? size : 0;
+	}
+	er = ( buf != NULL && size > 0 && tj.buf == NULL ) ? E_NOMEM : tj_run(TJ_REA);
+	if ( er >= E_OK ) {
+		if ( tj.buf != NULL ) {
+			knl_ua_put(buf, tj.buf, ( tj.asz < size ) ? tj.asz : size);
+		}
+		if ( p_asize != NULL ) knl_ua_put(p_asize, &tj.asz, sizeof(tj.asz));
+	}
+	tj_end();
+	return er;
+}
+
+LOCAL ER svc_tr_one( INT op, INT level, INT to )
+{
+	ER	er = tj_begin();
+
+	if ( er < E_OK ) return er;
+	tj.level = level;
+	tj.to = to;
+	er = tj_run(op);
+	tj_end();
+	return er;
+}
+
+LOCAL ER svc_tr_sel_dat( INT level )		{ return svc_tr_one(TJ_SEL, level, 0); }
+LOCAL ER svc_tr_mov_dat( INT level, INT to )	{ return svc_tr_one(TJ_MOV, level, to); }
+LOCAL ER svc_tr_del_dat( INT level )		{ return svc_tr_one(TJ_DEL, level, 0); }
+LOCAL ER svc_tr_clr_tra( void )			{ return svc_tr_one(TJ_CLR, 0, 0); }
 
 LOCAL const FP wm_svc_tbl[TSN_WM_MAX + 1] = {
 	[TSN_NUMBER(TSN_WM_OBJ_GID)]	= F(svc_wm_obj_gid),
@@ -1397,6 +2244,23 @@ LOCAL const FP wm_svc_tbl[TSN_WM_MAX + 1] = {
 	[TSN_NUMBER(TSN_WM_LOOK)]	= F(svc_wm_look),
 	[TSN_NUMBER(TSN_WM_SET_LOOK)]	= F(svc_wm_set_look),
 	[TSN_NUMBER(TSN_WM_DRAW_BAR)]	= F(svc_wm_draw_bar),
+	[TSN_NUMBER(TSN_TR_PSH_DAT)]	= F(svc_tr_psh_dat),
+	[TSN_NUMBER(TSN_TR_ADD_DAT)]	= F(svc_tr_add_dat),
+	[TSN_NUMBER(TSN_TR_SET_DAT)]	= F(svc_tr_set_dat),
+	[TSN_NUMBER(TSN_TR_GET_STS)]	= F(svc_tr_get_sts),
+	[TSN_NUMBER(TSN_TR_REF_REC)]	= F(svc_tr_ref_rec),
+	[TSN_NUMBER(TSN_TR_REA_REC)]	= F(svc_tr_rea_rec),
+	[TSN_NUMBER(TSN_TR_SEL_DAT)]	= F(svc_tr_sel_dat),
+	[TSN_NUMBER(TSN_TR_MOV_DAT)]	= F(svc_tr_mov_dat),
+	[TSN_NUMBER(TSN_TR_DEL_DAT)]	= F(svc_tr_del_dat),
+	[TSN_NUMBER(TSN_TR_CLR_TRA)]	= F(svc_tr_clr_tra),
+	[TSN_NUMBER(TSN_WM_OBJ_SURF)]	= F(svc_wm_obj_surf),
+	[TSN_NUMBER(TSN_WM_OBJ_PUT)]	= F(svc_wm_obj_put),
+	[TSN_NUMBER(TSN_WM_KEY_PUT)]	= F(svc_wm_key_put),
+	[TSN_NUMBER(TSN_KM_GET)]	= F(svc_km_get),
+	[TSN_NUMBER(TSN_KM_SET)]	= F(svc_km_set),
+	[TSN_NUMBER(TSN_KM_LABEL)]	= F(svc_km_label),
+	[TSN_NUMBER(TSN_WM_SCREEN)]	= F(svc_wm_screen),
 };
 
 /* What went to the console, from where the process had got to */
@@ -1412,9 +2276,9 @@ LOCAL INT svc_tm_log_read( UD *p_pos, UB *buf, INT max )
 	  || !knl_prc_user_ok(ts_get_pid(), buf, (SZ)max, TRUE) ) {
 		return E_MACV;
 	}
-	pos = *p_pos;
-	n = tm_log_read(&pos, buf, max);
-	*p_pos = pos;
+	knl_ua_get(&pos, p_pos, sizeof(pos));
+	n = UACCESS(tm_log_read(&pos, buf, max));
+	knl_ua_put(p_pos, &pos, sizeof(pos));
 	return n;
 }
 
@@ -1440,7 +2304,7 @@ LOCAL INT svc_tm_putstring( CONST UB *s )
 				(void)tm_putstring(t);
 				return E_MACV;
 			}
-			t[i] = s[i];
+			t[i] = UACCESS(s[i]);
 			if ( t[i] == 0 ) {
 				end = TRUE;
 				break;
@@ -1467,6 +2331,119 @@ LOCAL const FP tm_svc_tbl[TSN_TM_MAX + 1] = {
 
 /* tk_ (class 0) for a task of a process: svc_tk.c */
 IMPORT const FP knl_tk_prc_tbl[TSN_TK_MAX + 1];
+/* gp_ (class 10), the GPU: device/gpu/gpu_svc.c */
+IMPORT const FP knl_gp_svc_tbl[TSN_GP_MAX + 1];
+/* sr_ (class 11), the serial ports: device/ser/ser_svc.c */
+IMPORT const FP knl_sr_svc_tbl[TSN_SR_MAX + 1];
+/* us_ (class 12), USB devices of a program's own: device/usb/uusb.c */
+IMPORT const FP knl_us_svc_tbl[TSN_US_MAX + 1];
+
+/*
+ * The table of rights (include/ts/svc.h, docs/tessronos/A-svc.md, 権限の表):
+ * the calls that act on the whole system and the right each takes. The
+ * gateway asks before the call is made; the layers behind ask again
+ * where they always did, for the kernel's own callers as well.
+ */
+typedef struct {
+	UW	fncd;
+	UB	right;		/* TSN_RIGHT_* */
+} SVCRIGHT;
+
+LOCAL const SVCRIGHT svc_rights[] = {
+	{ TSN_TK_SET_TIM,	TSN_RIGHT_CLOCK },
+	{ TSN_TK_SET_TIM_U,	TSN_RIGHT_CLOCK },
+	{ TSN_TK_SET_UTC,	TSN_RIGHT_CLOCK },
+	{ TSN_DT_SETTIME,	TSN_RIGHT_CLOCK },
+	{ TSN_DT_SETSYSTZ,	TSN_RIGHT_ZONE },
+	{ TSN_DT_SETSYSZONE,	TSN_RIGHT_ZONE },
+	{ TSN_SO_SETIFADDR,	TSN_RIGHT_ADMIN },
+	{ TSN_SO_DHCP_START,	TSN_RIGHT_ADMIN },
+	{ TSN_OB_ATT_VOL,	TSN_RIGHT_ADMIN },
+	{ TSN_OB_DET_VOL,	TSN_RIGHT_ADMIN },
+	{ TSN_OB_SET_DOM,	TSN_RIGHT_ADMIN },
+	{ TSN_WM_SET_LOOK,	TSN_RIGHT_CONF_USER },
+	{ TSN_KM_SET,		TSN_RIGHT_CONF_DEV },
+};
+
+/* Whether the credentials let ops on the object named by the string s */
+LOCAL BOOL may_on( CONST char *s, CONST T_OBCRD *crd, UINT ops )
+{
+	TS_UUID	u;
+
+	return ( ts_str_to_uuid(s, &u) >= E_OK && ( knl_ob_permit_on(&u, crd) & ops ) == ops );
+}
+
+/* E_OK when process pid has the right call fncd takes, E_OACV when not */
+LOCAL ER svc_right( UINT fncd, ID pid )
+{
+	CONST T_OBCRD	*crd;
+	BOOL		ok = FALSE;
+	UINT		i, right = TSN_RIGHT_NONE;
+
+	for ( i = 0; i < sizeof(svc_rights) / sizeof(svc_rights[0]); i++ ) {
+		if ( svc_rights[i].fncd == fncd ) {
+			right = svc_rights[i].right;
+			break;
+		}
+	}
+	if ( right == TSN_RIGHT_NONE ) {
+		return E_OK;
+	}
+	crd = knl_ob_crd_of(pid);
+	if ( knl_ob_is_admin(crd) ) {
+		return E_OK;
+	}
+	switch ( right ) {
+	  case TSN_RIGHT_CLOCK:
+		ok = ( ( knl_ob_permit_on(&ob_uuid_clock, crd) & OB_OP_WRITE ) != 0 );
+		break;
+	  case TSN_RIGHT_ZONE:
+		ok = may_on(SYSDEF_CALENDAR, crd, OB_OP_ATRRD | OB_OP_ATRWR);
+		break;
+	  case TSN_RIGHT_CONF_DEV:
+		ok = may_on(SYSDEF_CONF_DEV, crd, OB_OP_WRITE);
+		break;
+	  case TSN_RIGHT_CONF_USER:
+		ok = may_on(SYSDEF_CONF_USER, crd, OB_OP_WRITE);
+		break;
+	  default:				/* TSN_RIGHT_ADMIN */
+		break;
+	}
+	if ( !ok ) {
+		knl_ob_deny_note("svc", NULL, fncd, right);
+	}
+	return ok ? E_OK : E_OACV;
+}
+
+/*
+ * tk_cre_tsk of a task of the system process at EL0: it makes tasks of
+ * protection level 2/3, as it is itself, and none that runs at EL1.
+ */
+LOCAL ID svc_sys_cre_tsk( CONST T_CTSK *pk )
+{
+	if ( pk == NULL ) {
+		return E_PAR;
+	}
+	if ( ( pk->tskatr & TA_RNG3 ) < TA_RNG2 ) {
+		return E_OACV;
+	}
+	return tk_cre_tsk(pk);
+}
+
+#ifdef USE_KTEST
+/*
+ * For the tests (TSN_TM_PAN_PROBE): a word of the process's read by the
+ * kernel, with the way opened once it has made sure of it, or straight,
+ * as a kernel that forgot to open it would.
+ */
+LOCAL UBINT svc_pan_probe( CONST UD *p, BOOL opened )
+{
+	if ( ts_get_pid() > 0 && !user_ok(p, sizeof(*p), FALSE) ) {
+		return (UBINT)(BINT)E_MACV;
+	}
+	return opened ? UACCESS(*p) : *(volatile CONST UD *)p;
+}
+#endif
 
 /*
  * Called from vector.S with the exception frame; returns the value for x0.
@@ -1483,7 +2460,7 @@ EXPORT UBINT knl_svc_gateway( T_EXCFRAME *frame )
 	UINT	cls = TSN_CLASS(fncd), no = TSN_NUMBER(fncd);
 	FP	fn = NULL;
 	UBINT	ret;
-	BOOL	inside, busy;
+	BOOL	inside, busy, opened;
 	TCB	*me = knl_ctxtsk;		/* interrupts are still disabled here */
 	ID	prc = ( me != NULL ) ? me->owner : 0;
 
@@ -1505,7 +2482,18 @@ EXPORT UBINT knl_svc_gateway( T_EXCFRAME *frame )
 		fn = dp_svc_tbl[no];
 	} else if ( cls == TSN_CLASS_WM && no <= TSN_WM_MAX ) {
 		fn = wm_svc_tbl[no];
+	} else if ( cls == TSN_CLASS_GP && no <= TSN_GP_MAX ) {
+		fn = knl_gp_svc_tbl[no];
+	} else if ( cls == TSN_CLASS_SR && no <= TSN_SR_MAX ) {
+		fn = knl_sr_svc_tbl[no];
+	} else if ( cls == TSN_CLASS_US && no <= TSN_US_MAX ) {
+		fn = knl_us_svc_tbl[no];
 	}
+#ifdef USE_KTEST
+	if ( fncd == TSN_TM_PAN_PROBE ) {
+		fn = F(svc_pan_probe);
+	}
+#endif
 	if ( fn == NULL ) {
 		return (UBINT)(BINT)E_RSFN;
 	}
@@ -1515,6 +2503,28 @@ EXPORT UBINT knl_svc_gateway( T_EXCFRAME *frame )
 		me->svcdepth++;
 	}
 	enaint(0);				/* the system call may block or be preempted */
+
+	/*
+	 * A call that acts on the whole system is a process's to make only
+	 * with the right the table of rights asks for it (svc_right). The
+	 * system process's tasks are the system's, and are not asked.
+	 */
+	if ( prc > 0 && ( ret = (UBINT)(BINT)svc_right(fncd, prc) ) != (UBINT)E_OK ) {
+		if ( busy ) {
+			me->svcdepth--;
+		}
+		disint();
+		return ret;
+	}
+
+	/*
+	 * A task of the system process at EL0 is part of the system, and
+	 * the kernel takes what it hands by pointer as it is: its call runs
+	 * with the way to the user pages open from end to end. A process's
+	 * call keeps it shut, and opens it only for what has been made sure
+	 * of (UACCESS).
+	 */
+	opened = ( prc == 0 ) ? knl_ua_open() : FALSE;
 
 	/*
 	 * A call into the files, the sockets, the objects, drawing or the
@@ -1527,14 +2537,39 @@ EXPORT UBINT knl_svc_gateway( T_EXCFRAME *frame )
 	 * not there.
 	 */
 	inside = ( cls == TSN_CLASS_FS || cls == TSN_CLASS_SO || cls == TSN_CLASS_OB
-		|| cls == TSN_CLASS_DP || cls == TSN_CLASS_WM );
+		|| cls == TSN_CLASS_DP || cls == TSN_CLASS_WM || cls == TSN_CLASS_GP
+		|| fncd == TSN_TS_SPN_PRC );
 	if ( inside && knl_prc_call_enter() < E_OK ) {
 		ret = (UBINT)(BINT)( ( cls == TSN_CLASS_FS ) ? EX_INTR : E_DISWAI );
+	} else if ( fncd == TSN_TS_FLT_RET ) {
+		/* back to where a fault's picture says: the call's own frame is turned to it */
+		ret = (UBINT)(BINT)knl_prc_flt_return(frame, (CONST T_TSFLT *)frame->x[0]);
+		if ( (BINT)ret >= E_OK ) {
+			ret = frame->x[0];
+		}
+	} else if ( fncd == TSN_TS_SIG_RET && prc > 0 ) {
+		/* back from a signal's handler, its mask put back */
+		ret = (UBINT)(BINT)knl_psx_sig_return(frame, (CONST T_TSSIGFR *)frame->x[0]);
+		if ( (BINT)ret >= E_OK ) {
+			ret = frame->x[0];
+		}
 	} else {
 		ret = ((SVCFN)fn)(frame->x[0], frame->x[1], frame->x[2], frame->x[3],
 				  frame->x[4], frame->x[5], frame->x[6], frame->x[7]);
 		if ( inside || knl_prc_kfaults > 0 ) {
 			knl_prc_call_leave(inside);
+		}
+	}
+	knl_ua_close(opened);
+
+	/*
+	 * A signal the process catches is handed over as the call returns
+	 * (include/ts/psx.h), and a process that was stopped stays here
+	 * until it goes on.
+	 */
+	if ( prc > 0 ) {
+		if ( knl_psx_deliver(frame, (UD)ret) ) {
+			ret = frame->x[0];		/* turned to the signal's entry */
 		}
 	}
 	if ( busy ) {

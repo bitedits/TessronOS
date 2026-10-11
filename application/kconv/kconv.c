@@ -30,6 +30,12 @@
  *	memory from a region of its own, the clock, and files. The files
  *	are objects: the profile directory the engine names is the 学習箱,
  *	and each file in it an object the box links to (design 18.20).
+ *
+ *	The words the person registered (ユーザ辞書, SYSDEF_DICT_USER,
+ *	ts/udic.h) are read when the converter starts and again whenever
+ *	their object is written, which 単語登録 does: the romaji converter
+ *	offers them for a reading typed whole, and mozc is given them as its
+ *	user dictionary (design 11.16).
  */
 
 #include <sys/machine.h>
@@ -42,12 +48,120 @@
 #include <ts/xf.h>
 #include <ts/sysdef.h>
 #include <ts/kconv.h>
+#include <ts/keymap.h>
 #include <ts/hid.h>
+#include <ts/udic.h>
+
+/* ---------------------------------------------------------------- the user's words */
+
+/*
+ * The user dictionary's text, read whole; kw_sem keeps a look-up from
+ * meeting the text being replaced.
+ */
+LOCAL UB	*kw_text = NULL;
+LOCAL INT	kw_len = 0;
+LOCAL ID	kw_sem = 0;
+
+LOCAL void kw_lock( void )
+{
+	if ( kw_sem > 0 ) (void)tk_wai_sem(kw_sem, 1, TMO_FEVR);
+}
+
+LOCAL void kw_unlock( void )
+{
+	if ( kw_sem > 0 ) (void)tk_sig_sem(kw_sem, 1);
+}
+
+/* The object's record 1, read whole into memory taken for it; NULL when there is no such object */
+LOCAL UB *kw_read( INT *p_len )
+{
+	TS_UUID	u;
+	T_OBREC	rec[4];
+	UB	*t;
+	SZ	size = 0, asz = 0;
+	D	at = 0;
+	INT	cnt = 0, i;
+	ID	key;
+
+	*p_len = 0;
+	if ( ts_str_to_uuid(SYSDEF_DICT_USER, &u) < E_OK ) {
+		return NULL;
+	}
+	key = ob_opn_obj(&u, OB_OP_R);
+	if ( key <= 0 ) {
+		return NULL;
+	}
+	if ( ob_lst_rec(key, rec, 4, &cnt) >= E_OK ) {
+		for ( i = 0; i < cnt; i++ ) {
+			if ( rec[i].recno == 1 ) size = (SZ)rec[i].size;
+		}
+	}
+	if ( size > UD_TEXT_MAX ) {
+		size = UD_TEXT_MAX;
+	}
+	t = (UB *)Kmalloc(size + 1);
+	while ( t != NULL && at < (D)size ) {
+		if ( ob_rea_rec(key, 1, at, t + at, size - at, &asz) < E_OK || asz <= 0 ) break;
+		at += asz;
+	}
+	ob_cls_obj(key);
+	if ( t == NULL ) {
+		return NULL;
+	}
+	t[at] = 0;
+	*p_len = (INT)at;
+	return t;
+}
+
+/* The words read again, in place of those there were */
+LOCAL void kw_load( void )
+{
+	UB	*t, *old;
+	INT	len = 0;
+
+	t = kw_read(&len);
+	if ( t == NULL ) {
+		t = (UB *)Kmalloc(1);		/* none: no words */
+		if ( t == NULL ) return;
+		t[0] = 0;
+	}
+	kw_lock();
+	old = kw_text;
+	kw_text = t;
+	kw_len = len;
+	kw_unlock();
+	if ( old != NULL ) {
+		Kfree(old);
+	}
+	tm_printf((UB *)"kconv: user dictionary read (%d words)\n", ud_count(t, len));
+}
+
+#if USE_MOZC
+/* The words as the engine takes them, in memory taken for them; NULL when there is none */
+LOCAL UB *kw_engine( INT *p_n )
+{
+	UB	*b;
+	INT	n;
+
+	kw_lock();
+	b = (UB *)Kmalloc(kw_len + 16);
+	n = ( b != NULL ) ? ud_engine(( kw_text != NULL ) ? kw_text : (CONST UB *)"", kw_len, b, kw_len + 16) : 0;
+	kw_unlock();
+	if ( b != NULL && n < 0 ) {
+		Kfree(b);
+		b = NULL;
+	}
+	*p_n = n;
+	return b;
+}
+#endif
 
 /* ---------------------------------------------------------------- the romaji converter */
 
 #define RK_SESS		8
 #define RK_TEXT		256
+#define RK_CAND		9		/* a reading's candidates: the list shows nine */
+#define RK_CANDBUF	( RK_CAND * ( UD_WORD_MAX + 4 ) )
 
 typedef struct {
 	BOOL	used;
@@ -55,6 +169,11 @@ typedef struct {
 	INT	nk;
 	UB	roma[4];		/* romaji not yet a kana */
 	INT	nr;
+	BOOL	conv;			/* converted: a candidate is shown for the kana */
+	BOOL	listed;			/* ... and the list of them is shown */
+	INT	ncand, sel;
+	INT	coff[RK_CAND + 1];	/* where each candidate starts in cand */
+	UB	cand[RK_CANDBUF];
 } RKSESS;
 
 LOCAL RKSESS	rk_sess[RK_SESS];
@@ -214,7 +333,17 @@ LOCAL void rk_out( RKSESS *s, T_KCOUT *out, CONST UB *committed, INT nc )
 		out->n_cl = 1;
 		out->cl[1] = at;
 	}
-	if ( s->nk + s->nr > 0 ) {
+	if ( s->conv ) {
+		/* the candidate chosen, standing for the kana */
+		out->cl[out->n_cl] = at;
+		for ( i = s->coff[s->sel]; i < s->coff[s->sel + 1] && at < TSMOZC_TEXT_MAX - 1; i++ ) {
+			out->text[at++] = (char)s->cand[i];
+		}
+		out->n_cl++;
+		out->cl[out->n_cl] = at;
+		out->clause = out->n_cl - 1;
+		out->sel = s->sel + 1;
+	} else if ( s->nk + s->nr > 0 ) {
 		out->cl[out->n_cl] = at;
 		for ( i = 0; i < s->nk && at < TSMOZC_TEXT_MAX - 1; i++ ) {
 			out->text[at++] = (char)s->kana[i];
@@ -230,13 +359,13 @@ LOCAL void rk_out( RKSESS *s, T_KCOUT *out, CONST UB *committed, INT nc )
 	out->caret = at;
 }
 
-/* The composition's hiragana from byte from on turned into katakana */
-LOCAL void rk_katakana( RKSESS *s, INT from )
+/* Hiragana in n bytes of UTF-8 turned into katakana where they stand */
+LOCAL void to_katakana( UB *p, INT n )
 {
 	INT	i;
 
-	for ( i = from; i + 2 < s->nk; i++ ) {
-		UB	a = s->kana[i], b = s->kana[i + 1], c = s->kana[i + 2];
+	for ( i = 0; i + 2 < n; i++ ) {
+		UB	a = p[i], b = p[i + 1], c = p[i + 2];
 		UINT	u;
 
 		if ( ( a & 0xF0 ) != 0xE0 ) {
@@ -245,12 +374,86 @@ LOCAL void rk_katakana( RKSESS *s, INT from )
 		u = ( (UINT)( a & 0x0F ) << 12 ) | ( (UINT)( b & 0x3F ) << 6 ) | ( c & 0x3F );
 		if ( u >= 0x3041 && u <= 0x3096 ) {
 			u += 0x60;
-			s->kana[i] = (UB)( 0xE0 | ( u >> 12 ) );
-			s->kana[i + 1] = (UB)( 0x80 | ( ( u >> 6 ) & 0x3F ) );
-			s->kana[i + 2] = (UB)( 0x80 | ( u & 0x3F ) );
+			p[i] = (UB)( 0xE0 | ( u >> 12 ) );
+			p[i + 1] = (UB)( 0x80 | ( ( u >> 6 ) & 0x3F ) );
+			p[i + 2] = (UB)( 0x80 | ( u & 0x3F ) );
 		}
 		i += 2;
 	}
+}
+
+/* The composition's hiragana from byte from on turned into katakana */
+LOCAL void rk_katakana( RKSESS *s, INT from )
+{
+	to_katakana(s->kana + from, s->nk - from);
+}
+
+/* A candidate added, unless it is one already there */
+LOCAL void rk_cand_add( RKSESS *s, CONST UB *w, INT n )
+{
+	INT	k, i, at = s->coff[s->ncand];
+
+	if ( s->ncand >= RK_CAND || n <= 0 || at + n > RK_CANDBUF ) {
+		return;
+	}
+	for ( k = 0; k < s->ncand; k++ ) {
+		if ( s->coff[k + 1] - s->coff[k] != n ) continue;
+		for ( i = 0; i < n && s->cand[s->coff[k] + i] == w[i]; i++ ) ;
+		if ( i == n ) return;
+	}
+	for ( i = 0; i < n; i++ ) s->cand[at + i] = w[i];
+	s->ncand++;
+	s->coff[s->ncand] = at + n;
+}
+
+/*
+ * The kana composed looked up in the user's words: when there are any,
+ * the candidates are they, the kana in hiragana and in katakana, the
+ * first shown, and TRUE.
+ */
+LOCAL BOOL rk_convert( RKSESS *s )
+{
+	UDENT	e[RK_CAND];
+	UB	y[RK_TEXT];
+	INT	n, i;
+
+	if ( s->nk <= 0 || s->nk >= UD_YOMI_MAX ) {
+		return FALSE;
+	}
+	for ( i = 0; i < s->nk; i++ ) y[i] = s->kana[i];
+	ud_hira(y, s->nk);
+	s->ncand = 0;
+	s->coff[0] = 0;
+	kw_lock();
+	n = ( kw_text != NULL ) ? ud_lookup(kw_text, kw_len, y, s->nk, e, RK_CAND - 2) : 0;
+	if ( n > RK_CAND - 2 ) n = RK_CAND - 2;
+	for ( i = 0; i < n; i++ ) {
+		rk_cand_add(s, e[i].word, e[i].nword);	/* copied while the text cannot change */
+	}
+	kw_unlock();
+	if ( s->ncand == 0 ) {
+		return FALSE;
+	}
+	rk_cand_add(s, y, s->nk);
+	to_katakana(y, s->nk);
+	rk_cand_add(s, y, s->nk);
+	s->conv = TRUE;
+	s->listed = FALSE;
+	s->sel = 0;
+	return TRUE;
+}
+
+/* The candidate shown, committed: into done (n bytes there), the composition emptied */
+LOCAL INT rk_fix( RKSESS *s, UB *done )
+{
+	INT	n = 0, i;
+
+	if ( s->conv ) {
+		for ( i = s->coff[s->sel]; i < s->coff[s->sel + 1]; i++ ) done[n++] = s->cand[i];
+		s->conv = FALSE;
+		s->nk = s->nr = 0;
+	}
+	return n;
 }
 
 /* A character of the BMP put as UTF-8 */
@@ -355,16 +558,79 @@ LOCAL RKSESS *rk_of( INT kid )
 	       ? &rk_sess[kid - 1] : NULL;
 }
 
+/*
+ * A key while a candidate is shown: the flags of what it did to the
+ * conversion, or -1 for a key that types on, before which the
+ * candidate is committed.
+ */
+LOCAL INT rk_conv_key( RKSESS *s, UINT code, T_KCOUT *out )
+{
+	UB	done[UD_WORD_MAX + 4];
+	INT	n;
+
+	switch ( code ) {
+	case TSMOZC_K_SPACE:
+	case TSMOZC_K_CNV:
+	case TSMOZC_K_DOWN:
+	case TSMOZC_K_SC_D:
+	case TSMOZC_K_UP:
+	case TSMOZC_K_SC_U: {
+		/* the next candidate, and from the second conversion on the list of them */
+		BOOL	was = s->listed;
+
+		if ( code == TSMOZC_K_UP || code == TSMOZC_K_SC_U ) {
+			s->sel = ( s->sel + s->ncand - 1 ) % s->ncand;
+		} else {
+			s->sel = ( s->sel + 1 ) % s->ncand;
+		}
+		s->listed = TRUE;
+		rk_out(s, out, NULL, 0);
+		return TSMOZC_CNV | TSMOZC_LIST | ( was ? 0 : TSMOZC_LISTCHG );
+	}
+	case TSMOZC_K_CR:
+	case TSMOZC_K_NL:
+	case TSMOZC_K_IEND:
+		n = rk_fix(s, done);
+		rk_out(s, out, done, n);
+		return TSMOZC_OUT | TSMOZC_CNV;
+	case TSMOZC_K_BS:
+	case TSMOZC_K_ESC:
+	case TSMOZC_K_CAN:
+		/* back to the kana */
+		s->conv = FALSE;
+		s->listed = FALSE;
+		rk_out(s, out, NULL, 0);
+		return TSMOZC_CNV | TSMOZC_CAR;
+	case TSMOZC_K_LIST_PREV:
+	case TSMOZC_K_LIST_NEXT:
+	case TSMOZC_K_PG_U:
+	case TSMOZC_K_PG_D:
+		rk_out(s, out, NULL, 0);
+		return s->listed ? TSMOZC_LIST : 0;	/* one page holds them all */
+	default:
+		return -1;
+	}
+}
+
 LOCAL INT rk_key( INT kid, UINT code, UINT stat, T_KCOUT *out )
 {
 	RKSESS	*s = rk_of(kid);
 	BOOL	busy, kata = (BOOL)( ( stat & TSMOZC_S_KANA ) != 0 );
-	INT	was;
-	UINT	u;
+	UB	done[UD_WORD_MAX + 4];
+	INT	was, nd = 0, r;
+	UINT	u, also;
 
 	if ( s == NULL ) {
 		return E_ID;
 	}
+	if ( s->conv ) {
+		r = rk_conv_key(s, code, out);
+		if ( r >= 0 ) {
+			return r;
+		}
+		nd = rk_fix(s, done);			/* typing on: what was shown is committed */
+	}
+	also = ( nd > 0 ) ? TSMOZC_OUT : 0;
 	busy = (BOOL)( s->nk + s->nr > 0 );
 	was = s->nk;
 	if ( ( code >= 'a' && code <= 'z' ) || code == '-' || code == ','
@@ -373,16 +639,16 @@ LOCAL INT rk_key( INT kid, UINT code, UINT stat, T_KCOUT *out )
 		if ( kata ) {
 			rk_katakana(s, was);
 		}
-		rk_out(s, out, NULL, 0);
-		return TSMOZC_CNV | TSMOZC_CAR;
+		rk_out(s, out, done, nd);
+		return TSMOZC_CNV | TSMOZC_CAR | also;
 	}
 	if ( code > 0x20 && code < 0x7F ) {
 		UB	one[2] = { (UB)code, 0 };
 
 		rk_settle(s);
 		rk_put(s, (CONST char *)one);
-		rk_out(s, out, NULL, 0);
-		return TSMOZC_CNV | TSMOZC_CAR;
+		rk_out(s, out, done, nd);
+		return TSMOZC_CNV | TSMOZC_CAR | also;
 	}
 	/* a kana key: the kana itself, or the mark voicing the one before */
 	u = ( code != TSMOZC_K_SPACE ) ? rk_tc_ucs(code) : 0;
@@ -395,19 +661,31 @@ LOCAL INT rk_key( INT kid, UINT code, UINT stat, T_KCOUT *out )
 		if ( kata ) {
 			rk_katakana(s, was);
 		}
-		rk_out(s, out, NULL, 0);
-		return TSMOZC_CNV | TSMOZC_CAR;
+		rk_out(s, out, done, nd);
+		return TSMOZC_CNV | TSMOZC_CAR | also;
 	}
 	if ( !busy ) {
+		if ( nd > 0 ) {
+			rk_out(s, out, done, nd);
+			return TSMOZC_OUT | TSMOZC_CNV;
+		}
 		return KC_NOTMINE;
 	}
 	switch ( code ) {
+	case TSMOZC_K_SPACE:
+	case TSMOZC_K_CNV:
+		/* the user's words for the reading, when there are any */
+		rk_settle(s);
+		if ( rk_convert(s) ) {
+			rk_out(s, out, NULL, 0);
+			return TSMOZC_CNV | TSMOZC_CL | TSMOZC_CAR;
+		}
+		/* there is nothing to convert it to: committed as below */
+		/* fall through */
 	case TSMOZC_K_CR:
 	case TSMOZC_K_NL:
-	case TSMOZC_K_IEND:
-	case TSMOZC_K_SPACE:
-	case TSMOZC_K_CNV: {
-		/* committed as it stands: there is nothing to convert it to */
+	case TSMOZC_K_IEND: {
+		/* committed as it stands */
 		UB	all[RK_TEXT + 4];
 		INT	n = 0, i;
 
@@ -443,6 +721,48 @@ LOCAL INT rk_key( INT kid, UINT code, UINT stat, T_KCOUT *out )
 	}
 }
 
+/* The candidates shown, as kc_list gives them; the one chosen (from 1), or E_NOEXS */
+LOCAL INT rk_list( INT kid, UB *buf, INT size, INT *p_count, INT *p_first, INT *p_total )
+{
+	RKSESS	*s = rk_of(kid);
+	INT	k, i, at = 0, n = 0;
+
+	if ( s == NULL || !s->conv || buf == NULL || size <= 0 ) {
+		return E_NOEXS;
+	}
+	for ( k = 0; k < s->ncand; k++ ) {
+		INT	len = s->coff[k + 1] - s->coff[k];
+
+		if ( at + len + 1 > size ) break;
+		for ( i = 0; i < len; i++ ) buf[at++] = s->cand[s->coff[k] + i];
+		buf[at++] = 0;
+		n++;
+	}
+	if ( p_count != NULL ) *p_count = n;
+	if ( p_first != NULL ) *p_first = 1;
+	if ( p_total != NULL ) *p_total = s->ncand;
+	return s->sel + 1;
+}
+
+/* Candidate n (from 1) chosen and committed */
+LOCAL INT rk_choose( INT kid, INT n, T_KCOUT *out )
+{
+	RKSESS	*s = rk_of(kid);
+	UB	done[UD_WORD_MAX + 4];
+	INT	nd;
+
+	if ( s == NULL || !s->conv ) {
+		return KC_NOTMINE;
+	}
+	if ( n < 1 || n > s->ncand ) {
+		return E_PAR;
+	}
+	s->sel = n - 1;
+	nd = rk_fix(s, done);
+	rk_out(s, out, done, nd);
+	return TSMOZC_OUT | TSMOZC_CNV;
+}
+
 /* ---------------------------------------------------------------- mozc */
 
 #if USE_MOZC
@@ -464,6 +784,7 @@ typedef struct {
 	INT		size;
 	INT		*p1, *p2, *p3;
 	INT		ret;
+	volatile BOOL	done;		/* the engine has answered this one */
 } KCREQ;
 
 #define OP_OPEN		1
@@ -472,9 +793,11 @@ typedef struct {
 #define OP_CHOOSE	4
 #define OP_LIST		5
 #define OP_INPUT	6
+#define OP_WORDS	7
 
 LOCAL ID	kc_task = 0;
-LOCAL ID	kc_go, kc_done, kc_turn;	/* semaphores */
+LOCAL ID	kc_go, kc_done;		/* semaphores */
+LOCAL ID	kc_turn;		/* a mutex: one request at a time */
 LOCAL KCREQ	*kc_req;
 LOCAL volatile BOOL	kc_up = FALSE;		/* the engine is made and running */
 LOCAL volatile BOOL	kc_gone = FALSE;	/* it could not be, or it stopped */
@@ -551,6 +874,22 @@ LOCAL void kc_serve( INT stacd, void *exinf )
 		tk_ext_tsk();
 	}
 	tm_printf((UB *)"kconv: mozc started (%s)\n", tsmozc_note());
+	/* the user's words, as its user dictionary */
+	{
+		UB	*w;
+		INT	n = 0;
+
+		if ( kw_text == NULL ) {
+			kw_load();
+		}
+		w = kw_engine(&n);
+		if ( w != NULL ) {
+			if ( tsmozc_words((CONST char *)w, (unsigned long)n) < 0 ) {
+				tm_printf((UB *)"kconv: mozc did not take the user dictionary\n");
+			}
+			Kfree(w);
+		}
+	}
 	kc_up = TRUE;
 
 	for ( ;; ) {
@@ -581,33 +920,47 @@ LOCAL void kc_serve( INT stacd, void *exinf )
 			r->ret = tsmozc_list(r->kid, (char *)r->buf, r->size,
 					     r->p1, r->p2, r->p3);
 			break;
+		case OP_WORDS:
+			r->ret = ( tsmozc_words((CONST char *)r->buf, (unsigned long)r->size) < 0 ) ? E_IO : E_OK;
+			break;
 		default:
 			r->ret = E_PAR;
 			break;
 		}
+		r->done = TRUE;
 		tk_sig_sem(kc_done, 1);
 	}
 }
 
-/* A request done by the engine's task: its answer */
+/*
+ * A request done by the engine's task: its answer. The turn is a mutex,
+ * so that a caller stopped while it waits (the desktop's task, stopped
+ * by 強制終了 to start the desktop again) does not keep it; the answer
+ * to such a caller's request may still come, and is told from the one
+ * asked for now by the request's own mark.
+ */
 LOCAL INT kc_call( KCREQ *r )
 {
 	if ( !kc_up ) {
 		return E_NOEXS;
 	}
-	if ( tk_wai_sem(kc_turn, 1, TMO_FEVR) < E_OK ) {
+	if ( tk_loc_mtx(kc_turn, TMO_FEVR) < E_OK ) {
 		return E_SYS;
 	}
+	r->done = FALSE;
 	kc_req = r;
 	tk_sig_sem(kc_go, 1);
-	if ( tk_wai_sem(kc_done, 1, 10000) < E_OK ) {
-		/* the engine stopped in the middle: it is not asked again */
-		kc_up = FALSE;
-		kc_gone = TRUE;
-		tm_printf((UB *)"kconv: mozc did not answer\n");
-		return E_TMOUT;
+	while ( !r->done ) {
+		if ( tk_wai_sem(kc_done, 1, 10000) < E_OK ) {
+			/* the engine stopped in the middle: it is not asked again */
+			kc_up = FALSE;
+			kc_gone = TRUE;
+			tm_printf((UB *)"kconv: mozc did not answer\n");
+			tk_unl_mtx(kc_turn);
+			return E_TMOUT;
+		}
 	}
-	tk_sig_sem(kc_turn, 1);
+	tk_unl_mtx(kc_turn);
 
 	return r->ret;
 }
@@ -684,6 +1037,7 @@ EXPORT void tsmozc_host_exit( int code )
 	kc_gone = TRUE;
 	if ( kc_req != NULL ) {
 		kc_req->ret = E_SYS;
+		kc_req->done = TRUE;
 		tk_sig_sem(kc_done, 1);
 	}
 	tk_ext_tsk();
@@ -1024,6 +1378,67 @@ LOCAL CONST KCKANA kc_kana_keys[] = {
 	{ 0x38, "め", "・" }, { 0x87, "ろ", "ろ" },
 };
 
+/* The kana a key types, UTF-8, with Shift or without; NULL for a key with none */
+EXPORT CONST char *kc_kana_label( UINT key, BOOL shift )
+{
+	UINT	i;
+
+	for ( i = 0; i < sizeof(kc_kana_keys) / sizeof(kc_kana_keys[0]); i++ ) {
+		if ( kc_kana_keys[i].key == key ) {
+			return (CONST char *)( shift ? kc_kana_keys[i].shift : kc_kana_keys[i].plain );
+		}
+	}
+	return NULL;
+}
+
+/* A kana as its TRON code (JIS X 0208), from its UTF-8; 0 for one with none */
+LOCAL UINT kana_code( CONST UB *s )
+{
+	LOCAL CONST UH	sign[][2] = {
+		{ 0x30FC, 0x213C },	/* ー */
+		{ 0x309B, 0x212B },	/* ゛ */
+		{ 0x309C, 0x212C },	/* ゜ */
+		{ 0x300C, 0x2156 },	/* 「 */
+		{ 0x300D, 0x2157 },	/* 」 */
+		{ 0x3001, 0x2122 },	/* 、 */
+		{ 0x3002, 0x2123 },	/* 。 */
+		{ 0x30FB, 0x2126 },	/* ・ */
+		{ 0xFF0C, 0x2124 },	/* ， */
+		{ 0xFF0E, 0x2125 },	/* ． */
+		{ 0x30F4, 0x2574 },	/* ヴ */
+		{ 0x30F5, 0x2575 },	/* ヵ */
+		{ 0x30F6, 0x2576 },	/* ヶ */
+	};
+	UINT	i, u;
+
+	if ( s == NULL || ( s[0] & 0xF0 ) != 0xE0 ) {
+		return 0;
+	}
+	u = ( (UINT)( s[0] & 0x0F ) << 12 ) | ( (UINT)( s[1] & 0x3F ) << 6 ) | ( s[2] & 0x3F );
+	if ( u >= 0x3041 && u <= 0x3093 ) {
+		return 0x2421 + ( u - 0x3041 );
+	}
+	for ( i = 0; i < sizeof(sign) / sizeof(sign[0]); i++ ) {
+		if ( sign[i][0] == u ) {
+			return sign[i][1];
+		}
+	}
+	return 0;
+}
+
+/*
+ * A kana key's character as its TRON code, in the kana layout chosen
+ * (キー配列): JIS かな by Shift, or a thumb-shift layout by the thumbs
+ * held (ts/keymap.h); 0 for a key with none
+ */
+EXPORT UINT kc_kana_key_m( UINT key, UINT mods )
+{
+	if ( km_kana() != KM_KANA_JIS ) {
+		return kana_code((CONST UB *)km_kana_text(key, mods));
+	}
+	return kc_kana_key(key, (BOOL)( ( mods & MOD_SHIFT ) != 0 ));
+}
+
 /* A kana key's character as its TRON code (JIS X 0208), or 0 */
 EXPORT UINT kc_kana_key( UINT key, BOOL shift )
 {
@@ -1102,12 +1517,126 @@ EXPORT UINT kc_code_key( UINT key, UINT mods )
 	return 0;
 }
 
+/* ---------------------------------------------------------------- the user dictionary watched */
+
+EXPORT ER kc_words_reload( void )
+{
+	kw_load();
+#if USE_MOZC
+	if ( kc_up ) {
+		KCREQ	r;
+		UB	*w;
+		INT	n = 0;
+		ER	er;
+
+		w = kw_engine(&n);
+		if ( w == NULL ) {
+			return E_NOMEM;
+		}
+		knl_memset(&r, 0, sizeof(r));
+		r.op = OP_WORDS;
+		r.buf = w;
+		r.size = n;
+		er = kc_call(&r);
+		Kfree(w);
+		if ( er < E_OK ) {
+			tm_printf((UB *)"kconv: mozc did not take the user dictionary (%d)\n", (INT)er);
+			return er;
+		}
+	}
+#endif
+	return E_OK;
+}
+
+#define KW_WATCH_PRI	30		/* low: reading the words is not urgent */
+
+LOCAL ID	kw_watch_tsk = 0;
+
+/*
+ * The user dictionary object watched: a write to its record 1 (単語登録
+ * writing a word, or anyone) has the words read again. A write and the
+ * cut after it come as two notices close together, which are one change.
+ */
+LOCAL void kw_watch( INT stacd, void *exinf )
+{
+	TS_UUID	u, ch;
+	T_OBCRE	c;
+	T_OBNTF	req;
+	T_OBNTM	m;
+	ID	port = 0, key;
+	SZ	asz = 0;
+
+	(void)stacd;
+	(void)exinf;
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_CHANNEL;
+	if ( ts_str_to_uuid(SYSDEF_DICT_USER, &u) < E_OK || ob_cre_obj(&c, &ch) < E_OK
+	  || ( port = ob_opn_obj(&ch, OB_OP_READ | OB_OP_WRITE | OB_O_NOWAIT) ) <= 0 ) {
+		kw_watch_tsk = 0;
+		tk_exd_tsk();
+	}
+	knl_memset(&req, 0, sizeof(req));
+	req.events = OB_E_CHANGE;
+	key = ob_opn_obj(&u, OB_OP_ATRRD);
+	if ( key <= 0 || ob_ntf_evt(key, 1, &req, port) <= 0 ) {
+		tm_printf((UB *)"kconv: the user dictionary cannot be watched\n");
+		if ( key > 0 ) (void)ob_cls_obj(key);
+		(void)ob_cls_obj(port);
+		(void)ob_del_obj(&ch);
+		kw_watch_tsk = 0;
+		tk_exd_tsk();
+	}
+	for ( ;; ) {
+		if ( ob_rea_rec(port, 0, 0, &m, sizeof(m), &asz) < E_OK || asz == 0 ) {
+			tk_dly_tsk(100);		/* nothing yet */
+			continue;
+		}
+		do {
+			tk_dly_tsk(50);
+		} while ( ob_rea_rec(port, 0, 0, &m, sizeof(m), &asz) >= E_OK && asz > 0 );
+		(void)kc_words_reload();
+	}
+}
+
+/* The words read, and their object watched from now on */
+LOCAL void kw_start( void )
+{
+	T_CSEM	cs;
+	T_CTSK	ct;
+	ID	id;
+
+	if ( kw_sem <= 0 ) {
+		knl_memset(&cs, 0, sizeof(cs));
+		cs.sematr = TA_TFIFO | TA_FIRST;
+		cs.isemcnt = 1;
+		cs.maxsem = 1;
+		id = tk_cre_sem(&cs);
+		if ( id > 0 ) kw_sem = id;
+	}
+	if ( kw_text == NULL ) {
+		kw_load();
+	}
+	if ( kw_watch_tsk > 0 ) {
+		return;
+	}
+	knl_memset(&ct, 0, sizeof(ct));
+	ct.tskatr = TA_HLNG | TA_RNG0;
+	ct.task = (FP)kw_watch;
+	ct.itskpri = KW_WATCH_PRI;
+	ct.stksz = 8 * 1024;
+	id = tk_cre_tsk(&ct);
+	if ( id > 0 && tk_sta_tsk(id, 0) >= E_OK ) {
+		kw_watch_tsk = id;
+	}
+}
+
 EXPORT ER kc_start( void )
 {
 #if USE_MOZC
 	T_CSEM	cs;
 	T_CTSK	ct;
 
+	kw_start();
 	if ( kc_task > 0 ) {
 		return E_OK;
 	}
@@ -1117,8 +1646,13 @@ EXPORT ER kc_start( void )
 	cs.maxsem = 1;
 	kc_go = tk_cre_sem(&cs);
 	kc_done = tk_cre_sem(&cs);
-	cs.isemcnt = 1;
-	kc_turn = tk_cre_sem(&cs);
+	{
+		T_CMTX	cm;
+
+		cm.exinf = NULL;
+		cm.mtxatr = TA_TFIFO;
+		kc_turn = tk_cre_mtx(&cm);
+	}
 	if ( kc_go < E_OK || kc_done < E_OK || kc_turn < E_OK ) {
 		return E_NOMEM;
 	}
@@ -1135,6 +1669,7 @@ EXPORT ER kc_start( void )
 	}
 	return tk_sta_tsk(kc_task, 0);
 #else
+	kw_start();
 	return E_OK;
 #endif
 }
@@ -1242,7 +1777,7 @@ EXPORT INT kc_key( INT kid, UINT code, UINT stat, T_KCOUT *out )
 EXPORT INT kc_choose( INT kid, INT n, T_KCOUT *out )
 {
 	if ( kid > RK_BASE ) {
-		return KC_NOTMINE;
+		return rk_choose(kid - RK_BASE, n, out);
 	}
 #if USE_MOZC
 	{
@@ -1264,7 +1799,7 @@ EXPORT INT kc_list( INT kid, UB *buf, INT size, INT *p_count, INT *p_first,
 		    INT *p_total )
 {
 	if ( kid > RK_BASE ) {
-		return E_NOEXS;
+		return rk_list(kid - RK_BASE, buf, size, p_count, p_first, p_total);
 	}
 #if USE_MOZC
 	{

@@ -107,6 +107,7 @@ IMPORT ER knl_obsock_init( void );		/* obsock.c: the sockets of the network */
 IMPORT ER   knl_obfile_attach( CONST char *path, UINT flags );
 IMPORT ER   knl_obfile_detach( CONST char *path );
 IMPORT ER   knl_obfile_trx( CONST TS_UUID *on, BOOL begin, BOOL commit );
+IMPORT INT  knl_obfile_revoke( CONST UB *devnm );	/* a device's medium went: its volumes are gone */
 
 /* Protection domains (18.9): the one an object is under, E_NOEXS when none */
 IMPORT ER   knl_obfile_domain( CONST TS_UUID *uuid, T_OBPRT *prt );
@@ -116,6 +117,7 @@ IMPORT ER   knl_obfile_set_dom( CONST char *path, CONST T_OBPRT *prt );
 /* What one manager asks of another */
 IMPORT ID   knl_obfile_vol_of( CONST TS_UUID *uuid );	/* the TSFS volume, or an error */
 IMPORT ID   knl_obfile_first_vol( void );
+IMPORT ID   knl_obfile_vol_path( CONST char *path );	/* the TSFS volume attached with a path */
 IMPORT void knl_obdev_volume_up( void );	/* a volume came: the device box can be kept */
 IMPORT BOOL knl_obmem_name_taken( CONST UB *name );
 IMPORT BOOL knl_obchan_name_taken( CONST UB *name );

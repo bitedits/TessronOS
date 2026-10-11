@@ -93,6 +93,13 @@ IMPORT ER ts_jrnl_read( ID vol, UD blk, void *buf );
 IMPORT ER ts_jrnl_checkpoint( ID vol );
 
 /*
+ * Every committed block put where it belongs, then the whole ring written
+ * over with zeroes, so that no copy of a block as it was before stays in
+ * the journal (ob_wip_vol). Waits for the running transaction to end.
+ */
+IMPORT ER ts_jrnl_wipe( ID vol );
+
+/*
  * Put back whatever a cut in the power left behind. Called when a volume
  * is opened, before anything reads its metadata.
  */
@@ -124,6 +131,9 @@ IMPORT void knl_jrnl_revoke( ID vol, UD start, UD count );
 
 /* A volume that is closing: what waits goes in place, and its entry goes */
 IMPORT ER knl_jrnl_close( ID vol );
+
+/* Whether the log was read at open (not for a volume opened with an error recorded) */
+IMPORT BOOL knl_jrnl_ready( ID vol );
 
 #ifdef __cplusplus
 }

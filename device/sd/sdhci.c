@@ -9,12 +9,25 @@
 
 /*
  *	sdhci.c
- *	SD host controller of the Raspberry Pi 5 (design 10.6, 4.2).
+ *	SD host controller of the Raspberry Pi 5 and the Compute Module 5
+ *	(design 10.6, 4.2; docs/tessronos/03-platform.md 3.5).
  *
  *	The registers follow the SD Host Controller specification; the
  *	block sits at 0x10_00ff_f000 with SPI 273. The bus is four bits
  *	wide and the clock is left at the identification speed raised to
  *	25MHz.
+ *
+ *	What is on the controller depends on the board (include/ts/board.h):
+ *	the Raspberry Pi 5's card slot, whose detect switch is an always-on
+ *	GPIO; the Compute Module 5's eMMC, soldered on, eight data lines at
+ *	a fixed 1.8V and no detect line; the Compute Module 5 Lite's carrier
+ *	slot, which has no detect line either, so that a card is simply
+ *	looked for. A device that does not answer as an SD card is tried as
+ *	an MMC (JEDEC eMMC): its own start-up (CMD1, an address given to
+ *	it), its size from the extended CSD, its bus widened by a switch
+ *	command and checked by reading the extended CSD again. The clock
+ *	stays at 25MHz, inside the 26MHz of the eMMC's backward compatible
+ *	timing.
  *
  *	Data moves one of three ways. ADMA2 walks a table of descriptors,
  *	each naming a length and an address, so one command carries as much
@@ -36,6 +49,20 @@
  *	cache coherent with a bus master, so the table and the data are
  *	cleaned out of the cache before a transfer and invalidated after it.
  *
+ *	The Raspberry Pi 4 family has the same kind of controller in its
+ *	EMMC2 block (0xFE34_0000): the card slot of the Pi 4 and the Pi 400,
+ *	the Compute Module 4's eMMC with eight data lines, or the Lite's
+ *	carrier slot. None of them has a detect line the controller can use,
+ *	so a card is looked for. The base clock is the firmware's EMMC2
+ *	clock, asked for through the property mailbox, because the capability
+ *	register does not say it. The controller does not reach memory at its
+ *	physical address: the device tree's dma-ranges of /emmc2bus says what
+ *	it sees, which on the first stepping of the chip (B0) is the low 1GB
+ *	at bus address 0xC000_0000 and on the later one (C0) everything below
+ *	the peripherals at the address itself. A buffer it cannot reach goes
+ *	through the bounce buffer, which is taken from memory every bus
+ *	master reaches.
+ *
  *	The card is registered as the disk device "sda" with its partitions
  *	as subunits, the same shape the virtio block driver uses, so the
  *	file system layer above does not know which one it is talking to.
@@ -51,19 +78,23 @@
 
 #include <sys/machine.h>
 
-#if defined(RPI5) || defined(QEMU_VIRT)
+#if defined(RPI5) || defined(RPI4) || defined(QEMU_VIRT)
 
 #include "kernel.h"
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
 #include <ts/blk.h>
-#ifdef RPI5
+#include <ts/board.h>
+#if defined(RPI5)
 #include <ts/gpio.h>
-#else
+#elif defined(QEMU_VIRT)
 #include <ts/pcie.h>
 #endif
 #include "sysman/pfalloc.h"
 #include "sysdepend.h"
+#ifdef RPI4
+#include "sysdepend/sysdepend.h"
+#endif
 
 #ifdef QEMU_VIRT
 /* the registers are wherever the bus walk put the function's window */
@@ -71,6 +102,19 @@ LOCAL UBINT	sd_base;
 #define SDHCI_BASE		sd_base
 #define PCI_CLASS_SDHCI		0x08		/* base system peripheral */
 #define PCI_SUBCLASS_SDHCI	0x05		/* SD host controller */
+#endif
+
+#ifdef RPI4
+/*
+ * EMMC2, or with tessronos.sd=emmc on the command line the older EMMC
+ * controller at 0xFE30_0000. On the board that one is wired to the
+ * Wi-Fi; QEMU's raspi4b puts its SD card there and leaves EMMC2 empty,
+ * so the same image is tried under QEMU with it.
+ */
+LOCAL UBINT	sd_base = SDHCI_BASE;
+#undef SDHCI_BASE
+#define SDHCI_BASE		sd_base
+#define EMMC1_PA		0xFE300000
 #endif
 
 /* ---------------------------------------------------------------- registers */
@@ -128,16 +172,21 @@ LOCAL UBINT	sd_base;
 
 /* Host control 1 */
 #define CTRL_4BITBUS		0x02
+#define CTRL_8BITBUS		0x20		/* eight data lines, for an embedded device */
 #define CTRL_CD_TEST		0xC0		/* card detect from the test level, which says inserted */
 #define CTRL_DMA_MASK		0x18		/* which kind of transfer the controller runs */
 #define CTRL_DMA_SDMA		0x00
 #define CTRL_DMA_ADMA2_32	0x10
 #define CTRL_DMA_ADMA2_64	0x18
 
+/* Host control 2 */
+#define CTRL2_1V8		0x0008		/* the lines signal at 1.8V */
+
 /*
  * Capabilities. The controller says here which transfer modes it has and
  * how wide the addresses it masters with are.
  */
+#define CAP_8BIT		0x00040000	/* eight data lines for an embedded device */
 #define CAP_ADMA2		0x00080000	/* the descriptor table mode */
 #define CAP_SDMA		0x00400000	/* the single address mode */
 #define CAP_64BIT		0x10000000	/* addresses are 64 bits wide */
@@ -180,6 +229,31 @@ LOCAL UBINT	sd_base;
 #define OCR_VOLTAGE		0x00FF8000	/* 2.7 to 3.6 volts */
 #define OCR_HCS			0x40000000	/* high capacity supported */
 #define OCR_BUSY		0x80000000	/* the card has finished */
+
+/*
+ * MMC (JEDEC eMMC). The device answers CMD1 with its operating
+ * conditions and is given its relative address by the host. Its size
+ * past 2GB and its bus width live in the extended CSD, 512 bytes read
+ * with CMD8 and written a byte at a time with CMD6.
+ */
+#define CMD_MMC_SEND_OP_COND	CMD(1,  CMD_RESP_48)
+#define CMD_MMC_SET_REL_ADDR	CMD(3,  CMD_RESP_48 | CMD_CRC_CHECK | CMD_INDEX_CHECK)
+#define CMD_MMC_SWITCH		CMD(6,  CMD_RESP_48_BUSY | CMD_CRC_CHECK | CMD_INDEX_CHECK)
+#define CMD_MMC_SEND_EXT_CSD	CMD(8,  CMD_RESP_48 | CMD_CRC_CHECK | CMD_INDEX_CHECK | CMD_DATA_PRESENT)
+
+#define MMC_OCR_ARG		0x40FF8080	/* sector addressing, 2.7 to 3.6V and 1.70 to 1.95V */
+#define MMC_OCR_ACCESS		0x60000000	/* the access mode the device answers */
+#define MMC_OCR_SECTOR		0x40000000	/* addressed by sector: larger than 2GB */
+#define MMC_RCA			0x00010000	/* the address given to it, in the high half */
+
+#define MMC_SWITCH_WRITE	0x03000000	/* CMD6 access: write the byte */
+#define MMC_SWITCH(idx, val)	( MMC_SWITCH_WRITE | ( (UW)(idx) << 16 ) | ( (UW)(val) << 8 ) )
+#define R1_SWITCH_ERROR		0x00000080
+
+#define EXT_CSD_BUS_WIDTH	183		/* 0: 1 bit, 1: 4 bits, 2: 8 bits */
+#define EXT_CSD_SEC_COUNT	212		/* four bytes, least significant first */
+#define EXT_CSD_PROPS		192		/* from here on the bytes only describe the device */
+#define EXT_CSD_SIZE		512
 
 /* Card status (R1) and the write protection the card data holds */
 #define R1_CARD_IS_LOCKED	0x02000000	/* a password is set and not given */
@@ -244,7 +318,11 @@ LOCAL UBINT	sd_base;
  * whose lines are its alone.
  */
 #define DMA_ALIGN		64
+#ifdef RPI4
+#define BOUNCE_ORDER		6		/* 256KB: memory past what EMMC2 reaches goes through it */
+#else
 #define BOUNCE_ORDER		4		/* 64KB */
+#endif
 #define BOUNCE_SECT		( ( PAGE_SIZE << BOUNCE_ORDER ) / BLK_SECTOR_SIZE )
 
 /*
@@ -271,7 +349,9 @@ LOCAL UBINT	sd_base;
 typedef struct {
 	UD	nsect;			/* sectors of the card */
 	UW	rca;			/* relative address, in the high half */
-	BOOL	hc;			/* block addressed (SDHC and up) */
+	BOOL	hc;			/* block addressed (SDHC and up, eMMC past 2GB) */
+	BOOL	mmc;			/* an MMC (eMMC), not an SD card */
+	UB	width;			/* data lines in use: 1, 4 or 8 */
 	BOOL	present;
 	UB	wp;			/* SD_WP_*: why the card takes no writes, 0 when it does */
 	INT	dma_mode;		/* SD_DMA_* */
@@ -286,6 +366,27 @@ typedef struct {
 
 LOCAL SDCARD	sd;
 LOCAL INT	sd_step;	/* how far sd_init_card came, for the message when it fails */
+
+/*
+ * What the controller sees of memory: physical sd_dma_cpu and up, for
+ * sd_dma_size bytes, at bus address sd_dma_bus and up. Everything at its
+ * own address unless the board says otherwise (the Raspberry Pi 4's
+ * /emmc2bus dma-ranges, read in knl_sd_init).
+ */
+LOCAL UD	sd_dma_bus = 0;
+LOCAL UD	sd_dma_cpu = 0;
+LOCAL UD	sd_dma_size = ~(UD)0;
+LOCAL UW	sd_base_hz = 0;	/* the base clock, when the board says it */
+
+/* The bus address of [pa, pa + len), FALSE when the controller does not reach all of it */
+LOCAL BOOL sd_bus_addr( UD pa, UD len, UD *p_bus )
+{
+	if ( pa < sd_dma_cpu || pa + len < pa || pa + len - sd_dma_cpu > sd_dma_size ) {
+		return FALSE;
+	}
+	*p_bus = sd_dma_bus + ( pa - sd_dma_cpu );
+	return TRUE;
+}
 
 /* ---------------------------------------------------------------- low level */
 
@@ -519,9 +620,13 @@ LOCAL ER sd_set_clock( UW hz )
 	UH	val;
 	INT	i;
 
-	base = (in_w(SDHCI_CAPABILITIES) >> 8) & 0xff;	/* MHz */
-	if ( base == 0 ) base = 100;			/* the field may read zero */
-	base *= 1000000;
+	if ( sd_base_hz != 0 ) {
+		base = sd_base_hz;			/* as the board told it */
+	} else {
+		base = (in_w(SDHCI_CAPABILITIES) >> 8) & 0xff;	/* MHz */
+		if ( base == 0 ) base = 100;		/* the field may read zero */
+		base *= 1000000;
+	}
 
 	for ( div = 1; div < 2048; div <<= 1 ) {
 		if ( base / div <= hz ) break;
@@ -776,7 +881,7 @@ LOCAL ER sd_dma_wait( UD nsect )
 LOCAL ER sd_xfer_dma( UD start, void *buf, UD nsect, BOOL write )
 {
 	UD	len = nsect * BLK_SECTOR_SIZE;
-	UD	pa;
+	UD	pa, bus, desc;
 	UB	ctrl;
 	UH	blksz = 0;
 	ER	er;
@@ -785,37 +890,44 @@ LOCAL ER sd_xfer_dma( UD start, void *buf, UD nsect, BOOL write )
 		return E_NOSPT;
 	}
 	pa = (UD)VA2PA((UBINT)buf);
+	if ( !sd_bus_addr(pa, len, &bus) ) {
+		return E_NOSPT;			/* the controller does not reach it */
+	}
 	ctrl = (UB)(sd_in8(SDHCI_HOST_CONTROL) & ~CTRL_DMA_MASK);
 
 	switch ( sd.dma_mode ) {
 	case SD_DMA_ADMA2_64:
-		er = adma_build(pa, len);
+		if ( !sd_bus_addr(sd.desc_pa, PAGE_SIZE, &desc) ) {
+			return E_NOSPT;
+		}
+		er = adma_build(bus, len);
 		if ( er < E_OK ) {
 			return E_NOSPT;
 		}
 		sd_out8(SDHCI_HOST_CONTROL, (UB)(ctrl | CTRL_DMA_ADMA2_64));
-		sd_out64(SDHCI_ADMA_ADDRESS, sd.desc_pa);
+		sd_out64(SDHCI_ADMA_ADDRESS, desc);
 		break;
 
 	case SD_DMA_ADMA2_32:
-		if ( (pa + len) > 0x100000000ULL ) {
+		if ( (bus + len) > 0x100000000ULL || !sd_bus_addr(sd.desc_pa, PAGE_SIZE, &desc)
+		  || desc >= 0x100000000ULL ) {
 			return E_NOSPT;		/* the addresses do not reach it */
 		}
-		er = adma_build(pa, len);
+		er = adma_build(bus, len);
 		if ( er < E_OK ) {
 			return E_NOSPT;
 		}
 		sd_out8(SDHCI_HOST_CONTROL, (UB)(ctrl | CTRL_DMA_ADMA2_32));
-		out_w(SDHCI_ADMA_ADDRESS, (UW)sd.desc_pa);
+		out_w(SDHCI_ADMA_ADDRESS, (UW)desc);
 		break;
 
 	case SD_DMA_SDMA:
 		/* the single address register is 32 bits wide */
-		if ( (pa + len) > 0x100000000ULL ) {
+		if ( (bus + len) > 0x100000000ULL ) {
 			return E_NOSPT;
 		}
 		sd_out8(SDHCI_HOST_CONTROL, (UB)(ctrl | CTRL_DMA_SDMA));
-		out_w(SDHCI_SDMA_ADDRESS, (UW)pa);
+		out_w(SDHCI_SDMA_ADDRESS, (UW)bus);
 		blksz = BLKSZ_SDMA_BOUND_512K;
 		break;
 
@@ -840,6 +952,17 @@ LOCAL ER sd_xfer_dma( UD start, void *buf, UD nsect, BOOL write )
 	}
 
 	return E_OK;
+}
+
+/* Whether the controller reaches n sectors at p where they are */
+LOCAL BOOL sd_reaches( CONST void *p, UD n )
+{
+	UD	len = n * BLK_SECTOR_SIZE, bus;
+
+	if ( !buf_is_linear(p, len) ) {
+		return TRUE;		/* not a question of reach: the data port takes it */
+	}
+	return sd_bus_addr((UD)VA2PA((UBINT)p), len, &bus);
 }
 
 LOCAL ER sd_xfer( UD start, void *buf, UD nsect, BOOL write )
@@ -876,8 +999,9 @@ LOCAL ER sd_xfer( UD start, void *buf, UD nsect, BOOL write )
 			}
 		}
 		er = E_NOSPT;
-		if ( !pio && ((UBINT)p & (DMA_ALIGN - 1)) != 0 && sd.bounce != NULL ) {
-			/* off a cache line: through the bounce buffer */
+		if ( !pio && sd.bounce != NULL
+		  && ( ((UBINT)p & (DMA_ALIGN - 1)) != 0 || !sd_reaches(p, n) ) ) {
+			/* off a cache line, or where the controller does not reach: through the bounce buffer */
 			if ( n > BOUNCE_SECT ) n = BOUNCE_SECT;
 			if ( write ) {
 				knl_memcpy(sd.bounce, p, (SZ)( n * BLK_SECTOR_SIZE ));
@@ -996,6 +1120,199 @@ LOCAL CONST UB *sd_dma_name( void )
 /* ---------------------------------------------------------------- card */
 
 /*
+ * The size and the write protection from the card specific data. An SD
+ * card of version 2 counts its size in 512KB units; an SD card of
+ * version 1 and every MMC use the older form, which an MMC past 2GB
+ * leaves at its largest and says its true size in the extended CSD.
+ */
+LOCAL void sd_csd( CONST UW *resp, BOOL mmc )
+{
+	UW	csd_ver = (resp[3] >> 30) & 3;
+
+	if ( !mmc && csd_ver == 1 ) {
+		/* version 2: (C_SIZE + 1) * 512KB */
+		UD c_size = ((UD)(resp[1] >> 16) | ((UD)(resp[2] & 0x3f) << 16));
+		sd.nsect = (c_size + 1) * 1024;
+	} else {
+		UD c_size = (((UD)(resp[2] & 0x3ff) << 2) | (resp[1] >> 30));
+		UD mult   = 1UL << (((resp[1] >> 15) & 7) + 2);
+		UD rdblk  = 1UL << ((resp[2] >> 16) & 0x0f);
+		sd.nsect = (c_size + 1) * mult * rdblk / BLK_SECTOR_SIZE;
+	}
+	/*
+	 * A card that says it is write protected is written to by no
+	 * one: the protection is its own, set by a command, and a
+	 * write it refused would come back as an error half way
+	 * through what a file system meant to write. The two bits sit
+	 * in the same place in both kinds of CSD.
+	 */
+	sd.wp = 0;
+	if ( (resp[0] & CSD_TMP_WP) != 0 )  sd.wp |= SD_WP_TMP;
+	if ( (resp[0] & CSD_PERM_WP) != 0 ) sd.wp |= SD_WP_PERM;
+}
+
+LOCAL void sd_wp_note( void )
+{
+	if ( sd.wp != 0 ) {
+		tm_printf((UB*)"TessronOS: sd the card is%s%s%s: nothing is written to it\n",
+			  ( sd.wp & SD_WP_TMP ) ? " write protected (temporary)" : "",
+			  ( sd.wp & SD_WP_PERM ) ? " write protected (permanent)" : "",
+			  ( sd.wp & SD_WP_LOCKED ) ? " locked by a password" : "");
+	}
+}
+
+/*
+ * The extended CSD of an MMC: one block through the data port. The
+ * controller's DMA is not chosen yet when this runs, and the block is
+ * read twice at most, so the simplest path is the one taken.
+ */
+LOCAL ER mmc_ext_csd( UB *buf )
+{
+	UW	w;
+	INT	k;
+	ER	er;
+
+	er = sd_wait_idle();
+	if ( er < E_OK ) return er;
+
+	out_w(SDHCI_BLOCK_SIZE, (UW)EXT_CSD_SIZE | ( 1UL << 16 ));
+	sd_out16(SDHCI_TRANSFER_MODE, XFER_READ | XFER_BLKCNT_EN);
+	er = sd_cmd(CMD_MMC_SEND_EXT_CSD, 0, NULL);
+	if ( er >= E_OK ) {
+		er = wait_int(INT_BUF_READ_READY, NULL);
+	}
+	if ( er >= E_OK ) {
+		for ( k = 0; k < EXT_CSD_SIZE / 4; k++ ) {
+			w = in_w(SDHCI_BUFFER);
+			buf[k * 4 + 0] = (UB)w;
+			buf[k * 4 + 1] = (UB)(w >> 8);
+			buf[k * 4 + 2] = (UB)(w >> 16);
+			buf[k * 4 + 3] = (UB)(w >> 24);
+		}
+		er = wait_int(INT_XFER_COMPLETE, NULL);
+	}
+	if ( er < E_OK ) {
+		sd_reset(RESET_CMD);
+		sd_reset(RESET_DATA);
+	}
+	return er;
+}
+
+/*
+ * Widen the bus. The device is told the new width by a switch command
+ * and the controller by its host control register; whether the lines
+ * really carry the data is seen by reading the extended CSD again and
+ * comparing the part of it that only describes the device, which a
+ * width the board has not wired garbles. Eight lines are tried where
+ * the board wires them and the controller has them, then four; a width
+ * that fails is switched back to one line.
+ */
+LOCAL UB	mmc_ext[2][EXT_CSD_SIZE];
+
+LOCAL INT mmc_bus_width( void )
+{
+	UW	caps = in_w(SDHCI_CAPABILITIES);
+	UW	resp[4];
+	INT	width, i;
+	UB	ctrl;
+	ER	er;
+
+	width = ( knl_board.sd_width >= 8 && (caps & CAP_8BIT) != 0 ) ? 8 : 4;
+	for ( ; width >= 4; width -= 4 ) {
+		er = sd_cmd(CMD_MMC_SWITCH, MMC_SWITCH(EXT_CSD_BUS_WIDTH, ( width == 8 ) ? 2 : 1), resp);
+		if ( er >= E_OK ) {
+			er = sd_cmd(CMD_SEND_STATUS, sd.rca, resp);
+		}
+		if ( er < E_OK || (resp[0] & R1_SWITCH_ERROR) != 0 ) {
+			continue;			/* refused: nothing changed on the device */
+		}
+		ctrl = (UB)( sd_in8(SDHCI_HOST_CONTROL) & ~( CTRL_4BITBUS | CTRL_8BITBUS ) );
+		sd_out8(SDHCI_HOST_CONTROL, ctrl | ( ( width == 8 ) ? CTRL_8BITBUS : CTRL_4BITBUS ));
+
+		er = mmc_ext_csd(mmc_ext[1]);
+		for ( i = EXT_CSD_PROPS; er >= E_OK && i < EXT_CSD_SIZE && mmc_ext[0][i] == mmc_ext[1][i]; i++ ) ;
+		if ( er >= E_OK && i >= EXT_CSD_SIZE ) {
+			return width;
+		}
+		tm_printf((UB*)"TessronOS: sd eMMC %d data lines do not read back (%d at byte %d)\n",
+			  width, (INT)er, i);
+		(void)sd_cmd(CMD_MMC_SWITCH, MMC_SWITCH(EXT_CSD_BUS_WIDTH, 0), resp);
+		sd_out8(SDHCI_HOST_CONTROL, ctrl);
+	}
+	return 1;
+}
+
+/*
+ * Bring an MMC up: idle, operating conditions, the address it is given,
+ * the size, select, the bus width. Tried when the device did not answer
+ * as an SD card, which leaves the command line to be reset first.
+ */
+LOCAL ER mmc_init_card( void )
+{
+	UW	resp[4], ocr = 0;
+	INT	i;
+	ER	er;
+
+	sd_reset(RESET_CMD);
+	sd.mmc = TRUE;
+	sd.rca = 0;
+
+	sd_step = 11;
+	er = sd_cmd(CMD_GO_IDLE, 0, NULL);
+	if ( er < E_OK ) return er;
+	for ( i = 0; i < 1000; i++ ) {
+		er = sd_cmd(CMD_MMC_SEND_OP_COND, MMC_OCR_ARG, resp);
+		if ( er < E_OK ) return er;
+		ocr = resp[0];
+		if ( (ocr & OCR_BUSY) != 0 ) break;
+		tk_dly_tsk(1);
+	}
+	if ( (ocr & OCR_BUSY) == 0 ) {
+		return E_TMOUT;
+	}
+	sd.hc = ( (ocr & MMC_OCR_ACCESS) == MMC_OCR_SECTOR );
+
+	sd_step = 12;
+	er = sd_cmd(CMD_ALL_SEND_CID, 0, resp);
+	if ( er < E_OK ) return er;
+	sd.rca = MMC_RCA;
+	er = sd_cmd(CMD_MMC_SET_REL_ADDR, sd.rca, resp);
+	if ( er < E_OK ) return er;
+	er = sd_cmd(CMD_SEND_CSD, sd.rca, resp);
+	if ( er < E_OK ) return er;
+	sd_csd(resp, TRUE);
+
+	sd_step = 13;
+	er = sd_cmd(CMD_SELECT_CARD, sd.rca, resp);
+	if ( er < E_OK ) return er;
+	if ( (resp[0] & R1_CARD_IS_LOCKED) != 0 ) {
+		sd.wp |= SD_WP_LOCKED;
+	}
+	sd_wp_note();
+	er = sd_cmd(CMD_SET_BLOCKLEN, BLK_SECTOR_SIZE, NULL);
+	if ( er < E_OK ) return er;
+
+	sd_step = 14;
+	er = sd_set_clock(25000000);			/* the backward compatible timing */
+	if ( er < E_OK ) return er;
+	er = mmc_ext_csd(mmc_ext[0]);
+	if ( er < E_OK ) return er;
+	if ( sd.hc ) {
+		CONST UB *c = &mmc_ext[0][EXT_CSD_SEC_COUNT];
+		UD	n = (UD)c[0] | ((UD)c[1] << 8) | ((UD)c[2] << 16) | ((UD)c[3] << 24);
+
+		if ( n == 0 ) return E_IO;
+		sd.nsect = n;
+	}
+
+	sd_step = 15;
+	sd.width = (UB)mmc_bus_width();
+	sd.present = TRUE;
+
+	return E_OK;
+}
+
+/*
  * Bring the card up: idle, voltage, address, select, four bit bus.
  */
 LOCAL ER sd_init_card( void )
@@ -1005,17 +1322,23 @@ LOCAL ER sd_init_card( void )
 	ER	er;
 
 	/*
-	 * The card detect switch of the socket is wired to an always-on
-	 * GPIO (active low), not necessarily to the controller, whose own
-	 * bit may then say there is no card. The GPIO decides; the
+	 * The card detect switch of the Raspberry Pi 5's socket is wired to
+	 * an always-on GPIO (active low), not necessarily to the controller,
+	 * whose own bit may then say there is no card. The GPIO decides; the
 	 * controller is told the card is in through its detect test level,
-	 * as it may refuse to power the bus otherwise.
+	 * as it may refuse to power the bus otherwise. The Compute Module 5
+	 * has no such line: its eMMC is always there, and the Lite's carrier
+	 * slot is found out by trying a card. There the same pin selects the
+	 * Wi-Fi antenna and is not read at all.
 	 */
-#ifdef RPI5
-	if ( gpio_read(0, GIO_AON_SD_CD) == 1
+#if defined(RPI5)
+	if ( knl_board.sd == BOARD_SD_CD
+	  && gpio_read(0, GIO_AON_SD_CD) == 1
 	  && (in_w(SDHCI_PRESENT_STATE) & STATE_CARD_INSERTED) == 0 ) {
 		return E_NOEXS;
 	}
+#elif defined(RPI4)
+	/* the Raspberry Pi 4 family: no detect line the controller uses (broken-cd) */
 #else
 	if ( (in_w(SDHCI_PRESENT_STATE) & STATE_CARD_INSERTED) == 0 ) {
 		return E_NOEXS;
@@ -1030,6 +1353,14 @@ LOCAL ER sd_init_card( void )
 
 	sd_out8(SDHCI_POWER_CONTROL, 0x0e);		/* 3.3 volts */
 	sd_out8(SDHCI_POWER_CONTROL, 0x0f);		/* and on */
+	/*
+	 * The Compute Module 5's eMMC lines are held at 1.8V by the module
+	 * itself (its supply is 3.3V all the same); the controller is told
+	 * the level the lines are at.
+	 */
+	if ( knl_board.sd_1v8 ) {
+		sd_out16(SDHCI_HOST_CONTROL2, sd_in16(SDHCI_HOST_CONTROL2) | CTRL2_1V8);
+	}
 	sd_out8(SDHCI_TIMEOUT_CONTROL, 0x0e);		/* the longest timeout */
 	out_w(SDHCI_INT_ENABLE, 0xFFFFFFFF);		/* status bits, not signals */
 	out_w(SDHCI_SIGNAL_ENABLE, 0);			/* polled, no interrupt yet */
@@ -1040,14 +1371,20 @@ LOCAL ER sd_init_card( void )
 
 	sd_step = 3;
 	sd.rca = 0;
+	sd.mmc = FALSE;
+	sd.width = 1;
 	er = sd_cmd(CMD_GO_IDLE, 0, NULL);
 	if ( er < E_OK ) return er;
 
-	/* 2.7 to 3.6 volts, check pattern 0xAA */
+	/*
+	 * 2.7 to 3.6 volts, check pattern 0xAA. An eMMC ignores the command
+	 * in its idle state (its CMD8 is another one, taken only once it is
+	 * selected), which is how it is told from an SD card.
+	 */
 	sd_step = 4;
 	er = sd_cmd(CMD_SEND_IF_COND, 0x1AA, resp);
 	if ( er < E_OK || (resp[0] & 0xff) != 0xAA ) {
-		return E_NOSPT;				/* not an SD 2.0 card */
+		return mmc_init_card();			/* not an SD 2.0 card: an MMC? */
 	}
 
 	sd_step = 5;
@@ -1074,29 +1411,7 @@ LOCAL ER sd_init_card( void )
 	/* the size, from the card specific data */
 	er = sd_cmd(CMD_SEND_CSD, sd.rca, resp);
 	if ( er < E_OK ) return er;
-	{
-		UW	csd_ver = (resp[3] >> 30) & 3;
-
-		if ( csd_ver == 1 ) {
-			/* version 2: (C_SIZE + 1) * 512KB */
-			UD c_size = ((UD)(resp[1] >> 16) | ((UD)(resp[2] & 0x3f) << 16));
-			sd.nsect = (c_size + 1) * 1024;
-		} else {
-			UD c_size = (((UD)(resp[2] & 0x3ff) << 2) | (resp[1] >> 30));
-			UD mult   = 1UL << (((resp[1] >> 15) & 7) + 2);
-			UD rdblk  = 1UL << ((resp[2] >> 16) & 0x0f);
-			sd.nsect = (c_size + 1) * mult * rdblk / BLK_SECTOR_SIZE;
-		}
-		/*
-		 * A card that says it is write protected is written to by no
-		 * one: the protection is its own, set by a command, and a
-		 * write it refused would come back as an error half way
-		 * through what a file system meant to write.
-		 */
-		sd.wp = 0;
-		if ( (resp[0] & CSD_TMP_WP) != 0 )  sd.wp |= SD_WP_TMP;
-		if ( (resp[0] & CSD_PERM_WP) != 0 ) sd.wp |= SD_WP_PERM;
-	}
+	sd_csd(resp, FALSE);
 
 	sd_step = 7;
 	er = sd_cmd(CMD_SELECT_CARD, sd.rca, resp);
@@ -1104,16 +1419,12 @@ LOCAL ER sd_init_card( void )
 	if ( (resp[0] & R1_CARD_IS_LOCKED) != 0 ) {
 		sd.wp |= SD_WP_LOCKED;
 	}
-	if ( sd.wp != 0 ) {
-		tm_printf((UB*)"TessronOS: sd the card is%s%s%s: nothing is written to it\n",
-			  ( sd.wp & SD_WP_TMP ) ? " write protected (temporary)" : "",
-			  ( sd.wp & SD_WP_PERM ) ? " write protected (permanent)" : "",
-			  ( sd.wp & SD_WP_LOCKED ) ? " locked by a password" : "");
-	}
+	sd_wp_note();
 
 	er = sd_acmd(ACMD_SET_BUS_WIDTH, 2, NULL);	/* four bits */
 	if ( er >= E_OK ) {
 		sd_out8(SDHCI_HOST_CONTROL, sd_in8(SDHCI_HOST_CONTROL) | CTRL_4BITBUS);
+		sd.width = 4;
 	}
 	er = sd_cmd(CMD_SET_BLOCKLEN, BLK_SECTOR_SIZE, NULL);
 	if ( er < E_OK ) return er;
@@ -1229,7 +1540,7 @@ LOCAL ER sd_attr( INT unitno, T_DEVREQ *req )
 
 	info = (DiskInfo *)req->buf;
 	info->protect   = ( sd.wp != 0 );
-	info->removable = TRUE;			/* the card can be taken out */
+	info->removable = !sd.mmc;		/* a card can be taken out, an eMMC not */
 	info->blocksize = BLK_SECTOR_SIZE;
 	info->blockcont = (W)nsect;
 	req->asize = sizeof(DiskInfo);
@@ -1332,6 +1643,45 @@ EXPORT INT knl_sd_init( void )
 		}
 	}
 #endif
+#ifdef RPI4
+	{
+		UD	bus, cpu, size;
+		UW	hz = 0;
+
+		/*
+		 * What EMMC2 sees of memory. Without a device tree that says, the
+		 * first stepping's view is taken: it is the narrower one, and right
+		 * on the later stepping too for memory below 1GB.
+		 */
+		if ( knl_dtb_ranges("/emmc2bus", "dma-ranges", 0, &bus, &cpu, &size) >= E_OK && size != 0 ) {
+			sd_dma_bus = bus;
+			sd_dma_cpu = cpu;
+			sd_dma_size = size;
+		} else {
+			sd_dma_bus = 0xC0000000;
+			sd_dma_cpu = 0;
+			sd_dma_size = 0x40000000;
+		}
+		if ( knl_fw_value(TAG_GET_CLOCK_RATE, FW_CLOCK_EMMC2, &hz) >= E_OK
+		  && hz >= 1000000 && hz <= 400000000 ) {
+			sd_base_hz = hz;
+		}
+		{
+			UB	v[8];
+
+			if ( knl_bootarg(knl_bootargs, "tessronos.sd", v, sizeof(v))
+			  && v[0] == 'e' && v[1] == 'm' && v[2] == 'm' && v[3] == 'c' && v[4] == '\0' ) {
+				sd_base = DEV_BASE(EMMC1_PA);
+				sd_base_hz = 0;
+				tm_printf((UB*)"TessronOS: sd the EMMC controller at %08x instead (tessronos.sd=emmc)\n",
+					  (UW)EMMC1_PA);
+			}
+		}
+		tm_printf((UB*)"TessronOS: sd EMMC2 sees memory %08x%08x+%08x%08x at bus %08x%08x, clock %d Hz\n",
+			  (UW)( sd_dma_cpu >> 32 ), (UW)sd_dma_cpu, (UW)( sd_dma_size >> 32 ), (UW)sd_dma_size,
+			  (UW)( sd_dma_bus >> 32 ), (UW)sd_dma_bus, sd_base_hz);
+	}
+#endif
 
 	cmtx.exinf = NULL;
 	cmtx.mtxatr = TA_TFIFO;
@@ -1371,8 +1721,9 @@ EXPORT INT knl_sd_init( void )
 		return sd.devid;
 	}
 
-	tm_printf((UB*)"TessronOS: sda %d sectors (%d MB)%s, %d partitions (%s), %s\n",
-		(UW)sd.nsect, (UW)(sd.nsect >> 11), sd.hc ? ", HC" : "",
+	tm_printf((UB*)"TessronOS: sda %s %d sectors (%d MB)%s, %d data lines, %d partitions (%s), %s\n",
+		sd.mmc ? "eMMC" : "SD card",
+		(UW)sd.nsect, (UW)(sd.nsect >> 11), sd.hc ? ", HC" : "", (INT)sd.width,
 		sd.tbl.n, sd.tbl.gpt ? "GPT" : "MBR", sd_dma_name());
 	for ( i = 0; i < sd.tbl.n; i++ ) {
 		tm_printf((UB*)"TessronOS:   sda%d %d+%d\n", i,
@@ -1382,4 +1733,4 @@ EXPORT INT knl_sd_init( void )
 	return 1;
 }
 
-#endif /* RPI5 || QEMU_VIRT */
+#endif /* RPI5 || RPI4 || QEMU_VIRT */

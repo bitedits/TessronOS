@@ -38,6 +38,10 @@
 #include FT_ADVANCES_H
 #include FT_OUTLINE_H
 #include FT_TRIGONOMETRY_H
+#include FT_TRUETYPE_TABLES_H
+#include FT_TRUETYPE_TAGS_H
+
+#define VSUB_MAX	16		/* subtables of the vertical forms kept */
 
 typedef struct {
 	BOOL		used;
@@ -50,6 +54,18 @@ typedef struct {
 	FT_StreamRec	stream;			/* only while fd is open */
 	UB		*bytes;			/* the whole file, when it was read in */
 	UD		pages;			/* how many pages that took */
+
+	/*
+	 * The vertical forms (FN_ST_VERT): the face's table of
+	 * substitutions, read the first time a letter is wanted in them,
+	 * and where in it each single substitution of its 'vert' feature
+	 * begins.
+	 */
+	BOOL		gsub_read;
+	UB		*gsub;
+	UW		gsub_len;
+	INT		nvsub;
+	UW		vsub[VSUB_MAX];
 } FONT;
 
 LOCAL FT_Library	fn_lib = NULL;
@@ -511,6 +527,172 @@ LOCAL FT_Error load_styled( FONT *f, FT_UInt gi, FT_Int32 flags )
 	return err;
 }
 
+/* ---------------------------------------------------------------- vertical forms */
+
+/* A number of the table, big-endian; 0 past its end */
+LOCAL UW gs16( CONST FONT *f, UW at )
+{
+	if ( f->gsub == NULL || at + 2 > f->gsub_len ) {
+		return 0;
+	}
+
+	return ( (UW)f->gsub[at] << 8 ) | f->gsub[at + 1];
+}
+
+LOCAL UW gs32( CONST FONT *f, UW at )
+{
+	return ( gs16(f, at) << 16 ) | gs16(f, at + 2);
+}
+
+/*
+ * The table of substitutions read, and the single substitutions its
+ * 'vert' feature names found in it: through the list of features to the
+ * lookups they name, and through a lookup that only points elsewhere
+ * (type 7) to the subtable it points at. A lookup of another type is not
+ * a substitution of one letter for one and is passed over.
+ */
+LOCAL void vert_read( FONT *f )
+{
+	FT_ULong	len = 0;
+	UW		feat, look, nf, nl, i, k;
+	UW		idx[VSUB_MAX];
+	INT		nidx = 0;
+
+	f->gsub_read = TRUE;
+	f->nvsub = 0;
+	if ( FT_Load_Sfnt_Table(f->face, TTAG_GSUB, 0, NULL, &len) != 0
+	  || len < 10 || len > 0x00FFFFFFUL ) {
+		return;
+	}
+	f->gsub = (UB *)Kmalloc((SZ)len);
+	if ( f->gsub == NULL ) {
+		return;
+	}
+	if ( FT_Load_Sfnt_Table(f->face, TTAG_GSUB, 0, f->gsub, &len) != 0 ) {
+		Kfree(f->gsub);
+		f->gsub = NULL;
+		return;
+	}
+	f->gsub_len = (UW)len;
+	feat = gs16(f, 6);
+	look = gs16(f, 8);
+	nf = gs16(f, feat);
+	for ( i = 0; i < nf; i++ ) {
+		UW	rec = feat + 2 + 6 * i, ft, nlk;
+
+		if ( !( f->gsub[rec] == 'v' && f->gsub[rec + 1] == 'e'
+		     && f->gsub[rec + 2] == 'r' && f->gsub[rec + 3] == 't' )
+		  || rec + 6 > f->gsub_len ) {
+			continue;
+		}
+		ft = feat + gs16(f, rec + 4);
+		nlk = gs16(f, ft + 2);
+		for ( k = 0; k < nlk; k++ ) {
+			UW	li = gs16(f, ft + 4 + 2 * k);
+			INT	j;
+
+			for ( j = 0; j < nidx && idx[j] != li; j++ ) {
+				;
+			}
+			if ( j == nidx && nidx < VSUB_MAX ) {
+				idx[nidx++] = li;
+			}
+		}
+	}
+	nl = gs16(f, look);
+	for ( i = 0; i < (UW)nidx; i++ ) {
+		UW	lk, type, nsub;
+
+		if ( idx[i] >= nl ) {
+			continue;
+		}
+		lk = look + gs16(f, look + 2 + 2 * idx[i]);
+		type = gs16(f, lk);
+		nsub = gs16(f, lk + 4);
+		for ( k = 0; k < nsub && f->nvsub < VSUB_MAX; k++ ) {
+			UW	st = lk + gs16(f, lk + 6 + 2 * k);
+
+			if ( type == 7 ) {
+				if ( gs16(f, st + 2) != 1 ) {
+					continue;
+				}
+				st = st + gs32(f, st + 4);
+			} else if ( type != 1 ) {
+				continue;
+			}
+			if ( st < f->gsub_len ) {
+				f->vsub[f->nvsub++] = st;
+			}
+		}
+	}
+}
+
+/* Where a letter stands in a coverage table, or -1 when it is not in it */
+LOCAL INT cover_of( CONST FONT *f, UW cov, UW gi )
+{
+	UW	fmt = gs16(f, cov), n = gs16(f, cov + 2);
+	INT	lo = 0, hi = (INT)n - 1;
+
+	while ( lo <= hi ) {
+		INT	mid = ( lo + hi ) / 2;
+
+		if ( fmt == 1 ) {
+			UW	g = gs16(f, cov + 4 + 2 * (UW)mid);
+
+			if ( g == gi ) return mid;
+			if ( g < gi ) lo = mid + 1; else hi = mid - 1;
+		} else if ( fmt == 2 ) {
+			UW	r = cov + 4 + 6 * (UW)mid;
+			UW	a = gs16(f, r), b = gs16(f, r + 2);
+
+			if ( gi >= a && gi <= b ) return (INT)( gs16(f, r + 4) + gi - a );
+			if ( b < gi ) lo = mid + 1; else hi = mid - 1;
+		} else {
+			break;
+		}
+	}
+
+	return -1;
+}
+
+/* A letter in its vertical form, when the face has one; else as it is */
+LOCAL FT_UInt vert_of( FONT *f, FT_UInt gi )
+{
+	INT	i;
+
+	if ( !f->gsub_read ) {
+		vert_read(f);
+	}
+	for ( i = 0; i < f->nvsub; i++ ) {
+		UW	st = f->vsub[i], fmt = gs16(f, st);
+		INT	c = cover_of(f, st + gs16(f, st + 2), (UW)gi);
+
+		if ( c < 0 ) {
+			continue;
+		}
+		if ( fmt == 1 ) {
+			return (FT_UInt)( ( gi + gs16(f, st + 4) ) & 0xFFFFU );
+		}
+		if ( fmt == 2 && (UW)c < gs16(f, st + 4) ) {
+			return (FT_UInt)gs16(f, st + 6 + 2 * (UW)c);
+		}
+	}
+
+	return gi;
+}
+
+/* The letter's glyph in the face, in the form the face is set to */
+LOCAL FT_UInt glyph_index( FONT *f, UW cp )
+{
+	FT_UInt	gi = FT_Get_Char_Index(f->face, (FT_ULong)cp);
+
+	if ( ( f->style & FN_ST_VERT ) != 0 && gi != 0 ) {
+		gi = vert_of(f, gi);
+	}
+
+	return gi;
+}
+
 /* The letter, made if it is not kept. NULL when it cannot be made. */
 LOCAL CONST GLYPH *glyph_of( FONT *f, ID fid, UW cp, BOOL want_pixels )
 {
@@ -528,7 +710,7 @@ LOCAL CONST GLYPH *glyph_of( FONT *f, ID fid, UW cp, BOOL want_pixels )
 		return g;
 	}
 	fn_count.made++;
-	gi = FT_Get_Char_Index(face, (FT_ULong)cp);
+	gi = glyph_index(f, cp);
 	if ( !want_pixels ) {
 		/*
 		 * Only the width is wanted. Loading the outline without
@@ -751,6 +933,10 @@ EXPORT ER fn_open_mem( CONST UB *data, SZ size, INT index, ID *p_fid )
 	f->fd    = -1;			/* the bytes are the caller's, not a file */
 	f->bytes = NULL;
 	f->pages = 0;
+	f->gsub_read = FALSE;
+	f->gsub = NULL;
+	f->gsub_len = 0;
+	f->nvsub = 0;
 	f->used  = TRUE;
 	leave();
 
@@ -1000,6 +1186,10 @@ EXPORT ER fn_open_file( CONST char *path, INT index, ID *p_fid )
 	f->xpx  = 0;
 	f->angle = 0;
 	f->fd   = fd;
+	f->gsub_read = FALSE;
+	f->gsub = NULL;
+	f->gsub_len = 0;
+	f->nvsub = 0;
 	f->used = TRUE;
 	leave();
 
@@ -1030,6 +1220,12 @@ EXPORT ER fn_close( ID fid )
 	}
 	FT_Done_Face(f->face);
 	f->face = NULL;
+	if ( f->gsub != NULL ) {
+		Kfree(f->gsub);
+		f->gsub = NULL;
+	}
+	f->gsub_read = FALSE;
+	f->nvsub = 0;
 	if ( f->fd >= 0 ) {
 		fs_close(f->fd);
 		f->fd = -1;
@@ -1250,6 +1446,58 @@ LOCAL void blit( INT gid, CONST FT_Bitmap *bm, INT x, INT y, UW colour )
 }
 
 /*
+ * A letter drawn into an environment that records (dp_open_rec): handed
+ * on as the glyph of the face it is, placed by a matrix, rather than as
+ * pixels. The matrix does to the glyph's outline -- in pixels at the
+ * face's size, y going up -- what load_styled does before the outline
+ * is made into pixels, and then puts it where the pixels would have
+ * gone: across by the width asked for (xpx), leaned for italic, turned
+ * in its box when the face is turned. 'x' is where the pixels' origin
+ * is put on the line and 'base' the baseline.
+ */
+LOCAL void rec_letter( INT gid, FONT *f, UW cp, INT x, INT base, UW colour )
+{
+	T_DPRECGLY	r;
+	FT_UInt		gi = glyph_index(f, cp);
+	FT_Fixed	sx = ( f->xpx > 0 ) ? ( (FT_Fixed)f->xpx << 16 ) / f->px : 0x10000;
+	FT_Fixed	lean = ( ( f->style & FN_ST_ITALIC ) != 0 ) ? 0x3333 : 0;
+
+	knl_memset(&r, 0, sizeof(r));
+	r.fid = fn_id_of(f);
+	r.gi = (UINT)gi;
+	r.cp = cp;
+	r.px = f->px;
+	r.colour = colour;
+	r.bold = (W)( (FT_Fixed)bold_extra(f) << 16 );
+	if ( f->angle == 0 ) {
+		r.m[0] = (W)sx;
+		r.m[1] = 0;
+		r.m[2] = (W)lean;
+		r.m[3] = -0x10000;
+		r.m[4] = (W)( (FT_Fixed)x << 16 );
+		r.m[5] = (W)( (FT_Fixed)base << 16 );
+	} else {
+		FT_Angle	a = (FT_Angle)f->angle << 16;
+		FT_Fixed	c = FT_Cos(a), sn = FT_Sin(a), fx = 0;
+		FT_Pos		adv, cy, h, w;
+
+		(void)FT_Get_Advance(f->face, gi, FT_LOAD_NO_HINTING, &fx);
+		adv = (FT_Pos)( fx >> 10 ) + (FT_Pos)bold_extra(f) * 64;
+		w = turn_box(f, adv, &cy, &h);
+		/* the outline across and leaned, then turned about the middle of its box */
+		r.m[0] = (W)FT_MulFix(c, sx);
+		r.m[1] = (W)FT_MulFix(sn, sx);
+		r.m[2] = (W)( FT_MulFix(c, lean) + sn );
+		r.m[3] = (W)( FT_MulFix(sn, lean) - c );
+		r.m[4] = (W)( ( (FT_Fixed)x << 16 ) + ( w << 10 ) / 2
+			      - FT_MulFix(c, ( adv << 10 ) / 2) - FT_MulFix(sn, cy << 10) );
+		r.m[5] = (W)( ( (FT_Fixed)base << 16 ) - ( cy << 10 )
+			      + FT_MulFix(c, cy << 10) - FT_MulFix(sn, ( adv << 10 ) / 2) );
+	}
+	(void)dp_rec_glyph(gid, &r);
+}
+
+/*
  * The one walk. `gid` below zero means do not draw; `limit` at or above
  * zero means stop when the pen would pass it and say how many bytes fit.
  */
@@ -1268,6 +1516,8 @@ LOCAL INT walk( INT gid, FONT *f, INT x, INT y, CONST UB *s, UW colour,
 			 ? (FT_LOAD_RENDER
 			    | FT_LOAD_NO_HINTING)
 			 : (FT_LOAD_DEFAULT | FT_LOAD_NO_HINTING);
+	/* a page being recorded takes the glyphs themselves, not their pixels */
+	BOOL	rec = (BOOL)( gid >= 0 && dp_is_rec(gid) );
 
 	while ( s[i] != '\0' ) {
 		UW		cp;
@@ -1275,7 +1525,17 @@ LOCAL INT walk( INT gid, FONT *f, INT x, INT y, CONST UB *s, UW colour,
 		CONST GLYPH	*g;
 
 		cp = utf8_next(s + i, &n);
-		g = glyph_of(f, fn_id_of(f), cp, (BOOL)( gid >= 0 ));
+		g = glyph_of(f, fn_id_of(f), cp, (BOOL)( gid >= 0 && !rec ));
+		if ( rec ) {
+			adv = ( g != NULL ) ? g->adv : f->px;
+			if ( limit >= 0 && pen + adv > limit ) {
+				break;
+			}
+			rec_letter(gid, f, cp, x + pen, y, colour);
+			pen += adv;
+			i += n;
+			continue;
+		}
 		if ( g != NULL ) {
 			adv = g->adv;
 			if ( limit >= 0 && pen + adv > limit ) {
@@ -1299,7 +1559,7 @@ LOCAL INT walk( INT gid, FONT *f, INT x, INT y, CONST UB *s, UW colour,
 			continue;
 		}
 		{
-			FT_UInt	gi = FT_Get_Char_Index(face, (FT_ULong)cp);
+			FT_UInt	gi = glyph_index(f, cp);
 
 			/* not in the store and not the form it holds: make
 			   it and put it down without keeping it */
@@ -1375,6 +1635,208 @@ EXPORT INT fn_width( ID fid, CONST UB *utf8 )
 
 	enter();
 	r = fn_width_nl(fid, utf8);
+	leave();
+	return r;
+}
+
+/* ---------------------------------------------------------------- down the line */
+
+/*
+ * How far the top of the em square is above the baseline, in pixels: the
+ * typographic ascender of OS/2 when it and the descender span the em, as
+ * they do in a face made for Japanese; else 88 hundredths of the size.
+ */
+LOCAL INT em_top( CONST FONT *f )
+{
+	TT_OS2	*os2 = (TT_OS2 *)FT_Get_Sfnt_Table(f->face, FT_SFNT_OS2);
+	INT	upem = f->face->units_per_EM;
+
+	if ( os2 != NULL && upem > 0 && os2->sTypoAscender > 0 ) {
+		INT	span = os2->sTypoAscender - os2->sTypoDescender;
+
+		if ( span >= upem - upem / 10 && span <= upem + upem / 10 ) {
+			return ( os2->sTypoAscender * f->px + upem / 2 ) / upem;
+		}
+	}
+
+	return f->px * 88 / 100;
+}
+
+/*
+ * What a face with no vertical form of a letter does with it: the long
+ * vowel, the dashes, the waves, the brackets, the colons and the lines
+ * of boxes are turned a quarter clockwise (1); the comma and the full
+ * stop go to the upper right of their box (2), the small kana a little
+ * up and to the right (3). Anything else stands as it is (0).
+ */
+LOCAL INT vert_kind( UW c )
+{
+	if ( c == 0x30FC || c == 0x2015 || c == 0x2014 || c == 0x2010
+	  || c == 0xFF5E || c == 0x301C || c == 0x2026 || c == 0x2025
+	  || c == 0xFF08 || c == 0xFF09 || ( c >= 0x3008 && c <= 0x3011 )
+	  || c == 0x3014 || c == 0x3015 || c == 0xFF3B || c == 0xFF3D
+	  || c == 0xFF5B || c == 0xFF5D || c == 0xFF1D || c == 0xFF1A
+	  || c == 0xFF1B || c == 0xFF3F || c == 0xFFE3
+	  || ( c >= 0x2500 && c <= 0x254B ) ) {
+		return 1;
+	}
+	if ( c == 0x3001 || c == 0x3002 || c == 0xFF0C || c == 0xFF0E ) {
+		return 2;
+	}
+	if ( c == 0x3041 || c == 0x3043 || c == 0x3045 || c == 0x3047
+	  || c == 0x3049 || c == 0x3063 || c == 0x3083 || c == 0x3085
+	  || c == 0x3087 || c == 0x308E || c == 0x30A1 || c == 0x30A3
+	  || c == 0x30A5 || c == 0x30A7 || c == 0x30A9 || c == 0x30C3
+	  || c == 0x30E3 || c == 0x30E5 || c == 0x30E7 || c == 0x30EE
+	  || c == 0x30F5 || c == 0x30F6 ) {
+		return 3;
+	}
+
+	return 0;
+}
+
+LOCAL BOOL has_vert_nl( FONT *f, UW cp )
+{
+	FT_UInt	gi = FT_Get_Char_Index(f->face, (FT_ULong)cp);
+
+	return (BOOL)( gi != 0 && vert_of(f, gi) != gi );
+}
+
+/*
+ * The walk down a line: each letter in a box the size's height tall (a
+ * turned one as tall as its turned box), across the box centred on cx.
+ */
+LOCAL INT vwalk( INT gid, FONT *f, INT cx, INT y, CONST UB *s, UW colour )
+{
+	INT	pen = 0, i = 0, em = f->px, top = em_top(f);
+	INT	keep = f->angle;
+	ID	fid = fn_id_of(f);
+	BOOL	rec = (BOOL)( gid >= 0 && dp_is_rec(gid) );
+
+	while ( s[i] != '\0' ) {
+		INT		n = 1, dx = 0, dy = 0, x, base, adv;
+		UW		cp = utf8_next(s + i, &n);
+		BOOL		turned = (BOOL)( keep != 0 );
+		CONST GLYPH	*g;
+
+		if ( keep == 0 && ( f->style & FN_ST_VERT ) != 0 ) {
+			INT	k = vert_kind(cp);
+
+			if ( k != 0 && !has_vert_nl(f, cp) ) {
+				if ( k == 1 ) {
+					f->angle = 90;
+					turned = TRUE;
+				} else if ( k == 2 ) {
+					dx = em * 6 / 10;
+					dy = -( em * 6 / 10 );
+				} else {
+					dx = em / 10;
+					dy = -( em / 10 );
+				}
+			}
+		}
+		g = glyph_of(f, fid, cp, (BOOL)( gid >= 0 && !rec ));
+		if ( g == NULL ) {
+			f->angle = keep;
+			pen += em;
+			i += n;
+			continue;
+		}
+		if ( turned ) {
+			adv = g->up + g->down;
+			x = cx - g->adv / 2;
+			base = y + pen + g->up;
+		} else {
+			adv = em;
+			x = cx - g->adv / 2 + dx;
+			base = y + pen + top + dy;
+		}
+		if ( rec ) {
+			rec_letter(gid, f, cp, x, base, colour);
+		} else if ( gid >= 0 && g->w > 0 && g->h > 0 && g->bm != NULL ) {
+			UD	t = fn_now();
+
+			if ( g->gray ) {
+				dp_put_gray(gid, x + g->left, base - g->top,
+					    g->bm, g->pitch, g->w, g->h, colour);
+			} else {
+				dp_put_mono(gid, x + g->left, base - g->top,
+					    g->bm, g->pitch, g->w, g->h, colour);
+			}
+			fn_count.ms_put += fn_now() - t;
+			fn_count.put++;
+		}
+		f->angle = keep;
+		pen += adv;
+		i += n;
+	}
+
+	return pen;
+}
+
+EXPORT INT fn_vdraw( INT gid, ID fid, INT cx, INT y, CONST UB *utf8, UW colour )
+{
+	FONT	*f;
+	INT	r;
+
+	enter();
+	f = fn_of(fid);
+	if ( f == NULL ) {
+		r = E_ID;
+	} else if ( utf8 == NULL || f->px == 0 ) {
+		r = E_PAR;
+	} else {
+		r = vwalk(gid, f, cx, y, utf8, colour);
+	}
+	leave();
+	return r;
+}
+
+EXPORT INT fn_vwidth( ID fid, CONST UB *utf8 )
+{
+	return fn_vdraw(-1, fid, 0, 0, utf8, 0);
+}
+
+/*
+ * A table of the face's file, by its tag (four letters, the first the
+ * highest byte), as it is in the file: what a file of pages needs to
+ * carry the face with it. With buf NULL only the length is said.
+ */
+EXPORT ER fn_sfnt_table( ID fid, UW tag, UB *buf, SZ *p_len )
+{
+	FONT		*f;
+	FT_ULong	len;
+	ER		r = E_OK;
+
+	if ( p_len == NULL ) {
+		return E_PAR;
+	}
+	enter();
+	f = fn_of(fid);
+	if ( f == NULL ) {
+		r = E_ID;
+	} else {
+		len = ( buf != NULL ) ? (FT_ULong)*p_len : 0;
+		if ( FT_Load_Sfnt_Table(f->face, (FT_ULong)tag, 0, buf, &len) != 0 ) {
+			r = E_NOEXS;
+		} else {
+			*p_len = (SZ)len;
+		}
+	}
+	leave();
+	return r;
+}
+
+EXPORT BOOL fn_has_vert( ID fid, UW cp )
+{
+	FONT	*f;
+	BOOL	r = FALSE;
+
+	enter();
+	f = fn_of(fid);
+	if ( f != NULL ) {
+		r = has_vert_nl(f, cp);
+	}
 	leave();
 	return r;
 }

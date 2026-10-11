@@ -40,3 +40,4 @@
 	SVCSTUB	tm_putstring,	TSN_TM_PUTSTRING
 	SVCSTUB	ts_rcv_msg,	TSN_TS_RCV_MSG
 	SVCSTUB	ts_snd_msg,	TSN_TS_SND_MSG
+	SVCSTUB	ts_get_arg,	TSN_TS_GET_ARG

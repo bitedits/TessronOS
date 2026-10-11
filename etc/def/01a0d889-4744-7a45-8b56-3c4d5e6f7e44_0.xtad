@@ -1,0 +1,10 @@
+<tad version="1.0" encoding="UTF-8" filename="キー配列の表示">
+<document>
+<p>キー配列の表示</p>
+<p>キーに書く文字。英字か、かな。メニューの定義。</p>
+</document>
+<menu>
+<item code="view.latin">英字</item>
+<item code="view.kana">かな</item>
+</menu>
+</tad>

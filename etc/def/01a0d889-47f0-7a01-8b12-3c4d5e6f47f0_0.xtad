@@ -1,0 +1,11 @@
+<tad version="1.0" encoding="UTF-8" filename="トレーのメニュー">
+<document>
+<p>トレーのメニュー</p>
+<p>トレー小物の窓のメニュー。閉じる、表示(詳細表示、一覧表示、付せん表示)と、ウインドウ、小物、実行。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2048-7e01-9a10-c1d2e3f44801"/></include>
+<item>表示<link id="01a0d889-47f1-7a12-8b23-3c4d5e6f47f1_0.xtad" vobjid="01a0d8c3-2048-7e02-9a10-c1d2e3f44802"/></item>
+<include><link id="01a0d889-46bd-7f9c-8bad-e3f4a5b6c789_0.xtad" vobjid="01a0d8c3-2048-7e03-9a10-c1d2e3f44803"/></include>
+</menu>
+</tad>

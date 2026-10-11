@@ -24,6 +24,7 @@
 #include "kernel.h"
 #include <tk/tkernel.h>
 #include <ts/proc.h>
+#include <ts/sysdef.h>
 #include "obj.h"
 
 #define OBU_SALT	16
@@ -205,6 +206,133 @@ EXPORT ER ob_login( CONST TS_UUID *user, CONST UB *password )
 	Kfree(crd);
 
 	return er;
+}
+
+/* ---------------------------------------------------------------- the administrator's account */
+
+/* Whether a user has a password: its metadata has the hash */
+LOCAL BOOL has_password( CONST TS_UUID *user )
+{
+	UB	*j, s[80];
+	INT	len = 0, u;
+	BOOL	has = FALSE;
+
+	j = (UB *)Kmalloc(OB_META_MAX);
+	if ( j == NULL ) {
+		return FALSE;
+	}
+	if ( knl_ob_meta_read(user, j, OB_META_MAX, &len) >= E_OK
+	  && ( u = knl_oj_path(j, len, "tessronos", "user") ) >= 0 && j[u] == '{' ) {
+		has = (BOOL)( knl_oj_str(j, len, knl_oj_member(j, len, u, "hash"), s, sizeof(s)) > 0 );
+	}
+	Kfree(j);
+	return has;
+}
+
+/*
+ * 管理者, made the first time it is asked for on the volume of the
+ * system box: a user of the administrators' and the ordinary users'
+ * groups, with no password, owned by the system and closed to everyone
+ * else -- its metadata keeps the hash of the password.
+ */
+LOCAL ER admin_ready( void )
+{
+	T_OBCRE	c;
+	T_OBREF	r;
+	T_OBPRT	*p;
+	TS_UUID	box, got;
+	UB	*j;
+	INT	n;
+	ER	er;
+
+	if ( ob_ref_obj(&ob_user_admin, &r) >= E_OK ) {
+		return E_OK;
+	}
+	j = (UB *)Kmalloc(512);
+	p = (T_OBPRT *)Kmalloc(sizeof(T_OBPRT));
+	if ( j == NULL || p == NULL ) {
+		if ( j != NULL ) Kfree(j);
+		if ( p != NULL ) Kfree(p);
+		return E_NOMEM;
+	}
+	n = knl_oj_put(j, 0, 512, "{\"name\":\"管理者\",\"refCount\":0,\"recordCount\":0,"
+			  "\"editable\":true,\"deletable\":false,\"readable\":true,"
+			  "\"tessronos\":{\"user\":{\"name\":\"管理者\",\"groups\":[");
+	n = knl_oj_put_uuid(j, n, 512, &ob_group_admin);
+	n = knl_oj_put(j, n, 512, ",");
+	n = knl_oj_put_uuid(j, n, 512, &ob_group_users);
+	n = knl_oj_put(j, n, 512, "]}}}");
+	knl_memset(p, 0, sizeof(*p));
+	p->owner = ob_user_system;
+	p->group = ob_group_admin;
+	p->mode = 0600;
+	p->attr = OB_A_PERM;
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_STORAGE;
+	c.sub = OB_S_FILE;
+	c.json = j;
+	c.jsonsz = ( n > 0 ) ? n : 0;
+	c.prt = p;
+	c.uuid = ob_user_admin;
+	if ( ts_str_to_uuid(SYSDEF_SYSTEM_BOX, &box) >= E_OK && ob_ref_obj(&box, &r) >= E_OK ) {
+		c.near = box;
+	}
+	er = ( n > 0 ) ? ob_cre_obj(&c, &got) : E_LIMIT;
+	Kfree(j);
+	Kfree(p);
+	return er;
+}
+
+EXPORT ER knl_ob_admin_check( CONST UB *password )
+{
+	CONST T_OBCRD	*s = knl_ob_session_crd();
+	T_OBCRD		*crd;
+	ER		er;
+
+	if ( password == NULL ) {
+		/* only whether 管理者 has a password */
+		er = admin_ready();
+		return ( er < E_OK ) ? er : has_password(&ob_user_admin) ? E_OK : E_NOEXS;
+	}
+	crd = (T_OBCRD *)Kmalloc(sizeof(T_OBCRD));
+	if ( crd == NULL ) {
+		return E_NOMEM;
+	}
+	/* the person logged in, when an administrator: that one's own password */
+	if ( s != &knl_ob_crd_person
+	  && knl_ob_login_check(&s->user, password, crd) >= E_OK && knl_ob_is_admin(crd) ) {
+		Kfree(crd);
+		return E_OK;
+	}
+	er = admin_ready();
+	if ( er >= E_OK && !has_password(&ob_user_admin) ) {
+		er = E_NOEXS;
+	} else if ( er >= E_OK ) {
+		er = knl_ob_login_check(&ob_user_admin, password, crd);
+		if ( er >= E_OK && !knl_ob_is_admin(crd) ) {
+			er = E_OACV;
+		}
+	}
+	knl_memset(crd, 0, sizeof(*crd));
+	Kfree(crd);
+	return ( er == E_OBJ ) ? E_OACV : er;
+}
+
+EXPORT ER knl_ob_admin_set( CONST UB *password )
+{
+	ER	er;
+
+	if ( password == NULL || password[0] == 0 ) {
+		return E_PAR;
+	}
+	er = admin_ready();
+	if ( er < E_OK ) {
+		return er;
+	}
+	if ( has_password(&ob_user_admin) ) {
+		return E_OBJ;			/* changed only by one who knows it */
+	}
+	return ob_set_pwd(&ob_user_admin, password);
 }
 
 /* A new password: for the user itself, or an administrator */

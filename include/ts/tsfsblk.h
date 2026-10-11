@@ -34,7 +34,7 @@ extern "C" {
 #define TSFSBLK_BLOCK_SIZE	4096
 #define TSFSBLK_SECT_PER_BLK	(TSFSBLK_BLOCK_SIZE / 512)
 #define TSFSBLK_LABEL_MAX	64
-#define TSFSBLK_MAX_VOL		4	/* native volumes mounted at once */
+#define TSFSBLK_MAX_VOL		4096	/* native volumes mounted at once (CNF_MAX_VOL); an entry is made when it is first wanted */
 #define TSFSBLK_MIN_BLOCKS	1024	/* the smallest volume that is made */
 
 /* The common head of a management block (design 11.6.4) */
@@ -83,6 +83,7 @@ typedef struct {
 	TS_UUID	root_uuid;		/* the object a volume opens with */
 	TS_UUID	sysbox_uuid;		/* the system box */
 	TS_UUID	domain_uuid;		/* the protection domain */
+	TS_UUID	xref_uuid;		/* the object that keeps what other volumes link to here */
 	UD	compat, ro_compat, incompat;
 	UW	state;			/* TSFSBLK_ST_* */
 	UW	err_kind;		/* TSFSBLK_ERR_* of the last error */
@@ -105,6 +106,26 @@ IMPORT ER ts_format_blk( CONST char *devnm, CONST char *label );
 IMPORT ID ts_opn_vol_blk( CONST char *devnm );
 IMPORT ER ts_cls_vol_blk( ID vol );
 IMPORT ER ts_ref_vol_blk( ID vol, T_TSFSBLK_SB *pk_sb );
+
+/*
+ * The object the volume opens with, its top (T_TSFSBLK_SB.root_uuid),
+ * written into the superblock; NULL takes it away. E_RONLY on a volume
+ * that does not write.
+ */
+IMPORT ER ts_set_top_blk( ID vol, CONST TS_UUID *uuid );
+
+/*
+ * The object that keeps the links other volumes make to objects of this
+ * one (T_TSFSBLK_SB.xref_uuid, design 8.3), written into the superblock;
+ * NULL takes it away. A volume written before it was known has none.
+ */
+IMPORT ER ts_set_xref_blk( ID vol, CONST TS_UUID *uuid );
+
+/*
+ * Entries of the volume table made so far, how many are volumes open
+ * now, and the blocks the caches of every volume hold together.
+ */
+IMPORT INT knl_tsfsblk_slots( INT *p_used, UD *p_cached );
 
 /*
  * A run of up to `want` blocks. Fewer come back when the volume is
@@ -240,6 +261,66 @@ IMPORT ER ts_set_jrnl_blk( ID vol, UD start, UD blocks, UD seq );
 IMPORT ER knl_tsfsblk_raw_read( ID vol, UD blk, void *buf );
 IMPORT ER knl_tsfsblk_raw_write( ID vol, UD blk, CONST void *buf );
 IMPORT ER knl_tsfsblk_raw_flush( ID vol );
+
+/*
+ * For the check of a whole volume (ts/tsfsck.h). ts_blk_good looks at a
+ * common head as ts_blk_check does but records nothing. ts_blk_group
+ * says where a group is and what it uses itself; ts_blk_map copies one
+ * of its map blocks as the volume holds it now (E_OBJ when the block
+ * does not match the checksum its head keeps).
+ */
+typedef struct {
+	UD	first;			/* the group's first block, its head */
+	UD	len;			/* its blocks */
+	UD	meta;			/* the blocks at its front it uses itself */
+	UD	free;			/* free, as the head counts */
+	UD	map_first;
+	UW	map_blocks;
+	BOOL	spare;			/* holds a copy of the superblock */
+} T_TSFSAGREF;
+
+IMPORT ER ts_blk_good( ID vol, CONST UB *buf, CONST char *magic, UD blk );
+IMPORT ER ts_blk_group( ID vol, UD n, T_TSFSAGREF *pk );
+IMPORT ER ts_blk_map( ID vol, UD n, UW k, UB *buf );
+
+/* A map block put back whole (one made again from the blocks in use), its checksum and count with it */
+IMPORT ER ts_blk_map_put( ID vol, UD n, UW k, CONST UB *buf );
+
+/*
+ * The block layer's own blocks looked at without writing: the copies of
+ * the superblock that do not pass (the spares among them), the group
+ * heads on the medium that are not the ones in memory, the maps that do
+ * not match their heads' checksums, and the groups whose count of free
+ * blocks is not their map's. ts_blk_mend writes what memory holds
+ * correctly over the first two and counts the free blocks again from
+ * the maps; a map gone bad stays as it is.
+ */
+typedef struct {
+	UD	sb_bad;
+	UD	sb_first;		/* where the first one is */
+	UD	head_bad;
+	UD	head_first;
+	UD	map_bad;
+	UD	map_first;
+	UD	count_bad;
+	UD	count_first;		/* the group's number */
+	BOOL	error;			/* an error is recorded, or was found in this run */
+	BOOL	rdonly;			/* the volume does not write */
+} T_TSFSBLKINSP;
+
+IMPORT ER ts_blk_inspect( ID vol, T_TSFSBLKINSP *pk );
+IMPORT ER ts_blk_mend( ID vol, UD *p_mended );
+
+/*
+ * A volume an error stopped is let write while it is repaired (on) and
+ * stopped again afterwards unless the error was cleared (off);
+ * ts_blk_checked clears the error once a check finds the volume whole.
+ */
+IMPORT ER ts_blk_writable( ID vol, BOOL on );
+
+/* The log of a volume opened with an error recorded put back, for a volume nothing else has open */
+IMPORT ER ts_blk_replay( ID vol );
+IMPORT ER ts_blk_checked( ID vol );
 
 #ifdef __cplusplus
 }

@@ -1,0 +1,17 @@
+<tad version="1.0" encoding="UTF-8" filename="基本表計算の文字サイズ">
+<document>
+<p>基本表計算の文字サイズ</p>
+<p>基本表計算のセルの文字サイズ(ポイント)。メニューの定義。</p>
+</document>
+<menu>
+<item code="size" value="9">9</item>
+<item code="size" value="10">10</item>
+<item code="size" value="11">11</item>
+<item code="size" value="12">12</item>
+<item code="size" value="14">14</item>
+<item code="size" value="16">16</item>
+<item code="size" value="18">18</item>
+<item code="size" value="24">24</item>
+<item code="size" value="32">32</item>
+</menu>
+</tad>

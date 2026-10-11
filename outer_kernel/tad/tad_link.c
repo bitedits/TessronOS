@@ -220,13 +220,30 @@ LOCAL T_TADNODE *nth_link( CONST T_TAD *doc, INT i )
 	return NULL;
 }
 
+/* A UUID at the head of a part of an id, the slash or the rest after it */
+LOCAL ER part_uuid( CONST UB *s, TS_UUID *p_uuid )
+{
+	char	t[TS_UUID_STRLEN + 1];
+	INT	i;
+
+	for ( i = 0; i < TS_UUID_STRLEN; i++ ) {
+		t[i] = (char)s[i];
+	}
+	t[i] = 0;
+	return ts_str_to_uuid(t, p_uuid);
+}
+
 /*
  * The id attribute: the UUID of the object, and the record of it the
- * name points at, which is 0 when the id is the bare UUID.
+ * name points at, which is 0 when the id is the bare UUID; before them
+ * the volume and the machine it is on, when the id says (design 8.3).
  */
-LOCAL ER id_of( CONST T_TADNODE *nd, TS_UUID *p_uuid, INT *p_recno )
+LOCAL ER id_of( CONST T_TADNODE *nd, T_VOBJ *pk )
 {
 	CONST UB	*id = tad_attr(nd, "id");
+	TS_UUID		*p_uuid = &pk->target;
+	INT		*p_recno = &pk->recno;
+	INT		at, vat, mat;
 	SZ		len;
 	ER		er;
 
@@ -234,10 +251,17 @@ LOCAL ER id_of( CONST T_TADNODE *nd, TS_UUID *p_uuid, INT *p_recno )
 		return E_PAR;
 	}
 	len = tad_slen((CONST char *)id);
+	at = ts_lnk_split(id, (INT)len, &vat, &mat);
+	if ( ( vat >= 0 && part_uuid(id + vat, &pk->tvol) < E_OK )
+	  || ( mat >= 0 && part_uuid(id + mat, &pk->tmach) < E_OK ) ) {
+		return E_PAR;
+	}
+	id += at;
+	len -= at;
 	if ( len < TS_UUID_STRLEN ) {
 		return E_PAR;
 	}
-	er = ts_str_to_uuid((CONST char *)id, p_uuid);
+	er = part_uuid(id, p_uuid);
 	if ( er < E_OK ) {
 		return E_PAR;
 	}
@@ -261,7 +285,7 @@ LOCAL ER vobj_of( CONST T_TADNODE *nd, T_VOBJ *pk )
 	for ( i = 0; i < (INT)sizeof(T_VOBJ); i++ ) {
 		((UB *)pk)[i] = 0;
 	}
-	er = id_of(nd, &pk->target, &pk->recno);
+	er = id_of(nd, pk);
 	if ( er < E_OK ) {
 		return er;
 	}
@@ -474,7 +498,7 @@ LOCAL void put_attr_col( LNKBLD *b, CONST char *name, UW v )
 LOCAL ER build_link( T_TAD *doc, CONST T_VOBJ *pk, T_TADNODE **p_nd )
 {
 	LNKBLD	b;
-	UB	id[TS_UUID_STRLEN + 16];
+	UB	id[TS_LNK_PART * 2 + TS_UUID_STRLEN + 16];
 	UB	num[16];
 	SZ	n;
 	ER	er;
@@ -499,11 +523,27 @@ LOCAL ER build_link( T_TAD *doc, CONST T_VOBJ *pk, T_TADNODE **p_nd )
 	}
 	put_attr(&b, "vobjid", id);
 
-	er = ts_uuid_to_str(&pk->target, (char *)id, sizeof(id));
+	/* the machine and the volume first, outer first, when they are another */
+	n = 0;
+	if ( !uuid_zero(&pk->tmach) && !uuid_zero(&pk->tvol) ) {
+		if ( ts_uuid_to_str(&pk->tmach, (char *)id, sizeof(id)) < E_OK ) {
+			return E_PAR;
+		}
+		n = TS_UUID_STRLEN;
+		id[n++] = '/';
+	}
+	if ( !uuid_zero(&pk->tvol) ) {
+		if ( ts_uuid_to_str(&pk->tvol, (char *)id + n, sizeof(id) - n) < E_OK ) {
+			return E_PAR;
+		}
+		n += TS_UUID_STRLEN;
+		id[n++] = '/';
+	}
+	er = ts_uuid_to_str(&pk->target, (char *)id + n, sizeof(id) - n);
 	if ( er < E_OK ) {
 		return er;
 	}
-	n = TS_UUID_STRLEN;
+	n += TS_UUID_STRLEN;
 	id[n++] = '_';
 	n += put_num(id + n, pk->recno);
 	id[n++] = '.';
@@ -684,8 +724,8 @@ LOCAL BOOL same_attr( CONST UB *a, CONST UB *b )
 EXPORT ER tad_lnk_set( T_TAD *doc, CONST T_VOBJ *pk_vobj )
 {
 	T_TADNODE	*nd, *fresh;
+	T_VOBJ		*was;
 	TS_UUID		target = tad_uuid_zero;
-	INT		recno = 0;
 	ER		er;
 
 	if ( doc == NULL || pk_vobj == NULL ) {
@@ -695,7 +735,13 @@ EXPORT ER tad_lnk_set( T_TAD *doc, CONST T_VOBJ *pk_vobj )
 	if ( nd == NULL ) {
 		return E_NOEXS;
 	}
-	er = id_of(nd, &target, &recno);
+	was = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
+	if ( was == NULL ) {
+		return E_NOMEM;
+	}
+	er = id_of(nd, was);
+	target = was->target;
+	Kfree(was);
 	if ( er < E_OK ) {
 		return er;
 	}
@@ -982,8 +1028,8 @@ EXPORT ER tad_lnk_reorder( T_TAD *doc, CONST TS_UUID *order, INT n )
 EXPORT ER tad_lnk_del( T_TAD *doc, CONST TS_UUID *vobjid )
 {
 	T_TADNODE	*nd, *after;
+	T_VOBJ		*was;
 	TS_UUID		target = tad_uuid_zero;
-	INT		recno = 0;
 	ER		er;
 
 	if ( doc == NULL || vobjid == NULL ) {
@@ -993,7 +1039,13 @@ EXPORT ER tad_lnk_del( T_TAD *doc, CONST TS_UUID *vobjid )
 	if ( nd == NULL ) {
 		return E_NOEXS;
 	}
-	er = id_of(nd, &target, &recno);
+	was = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
+	if ( was == NULL ) {
+		return E_NOMEM;
+	}
+	er = id_of(nd, was);
+	target = was->target;
+	Kfree(was);
 	if ( er < E_OK ) {
 		return er;			/* it says nothing about what it points at */
 	}

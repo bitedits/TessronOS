@@ -9,19 +9,27 @@
 
 /*
  *	so_dns.c
- *	Names looked up through a DNS server (RFC 1035; design 12.6).
+ *	Names looked up through a DNS server (RFC 1035, RFC 3596; design 12.6).
  *
- *	A stub resolver: one question for the IPv4 addresses (type A) of a
- *	name goes to the name server over UDP, and the addresses in the
- *	answer come back, following whatever aliases (CNAME) the server put
- *	in with them. The server is the one the settings name, else the one
- *	that came with the address (so_api.c). Each server is asked in turn,
- *	four rounds, waiting twice as long each round (1, 2, 4 and 8 s).
+ *	A stub resolver: a question for the IPv4 addresses (type A) of a
+ *	name, for its IPv6 addresses (type AAAA), or both at once, goes to
+ *	the name server over UDP, and the addresses in the answers come
+ *	back, following whatever aliases (CNAME) the server put in with them.
+ *	The servers are the IPv4 ones the settings name, else the ones that
+ *	came with the address (so_api.c), then the IPv6 ones the settings
+ *	name and those the routers named (so_getdns6, so_slaac.c); each is
+ *	asked over its own family. Each server is
+ *	asked in turn, four rounds, waiting twice as long each round (1, 2,
+ *	4 and 8 s). When both kinds are asked for, both questions go to a
+ *	server together and its answers are waited for together: once one
+ *	has come, the other half a second more, and once there are addresses
+ *	of one kind the asking stops.
  *
  *	Answers are kept for as long as they said they hold, up to five
  *	minutes, so that a page that asks for the same host again and again
- *	asks the network once. A name that does not exist is kept for half a
- *	minute. "localhost" is always 127.0.0.1.
+ *	asks the network once; each kind of a name is kept on its own. A name
+ *	that does not exist, or has no address of the kind asked, is kept for
+ *	half a minute. "localhost" is always 127.0.0.1 and ::1.
  */
 
 #include "kernel.h"
@@ -40,22 +48,49 @@
 #define DNS_CACHE_ADDRS		4
 #define DNS_TTL_MAX_S		300
 #define DNS_TTL_NONAME_S	30
+#define DNS_SERVERS		4
+#define DNS_OTHER_MS		500		/* the wait for the second kind once the first has answered */
 
 #define T_A			1
 #define T_CNAME			5
+#define T_AAAA			28
 #define C_IN			1
+
+/* The kinds of question: A and AAAA */
+#define K_A			0
+#define K_AAAA			1
+#define KINDS			2
+
+/* Where a kind stands while it is asked */
+#define ST_WANT			0		/* not answered yet */
+#define ST_OK			1		/* addresses */
+#define ST_NONE			2		/* no such name, or none of the kind */
+#define ST_DONE			3		/* not asked: in the cache, or not wanted */
 
 typedef struct {
 	char	name[DNS_NAME_MAX + 1];	/* "" free */
+	INT	kind;
 	UD	until_ns;		/* monotonic time it holds until */
-	UW	addr[DNS_CACHE_ADDRS];
-	INT	n;			/* 0: the name does not exist */
+	UB	addr[DNS_CACHE_ADDRS][16];
+	INT	n;			/* 0: no such name, or none of the kind */
 	UINT	used;
 } DNS_ENT;
+
+/* What one kind has come to */
+typedef struct {
+	INT	st;
+	UH	id;
+	UB	addr[DNS_CACHE_ADDRS][16];
+	INT	n;
+	UINT	ttl;
+} KIND;
 
 LOCAL DNS_ENT	*dns_cache;
 LOCAL T_SPLOCK	dns_lock;
 LOCAL UINT	dns_clock = 0;
+
+LOCAL CONST UH	kind_type[KINDS] = { T_A, T_AAAA };
+LOCAL CONST INT	kind_len[KINDS] = { 4, 16 };
 
 LOCAL UD now_ns( void )
 {
@@ -81,11 +116,11 @@ LOCAL BOOL same_name( CONST char *a, CONST char *b )
 
 /* ---------------------------------------------------------------- the cache */
 
-LOCAL BOOL cache_get( CONST char *name, UW *addrs, INT max, INT *p_n )
+LOCAL BOOL cache_get( CONST char *name, INT kind, KIND *k )
 {
 	UD	now = now_ns();
 	UINT	imask;
-	INT	i, k;
+	INT	i, j;
 	BOOL	hit = FALSE;
 
 	if ( dns_cache == NULL ) {
@@ -95,11 +130,12 @@ LOCAL BOOL cache_get( CONST char *name, UW *addrs, INT max, INT *p_n )
 	for ( i = 0; i < DNS_CACHE; i++ ) {
 		DNS_ENT	*e = &dns_cache[i];
 
-		if ( e->name[0] != '\0' && e->until_ns > now && same_name(e->name, name) ) {
-			for ( k = 0; k < e->n && k < max; k++ ) {
-				addrs[k] = e->addr[k];
+		if ( e->name[0] != '\0' && e->kind == kind && e->until_ns > now && same_name(e->name, name) ) {
+			for ( j = 0; j < e->n; j++ ) {
+				knl_memcpy(k->addr[j], e->addr[j], 16);
 			}
-			*p_n = k;
+			k->n = e->n;
+			k->st = ( e->n > 0 ) ? ST_OK : ST_NONE;
 			e->used = ++dns_clock;
 			hit = TRUE;
 			break;
@@ -109,7 +145,7 @@ LOCAL BOOL cache_get( CONST char *name, UW *addrs, INT max, INT *p_n )
 	return hit;
 }
 
-LOCAL void cache_put( CONST char *name, CONST UW *addrs, INT n, UINT ttl_s )
+LOCAL void cache_put( CONST char *name, INT kind, CONST KIND *k, UINT ttl_s )
 {
 	DNS_ENT	*e = NULL;
 	UINT	imask;
@@ -127,7 +163,8 @@ LOCAL void cache_put( CONST char *name, CONST UW *addrs, INT n, UINT ttl_s )
 	}
 	ISpinLock(&dns_lock, &imask);
 	for ( i = 0; i < DNS_CACHE; i++ ) {
-		if ( dns_cache[i].name[0] != '\0' && same_name(dns_cache[i].name, name) ) {
+		if ( dns_cache[i].name[0] != '\0' && dns_cache[i].kind == kind
+		  && same_name(dns_cache[i].name, name) ) {
 			e = &dns_cache[i];
 			break;
 		}
@@ -136,9 +173,10 @@ LOCAL void cache_put( CONST char *name, CONST UW *addrs, INT n, UINT ttl_s )
 		}
 	}
 	knl_memcpy(e->name, name, len + 1);
-	e->n = ( n > DNS_CACHE_ADDRS ) ? DNS_CACHE_ADDRS : n;
+	e->kind = kind;
+	e->n = ( k->n > DNS_CACHE_ADDRS ) ? DNS_CACHE_ADDRS : k->n;
 	for ( i = 0; i < e->n; i++ ) {
-		e->addr[i] = addrs[i];
+		knl_memcpy(e->addr[i], k->addr[i], 16);
 	}
 	e->until_ns = now_ns() + (UD)ttl_s * 1000000000ULL;
 	e->used = ++dns_clock;
@@ -157,8 +195,8 @@ LOCAL UW get32( CONST UB *p )
 	return ( (UW)p[0] << 24 ) | ( (UW)p[1] << 16 ) | ( (UW)p[2] << 8 ) | p[3];
 }
 
-/* The question for the addresses of name; its length, or 0 when the name will not go */
-LOCAL INT make_query( UB *m, UH id, CONST char *name )
+/* The question of one type for name; its length, or 0 when the name will not go */
+LOCAL INT make_query( UB *m, UH id, CONST char *name, UH type )
 {
 	INT	at = 12, label, i;
 
@@ -185,7 +223,7 @@ LOCAL INT make_query( UB *m, UH id, CONST char *name )
 		}
 	}
 	m[at++] = 0;
-	m[at++] = 0; m[at++] = T_A;
+	m[at++] = (UB)( type >> 8 ); m[at++] = (UB)type;
 	m[at++] = 0; m[at++] = C_IN;
 	return at;
 }
@@ -206,22 +244,23 @@ LOCAL INT skip_name( CONST UB *m, INT len, INT at )
 }
 
 /*
- * The answer read: E_OK with the addresses, E_NOEXS when the name does
- * not exist, E_IO when this server could not say. ttl is the shortest
- * of the records used.
+ * An answer read into the kind it answers: ST_OK with the addresses,
+ * ST_NONE when the name does not exist or has none of the kind, E_IO
+ * when this server could not say. ttl is the shortest of the records
+ * used.
  */
-LOCAL ER read_answer( CONST UB *m, INT len, UH id, UW *addrs, INT max, INT *p_n, UINT *p_ttl )
+LOCAL INT read_answer( CONST UB *m, INT len, INT kind, KIND *k )
 {
 	INT	at, i, qd, an, n = 0;
 	UINT	ttl = DNS_TTL_MAX_S;
 	UH	type, class, rdlen;
 
-	if ( len < 12 || get16(m) != id || ( m[2] & 0x80 ) == 0 ) {
+	if ( len < 12 || ( m[2] & 0x80 ) == 0 ) {
 		return E_IO;
 	}
 	switch ( m[3] & 0x0f ) {
 	case 0:		break;
-	case 3:		*p_ttl = DNS_TTL_NONAME_S; return E_NOEXS;
+	case 3:		k->n = 0; k->ttl = DNS_TTL_NONAME_S; return ST_NONE;
 	default:	return E_IO;
 	}
 	qd = get16(m + 4);
@@ -245,44 +284,138 @@ LOCAL ER read_answer( CONST UB *m, INT len, UH id, UW *addrs, INT max, INT *p_n,
 		if ( at + 10 + rdlen > len ) {
 			return E_IO;
 		}
-		if ( type == T_A && class == C_IN && rdlen == 4 && n < max ) {
-			UW	a;
-
-			knl_memcpy(&a, m + at + 10, 4);	/* stays in network byte order */
-			addrs[n++] = a;
+		if ( type == kind_type[kind] && class == C_IN && rdlen == kind_len[kind]
+		  && n < DNS_CACHE_ADDRS ) {
+			knl_memset(k->addr[n], 0, 16);
+			knl_memcpy(k->addr[n], m + at + 10, rdlen);	/* stays in network byte order */
+			n++;
 			if ( get32(m + at + 4) < ttl ) {
 				ttl = get32(m + at + 4);
 			}
 		}
 		at += 10 + rdlen;
 	}
-	*p_n = n;
-	*p_ttl = ttl;
-	return ( n > 0 ) ? E_OK : E_NOEXS;
+	k->n = n;
+	k->ttl = ( n > 0 ) ? ttl : DNS_TTL_NONAME_S;
+	return ( n > 0 ) ? ST_OK : ST_NONE;
 }
 
 /* ---------------------------------------------------------------- asking */
 
-/* One question to one server, waiting up to ms for its answer */
-LOCAL ER ask( INT s, UW server, CONST UB *q, INT qlen, UH id, INT ms,
-	      UW *addrs, INT max, INT *p_n, UINT *p_ttl )
+LOCAL BOOL same16( CONST UB *a, CONST UB *b )
 {
-	struct sockaddr_in	to;
-	struct pollfd		p;
-	UB			m[DNS_MSG_MAX];
-	INT			n;
-	UD			until = now_ns() + (UD)ms * 1000000ULL, now;
-	ER			er;
+	INT	i;
+
+	for ( i = 0; i < 16 && a[i] == b[i]; i++ ) ;
+	return ( i == 16 );
+}
+
+/* The servers to ask, IPv4 ones first; how many */
+LOCAL INT servers( T_SOADDR *srv )
+{
+	UB	a6[16];
+	INT	i, j, n = 0;
+	BOOL	dup;
+
+	for ( i = 0; i < 2; i++ ) {
+		UW	a = knl_so_dns_server(i);
+
+		if ( a == 0 || ( n > 0 && srv[0].family == AF_INET && *(UW *)srv[0].addr == a ) ) {
+			continue;
+		}
+		knl_memset(&srv[n], 0, sizeof(srv[n]));
+		srv[n].family = AF_INET;
+		knl_memcpy(srv[n].addr, &a, 4);
+		n++;
+	}
+	for ( i = 0; i < DNS_SERVERS && n < DNS_SERVERS; i++ ) {
+		if ( so_getdns6(i, a6) != E_OK ) {
+			break;
+		}
+		for ( dup = FALSE, j = 0; j < n; j++ ) {
+			if ( srv[j].family == AF_INET6 && same16(srv[j].addr, a6) ) dup = TRUE;
+		}
+		if ( dup ) {
+			continue;
+		}
+		knl_memset(&srv[n], 0, sizeof(srv[n]));
+		srv[n].family = AF_INET6;
+		knl_memcpy(srv[n].addr, a6, 16);
+		if ( a6[0] == 0xfe && ( a6[1] & 0xc0 ) == 0x80 ) {
+			srv[n].scope = so_ifnametoindex(SO_IFNAME);	/* a link-local server */
+		}
+		n++;
+	}
+	return n;
+}
+
+/* The socket to ask a server of 'family' over, made when it is first needed */
+LOCAL INT sock_for( INT family, INT *s4, INT *s6 )
+{
+	INT	*p = ( family == AF_INET6 ) ? s6 : s4;
+
+	if ( *p < 0 ) {
+		*p = so_socket(family, SOCK_DGRAM, 0);
+	}
+	return *p;
+}
+
+/*
+ * The kinds still wanted, asked of one server together, waiting up to
+ * ms for all their answers. Each answered kind is ST_OK or ST_NONE
+ * after; a server that could not say leaves it ST_WANT. E_IO when the
+ * question could not be sent at all.
+ */
+LOCAL ER ask( INT s, CONST T_SOADDR *server, CONST char *name, KIND *k, INT ms )
+{
+	union {
+		struct sockaddr_in	in;
+		struct sockaddr_in6	in6;
+	}		to;
+	socklen_t	tolen;
+	struct pollfd	p;
+	UB		m[DNS_MSG_MAX];
+	INT		n, kind, left = 0, st;
+	UD		until = now_ns() + (UD)ms * 1000000ULL, now;
+	BOOL		asked[KINDS];
 
 	knl_memset(&to, 0, sizeof(to));
-	to.sin_len = sizeof(to);
-	to.sin_family = AF_INET;
-	to.sin_port = so_htons(DNS_PORT);
-	to.sin_addr.s_addr = server;
-	if ( so_sendto(s, q, qlen, 0, (struct sockaddr *)&to, sizeof(to)) != qlen ) {
+	if ( server->family == AF_INET6 ) {
+		to.in6.sin6_len = sizeof(to.in6);
+		to.in6.sin6_family = AF_INET6;
+		to.in6.sin6_port = so_htons(DNS_PORT);
+		knl_memcpy(&to.in6.sin6_addr, server->addr, 16);
+		to.in6.sin6_scope_id = server->scope;
+		tolen = sizeof(to.in6);
+	} else {
+		to.in.sin_len = sizeof(to.in);
+		to.in.sin_family = AF_INET;
+		to.in.sin_port = so_htons(DNS_PORT);
+		knl_memcpy(&to.in.sin_addr.s_addr, server->addr, 4);
+		tolen = sizeof(to.in);
+	}
+	for ( kind = 0; kind < KINDS; kind++ ) {
+		asked[kind] = FALSE;
+		if ( k[kind].st != ST_WANT ) {
+			continue;
+		}
+		(void)ts_get_random(&k[kind].id, sizeof(k[kind].id));
+		if ( kind > 0 && k[kind].id == k[0].id ) {
+			k[kind].id++;
+		}
+		n = make_query(m, k[kind].id, name, kind_type[kind]);
+		if ( n == 0 ) {
+			return E_PAR;
+		}
+		if ( so_sendto(s, m, n, 0, (struct sockaddr *)&to, tolen) == n ) {
+			asked[kind] = TRUE;
+			left++;
+		}
+	}
+	if ( left == 0 ) {
 		return E_IO;
 	}
-	for ( ;; ) {
+	while ( left > 0 ) {
 		now = now_ns();
 		if ( now >= until ) {
 			return E_TMOUT;
@@ -294,96 +427,152 @@ LOCAL ER ask( INT s, UW server, CONST UB *q, INT qlen, UH id, INT ms,
 			continue;
 		}
 		n = so_recv(s, m, sizeof(m), MSG_DONTWAIT);
-		if ( n <= 0 ) {
+		if ( n < 12 ) {
 			continue;
 		}
-		er = read_answer(m, n, id, addrs, max, p_n, p_ttl);
-		if ( er == E_IO && ( n < 2 || get16(m) != id ) ) {
-			continue;		/* not the answer to this question */
+		for ( kind = 0; kind < KINDS; kind++ ) {
+			if ( asked[kind] && get16(m) == k[kind].id ) break;
 		}
-		return er;
+		if ( kind == KINDS ) {
+			continue;		/* not the answer to these questions */
+		}
+		asked[kind] = FALSE;
+		left--;
+		st = read_answer(m, n, kind, &k[kind]);
+		if ( st == ST_OK || st == ST_NONE ) {
+			k[kind].st = st;
+		}
+		/* one answered: the other is not waited for long, a server may never answer it */
+		now = now_ns();
+		if ( left > 0 && until > now + (UD)DNS_OTHER_MS * 1000000ULL ) {
+			until = now + (UD)DNS_OTHER_MS * 1000000ULL;
+		}
+	}
+	return E_OK;
+}
+
+LOCAL void cache_ready( void )
+{
+	DNS_ENT	*c;
+	UINT	imask;
+
+	if ( dns_cache != NULL ) {
+		return;
+	}
+	c = (DNS_ENT *)Kcalloc(DNS_CACHE, sizeof(DNS_ENT));
+	ISpinLock(&dns_lock, &imask);
+	if ( dns_cache == NULL ) {
+		dns_cache = c;
+		c = NULL;
+	}
+	ISpinUnlock(&dns_lock, &imask);
+	if ( c != NULL ) {
+		Kfree(c);
 	}
 }
 
 /*
- * The IPv4 addresses of name, in network byte order: up to max of them
- * into addrs, how many in *p_n. E_NOEXS when there is no such name,
- * E_TMOUT when no server answered, E_IO when there is no server.
+ * The addresses of name of the family asked (AF_INET, AF_INET6, or
+ * AF_UNSPEC for both): up to max of them into addrs, the IPv4 ones
+ * first, how many in *p_n. E_NOEXS when there is no such name or it has
+ * no address of the family, E_TMOUT when no server answered, E_IO when
+ * there is no server.
  */
-EXPORT ER knl_so_dns_query( CONST char *name, INT family, UW *addrs, INT max, INT *p_n )
+EXPORT ER knl_so_dns_query( CONST char *name, INT family, T_SOADDR *addrs, INT max, INT *p_n )
 {
-	UB	q[DNS_MSG_MAX];
-	UW	server[2];
-	UINT	ttl = 0;
-	UH	id;
-	INT	s, qlen, round, i, nsrv = 0;
-	ER	er = E_TMOUT, e;
+	T_SOADDR	srv[DNS_SERVERS];
+	KIND		k[KINDS];
+	INT		s4 = -1, s6 = -1, s, round, i, j, kind, nsrv, n = 0;
+	BOOL		pending = FALSE;
+	ER		e, er = E_TMOUT;
 
 	*p_n = 0;
-	if ( family != AF_INET || max <= 0 ) {
+	if ( max <= 0 || ( family != AF_INET && family != AF_INET6 && family != AF_UNSPEC ) ) {
 		return E_NOSPT;
 	}
+	for ( kind = 0; kind < KINDS; kind++ ) {
+		knl_memset(&k[kind], 0, sizeof(k[kind]));
+		k[kind].st = ( family == AF_UNSPEC
+			    || ( family == AF_INET && kind == K_A )
+			    || ( family == AF_INET6 && kind == K_AAAA ) ) ? ST_WANT : ST_DONE;
+	}
+
 	if ( same_name(name, "localhost") ) {
-		addrs[0] = so_htonl(INADDR_LOOPBACK);
-		*p_n = 1;
-		return E_OK;
-	}
-	if ( dns_cache == NULL ) {
-		DNS_ENT	*c = (DNS_ENT *)Kcalloc(DNS_CACHE, sizeof(DNS_ENT));
-		UINT	imask;
+		if ( k[K_A].st == ST_WANT ) {
+			UW	lo = so_htonl(INADDR_LOOPBACK);
 
-		ISpinLock(&dns_lock, &imask);
-		if ( dns_cache == NULL ) {
-			dns_cache = c;
-			c = NULL;
+			knl_memcpy(k[K_A].addr[0], &lo, 4);
+			k[K_A].n = 1;
 		}
-		ISpinUnlock(&dns_lock, &imask);
-		if ( c != NULL ) {
-			Kfree(c);
+		if ( k[K_AAAA].st == ST_WANT ) {
+			knl_memset(k[K_AAAA].addr[0], 0, 16);
+			k[K_AAAA].addr[0][15] = 1;
+			k[K_AAAA].n = 1;
 		}
+		goto out;
 	}
-	if ( cache_get(name, addrs, max, p_n) ) {
-		return ( *p_n > 0 ) ? E_OK : E_NOEXS;
-	}
-
-	for ( i = 0; i < 2; i++ ) {
-		UW	a = knl_so_dns_server(i);
-
-		if ( a != 0 && ( nsrv == 0 || server[0] != a ) ) {
-			server[nsrv++] = a;
+	cache_ready();
+	for ( kind = 0; kind < KINDS; kind++ ) {
+		if ( k[kind].st == ST_WANT ) {
+			(void)cache_get(name, kind, &k[kind]);
 		}
 	}
+	if ( k[K_A].st != ST_WANT && k[K_AAAA].st != ST_WANT ) {
+		goto out;
+	}
+
+	nsrv = servers(srv);
 	if ( nsrv == 0 ) {
-		return E_IO;
-	}
-	(void)ts_get_random(&id, sizeof(id));
-	qlen = make_query(q, id, name);
-	if ( qlen == 0 ) {
-		return E_PAR;
-	}
-	s = so_socket(AF_INET, SOCK_DGRAM, 0);
-	if ( s < 0 ) {
-		return (ER)s;
+		er = E_IO;
+		goto out;
 	}
 	for ( round = 0; round < DNS_ROUNDS; round++ ) {
 		for ( i = 0; i < nsrv; i++ ) {
-			e = ask(s, server[i], q, qlen, id, DNS_WAIT_MS << round,
-				addrs, max, p_n, &ttl);
-			if ( e == E_OK || e == E_NOEXS ) {
-				er = e;
+			s = sock_for(srv[i].family, &s4, &s6);
+			if ( s < 0 ) {
+				continue;
+			}
+			e = ask(s, &srv[i], name, k, DNS_WAIT_MS << round);
+			if ( e == E_PAR ) {
+				er = E_PAR;
 				goto done;
 			}
 			if ( e == E_IO ) {
 				er = E_IO;
 			}
+			if ( ( k[K_A].st != ST_WANT && k[K_AAAA].st != ST_WANT )
+			  || k[K_A].st == ST_OK || k[K_AAAA].st == ST_OK ) {
+				goto done;	/* all answered, or addresses of one kind to go on with */
+			}
 		}
 	}
 done:
-	so_close(s);
-	if ( er == E_OK ) {
-		cache_put(name, addrs, *p_n, ttl);
-	} else if ( er == E_NOEXS ) {
-		cache_put(name, addrs, 0, DNS_TTL_NONAME_S);
+	if ( s4 >= 0 ) so_close(s4);
+	if ( s6 >= 0 ) so_close(s6);
+	for ( kind = 0; kind < KINDS; kind++ ) {
+		if ( k[kind].ttl != 0 && ( k[kind].st == ST_OK || k[kind].st == ST_NONE ) ) {
+			cache_put(name, kind, &k[kind], k[kind].ttl);
+		}
+	}
+out:
+	for ( kind = 0; kind < KINDS; kind++ ) {
+		if ( k[kind].st == ST_WANT && k[kind].n == 0 ) {
+			pending = TRUE;			/* no server said */
+			continue;
+		}
+		for ( j = 0; j < k[kind].n && n < max; j++ ) {
+			knl_memset(&addrs[n], 0, sizeof(addrs[n]));
+			addrs[n].family = ( kind == K_A ) ? AF_INET : AF_INET6;
+			knl_memcpy(addrs[n].addr, k[kind].addr[j], kind_len[kind]);
+			n++;
+		}
+	}
+	*p_n = n;
+	if ( n > 0 ) {
+		return E_OK;
+	}
+	if ( !pending && er != E_PAR ) {
+		return E_NOEXS;			/* every kind asked was answered: there is none */
 	}
 	return er;
 }

@@ -28,7 +28,9 @@
 #include "btron/mozc_kserver.h"
 #include "btron/tc_codec.h"
 #include "data_manager/data_manager.h"
+#include "dictionary/user_dictionary_storage.h"
 #include "engine/engine.h"
+#include "protocol/user_dictionary_storage.pb.h"
 #include "ts/tsmozc.h"
 
 using mozc::btron::EVENT;
@@ -42,6 +44,7 @@ using mozc::btron::W;
 namespace {
 
 std::unique_ptr<MozcKserver> engine;
+mozc::Engine *converter = nullptr;	/* the engine inside, which reloads its dictionaries */
 std::string note;
 
 /* The TIP record, turned into the composition as the desktop takes it */
@@ -148,6 +151,7 @@ extern "C" int tsmozc_start(const void *dict, unsigned long size)
 	if ( !made.ok() ) {
 		return -1;
 	}
+	converter = made->get();
 	engine = std::make_unique<MozcKserver>(*std::move(made));
 	note = MozcKserver::profile_note;
 
@@ -260,4 +264,58 @@ extern "C" void tsmozc_flush(void)
 	if ( engine ) {
 		(void)engine->EndTrans(0);
 	}
+}
+
+/*
+ * The user dictionary written as the engine keeps it -- one dictionary
+ * in its storage file in the profile directory -- and the engine told to
+ * read it again. The file is the engine's copy: what the person
+ * registered is kept by the system, which gives it here whole.
+ */
+extern "C" int tsmozc_words(const char *tsv, unsigned long size)
+{
+	using Entry = mozc::user_dictionary::UserDictionary::Entry;
+	using Pos = mozc::user_dictionary::UserDictionary;
+
+	if ( !engine || converter == nullptr ) {
+		return -1;
+	}
+	mozc::UserDictionaryStorage storage(
+		mozc::UserDictionaryStorage::GetDefaultUserDictionaryFileName());
+	mozc::user_dictionary::UserDictionaryStorage &proto = storage.GetProto();
+	mozc::user_dictionary::UserDictionary *dic = proto.add_dictionaries();
+
+	dic->set_id(1);
+	dic->set_name("ユーザ辞書");
+	for ( unsigned long at = 0; at < size; ) {
+		unsigned long end = at, t1, t2;
+
+		while ( end < size && tsv[end] != '\n' ) end++;
+		for ( t1 = at; t1 < end && tsv[t1] != '\t'; t1++ ) ;
+		for ( t2 = t1 + 1; t2 < end && tsv[t2] != '\t'; t2++ ) ;
+		if ( t1 > at && t2 < end && t2 > t1 + 1 ) {
+			int pos = 0;
+
+			for ( unsigned long i = t2 + 1; i < end && tsv[i] >= '0' && tsv[i] <= '9'; i++ ) {
+				pos = pos * 10 + ( tsv[i] - '0' );
+			}
+			if ( !Pos::PosType_IsValid(pos) || pos == 0 ) {
+				pos = Pos::NOUN;
+			}
+			Entry *e = dic->add_entries();
+			e->set_key(std::string(tsv + at, t1 - at));
+			e->set_value(std::string(tsv + t1 + 1, t2 - t1 - 1));
+			e->set_pos(static_cast<Pos::PosType>(pos));
+		}
+		at = end + 1;
+	}
+	if ( !storage.Lock() ) {
+		return -1;
+	}
+	const bool saved = storage.Save().ok();
+	storage.UnLock();
+	if ( !saved ) {
+		return -1;
+	}
+	return converter->ReloadAndWait() ? 0 : -1;
 }

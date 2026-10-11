@@ -1,0 +1,10 @@
+<tad version="1.0" encoding="UTF-8" filename="予定表の印刷">
+<document>
+<p>予定表の印刷</p>
+<p>予定表の窓の印刷。表示している月か、年月実身のある月をすべて、PDFのファイルに印刷する。メニューの定義。</p>
+</document>
+<menu>
+<item code="print.month" key="P">この月を印刷...</item>
+<item code="print.all">全部の月を印刷...</item>
+</menu>
+</tad>

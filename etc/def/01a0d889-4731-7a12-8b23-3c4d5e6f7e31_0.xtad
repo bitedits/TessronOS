@@ -1,0 +1,11 @@
+<tad version="1.0" encoding="UTF-8" filename="マイクロカードの表示">
+<document>
+<p>マイクロカードの表示</p>
+<p>一覧表示、表示設定、状態表示。メニューの定義。</p>
+</document>
+<menu>
+<item code="list">一覧表示</item>
+<item code="view">表示設定</item>
+<item code="status">状態表示</item>
+</menu>
+</tad>

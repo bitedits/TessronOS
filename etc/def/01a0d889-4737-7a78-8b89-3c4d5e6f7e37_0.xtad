@@ -1,0 +1,11 @@
+<tad version="1.0" encoding="UTF-8" filename="マイクロカードの項目の種類">
+<document>
+<p>マイクロカードの項目の種類</p>
+<p>設計画面で項目の種類を選ぶ。メニューの定義。</p>
+</document>
+<menu>
+<item code="kind.text">文字</item>
+<item code="kind.number">数値</item>
+<item code="kind.link">仮身</item>
+</menu>
+</tad>

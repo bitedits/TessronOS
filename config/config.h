@@ -25,6 +25,7 @@
 
 	TessronOS targets (normally passed by the makefile as -D$(TARGET))
 	  #define _RPI5_		Raspberry Pi 5 (BCM2712)
+	  #define _RPI4_		Raspberry Pi 4 / 400 / Compute Module 4 (BCM2711)
 	  #define _QEMU_VIRT_		QEMU virt (gic-version=2, cortex-a76)
  */
 
@@ -52,9 +53,11 @@
 #define CNF_MAX_ALMID		8	/* Alarm handler */
 
 /* Device configuration */
-#define CNF_MAX_REGDEV		(16)	/* Max registered device */
-#define CNF_MAX_OPNDEV		(32)	/* Max open device (each mounted volume holds its partition open: /boot, the system volume, stores, up to 8 USB disks under /media; sound channels, serial ports, the network) */
-#define CNF_MAX_REQDEV		(16)	/* Max request device */
+#define CNF_MAX_DISK		(160)	/* TessronOS: disks at once (128 USB disks, the SD card, the machine's own) */
+#define CNF_MAX_VOL		(4096)	/* TessronOS: volumes mounted or attached at once; an entry is made only when one is */
+#define CNF_MAX_REGDEV		(192)	/* Max registered device (each disk is one, its partitions are its subunits) */
+#define CNF_MAX_OPNDEV		(4096)	/* Max open device (each mounted volume and each attached TSFS volume holds its partition open, a key on a disk's blocks one more; sound channels, serial ports, the network) */
+#define CNF_MAX_REQDEV		(256)	/* Max request device (a request at a time of each task reading or writing a device) */
 #define CNF_DEVT_MBFSZ0		(-1)	/* message buffer size for event notification */
 #define CNF_DEVT_MBFSZ1		(-1)	/* message max size for event notification */
 
@@ -113,6 +116,9 @@
 #define CNF_KNL_TSK_ROOM	512	/* TessronOS: tasks, and objects of each kind, kept for the kernel whatever the processes take */
 #define CNF_INIT_PATH		"/boot/INIT.ELF"	/* TessronOS: the init program (design 9.14) */
 #define CNF_INIT_PRI		(16)	/* TessronOS: priority of the init process (1..CNF_MAX_TSKPRI) */
+#define CNF_RT_PRI_LAST		(15)	/* TessronOS: 1..this is the real-time band, strict priority and FIFO; above it tasks of processes and of the desktop take turns (design 4.3.1) */
+#define CNF_SLICE_MS		(20)	/* TessronOS: the turn of such a task among others of its priority (ms) */
+#define CNF_PRC_PRI		(20)	/* TessronOS: priority of a process whose creator names none */
 #define USE_SMP			(1)	/* TessronOS: start the secondary processors (design 8) */
 #define CNF_MAX_PRCID		(4)	/* TessronOS: processors supported (per-CPU data) */
 #ifndef CNF_RP1_CONSOLE
@@ -128,13 +134,20 @@
 #ifndef CNF_DISP_SWAP_RB
 #define CNF_DISP_SWAP_RB	(0)	/* TessronOS (rpi5): 1 reads the firmware's pixel order the other way round, for a screen that shows red and blue swapped (make DISP_SWAP_RB=1, design 16.5.1) */
 #endif
+#ifndef CNF_DISP_FLIP
+#define CNF_DISP_FLIP		(1)	/* TessronOS (rpi5): 1 asks the firmware for a framebuffer of two pages and shows them in turn, once a check at start-up passes; 0 keeps the one page the firmware set up (make DISP_FLIP=0, docs/tessronos/10-display.md 10.2.1) */
+#endif
 #ifndef CNF_DISP_MAX_W
 #define CNF_DISP_MAX_W		(1920)	/* TessronOS (rpi5): the widest screen asked of the firmware; a larger display is scaled (design 16.5.1) */
 #define CNF_DISP_MAX_H		(1200)
 #endif
 #define CNF_SND_I2S		(1)	/* TessronOS (rpi5): 1 plays the sound device through I2S0 on GPIO 18-21 (a DAC board) when no USB audio is plugged in */
+#define CNF_SND_HDMI		(1)	/* TessronOS (rpi5): 1 offers the HDMI sockets the firmware drives as outputs of the sound device; 0 never touches the HDMI sound */
 #ifndef CNF_NET_DHCP
 #define CNF_NET_DHCP		(0)	/* TessronOS: 1 asks for an address as soon as the stack is up (the Raspberry Pi 5 build: 1) */
+#endif
+#ifndef CNF_NET_SLAAC
+#define CNF_NET_SLAAC		(1)	/* TessronOS: 1 takes IPv6 addresses and the default router from the routers' advertisements as soon as the stack is up (design 9.3.3) */
 #endif
 #ifndef CNF_NET_SNTP
 #define CNF_NET_SNTP		(0)	/* TessronOS: 1 sets the system clock from a time server once there is an address (the Raspberry Pi 5 build: 1, design 12.6) */
@@ -144,6 +157,9 @@
 #endif
 #ifndef CNF_TIMEZONE
 #define CNF_TIMEZONE		(540)	/* TessronOS: the zone, minutes east of UTC, until the calendar says (JST; design 12.3) */
+#endif
+#ifndef CNF_TIMEZONE_NAME
+#define CNF_TIMEZONE_NAME	"Asia/Tokyo"	/* TessronOS: and its IANA name */
 #endif
 
 

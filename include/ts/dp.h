@@ -143,6 +143,18 @@ IMPORT ER  dp_set_target( INT gid, void *pixels, UINT pitch,
 IMPORT ER  dp_set_place( INT gid, void *pixels, UINT pitch, INT corner_x, INT corner_y,
 			 CONST T_DPRECT *work );
 
+/*
+ * An environment that draws into pixels laid onto the screen later (a
+ * window's) can say what it touches as it draws: with the watch on,
+ * every rectangle drawn through it is handed, in screen coordinates and
+ * cut to what it may touch, to the one function set by dp_watch. The
+ * window manager keeps those as what is to be built again, so a window
+ * drawn into needs no word of its own of what changed. The function is
+ * called with no lock of this layer held.
+ */
+IMPORT ER   dp_set_watch( INT gid, BOOL on );
+IMPORT void dp_watch( void (*fn)( CONST T_DPRECT *r ) );
+
 IMPORT ER  dp_set_colour( INT gid, UW fore, UW back );
 IMPORT ER  dp_set_mode( INT gid, UINT mode );
 
@@ -345,6 +357,100 @@ IMPORT ER  dp_copy_rect( INT gid, CONST T_DPRECT *src, INT to_x, INT to_y );
  */
 IMPORT ER  dp_hold( void );
 IMPORT ER  dp_release( void );
+
+/* ---------------------------------------------------------------- recording */
+
+/*
+ * An environment that keeps what is drawn as drawing, not as pixels:
+ * what a page is printed through (design 11.22). Every call that
+ * would draw through it is handed, as it was asked, to the functions
+ * of whoever opened it -- a rectangle stays a rectangle, a line a line,
+ * a picture a picture -- and the letters a face draws through it come
+ * as glyphs of that face (fn.c asks dp_rec_glyph). Nothing is drawn
+ * into memory and nothing reaches the screen.
+ *
+ * The origin, the frame, the visible rectangle and the region work as
+ * they do for any environment; each call carries them in T_DPRECST,
+ * the clip as one rectangle in the coordinates past the origin (a
+ * region is taken as its bounds). A call drawn with a mode other than
+ * copy -- a rubber band, a highlight -- is not passed on: it is not
+ * part of what is printed.
+ *
+ * A shape the functions do not take (dp_fill_sector and the rest of
+ * the pieces of an ellipse, dp_fill_seed) is drawn into pixels the
+ * size of its box and handed on as a picture.
+ */
+#define DP_REC_RECT	1		/* r filled */
+#define DP_REC_FRAME	2		/* r outlined inside, 'width' wide */
+#define DP_REC_LINE	3		/* p[0] to p[1], both ends drawn */
+#define DP_REC_FILL	4		/* the polygon p[0 .. n) filled by 'rule' */
+#define DP_REC_STROKE	5		/* the line through p[0 .. n), 'closed' or not */
+#define DP_REC_ROUND	6		/* r with corners rx by ry, filled */
+#define DP_REC_ROUNDF	7		/* and outlined inside, 'width' wide */
+
+typedef struct {
+	UINT		kind;		/* DP_REC_* */
+	T_DPRECT	r;
+	CONST T_DPPOINT	*p;
+	INT		n;
+	INT		width;		/* 0 is 1 */
+	UINT		line;		/* DP_LINE_* */
+	UINT		rule;		/* DP_POLY_* */
+	BOOL		closed;
+	INT		rx, ry;
+} T_DPRECOP;
+
+typedef struct {
+	INT		ox, oy;		/* the origin: add it to what a call gives */
+	T_DPRECT	clip;		/* what may be touched, past the origin */
+} T_DPRECST;
+
+/* A picture handed on */
+#define DP_REC_ARGB	0		/* 'px' rows of UW, 'colour' the clear pixel */
+#define DP_REC_MONO	1		/* a bit a pixel, in 'colour' */
+#define DP_REC_GRAY	2		/* a byte of cover a pixel, in 'colour' */
+
+typedef struct {
+	UINT		kind;		/* DP_REC_ARGB .. DP_REC_GRAY */
+	INT		x, y, w, h;
+	CONST void	*px;
+	INT		pitch;		/* pixels for ARGB, bytes otherwise */
+	UW		colour;
+} T_DPRECIMG;
+
+/*
+ * A glyph of a face: its number in the face and the letter it was
+ * drawn for, the size of the em in pixels, and where it lands as a
+ * matrix of 16.16 numbers taking the glyph's own space -- pixels at
+ * that size, y going up -- to the caller's: x' = a x + c y + e,
+ * y' = b x + d y + f, m[] being a, b, c, d, e, f. 'bold' is how much
+ * it was thickened, in 16.16 pixels; 0 when it was not.
+ */
+typedef struct {
+	ID		fid;
+	UINT		gi;
+	UW		cp;
+	INT		px;
+	W		m[6];
+	W		bold;
+	UW		colour;
+} T_DPRECGLY;
+
+typedef struct {
+	void	(*draw)( void *arg, CONST T_DPRECST *st, CONST T_DPRECOP *op,
+			 CONST T_DPPAT *pat );
+	void	(*image)( void *arg, CONST T_DPRECST *st, CONST T_DPRECIMG *im );
+	void	(*glyph)( void *arg, CONST T_DPRECST *st, CONST T_DPRECGLY *g );
+} T_DPREC;
+
+/*
+ * An environment that records, its frame w by h from its own corner.
+ * It is closed with dp_close like any other.
+ */
+IMPORT INT  dp_open_rec( CONST T_DPREC *ops, void *arg, INT w, INT h );
+IMPORT BOOL dp_is_rec( INT gid );
+/* A glyph passed on through a recording environment; FALSE for any other */
+IMPORT BOOL dp_rec_glyph( INT gid, CONST T_DPRECGLY *g );
 
 /* What the environments have drawn, for a test or a measurement */
 typedef struct {

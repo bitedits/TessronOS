@@ -171,6 +171,16 @@ LOCAL INT cp_find_new( CONST CPMAP *m, CONST TS_UUID *id )
  * space: "vobjid=" also ends in id=, and is the link's own identity,
  * not what it points at.
  */
+LOCAL BOOL cp_zero( CONST TS_UUID *u )
+{
+	INT	i;
+
+	for ( i = 0; i < 16; i++ ) {
+		if ( u->b[i] != 0 ) return FALSE;
+	}
+	return TRUE;
+}
+
 LOCAL BOOL cp_next_link( CONST UB *buf, SZ len, SZ from, SZ *p_start,
 			 SZ *p_end, TS_UUID *p_id )
 {
@@ -199,8 +209,14 @@ LOCAL BOOL cp_next_link( CONST UB *buf, SZ len, SZ from, SZ *p_start,
 				if ( ( buf[a] == ' ' || buf[a] == '\t'
 				    || buf[a] == '\n' || buf[a] == '\r' )
 				  && cp_same(buf + a + 1, "id=\"", 4) ) {
+					/* past the volume and the machine it names (design 8.3) */
+					SZ	o = a + 5 + (SZ)ts_lnk_split(buf + a + 5, (INT)( j - a - 5 ), NULL, NULL);
+
+					if ( o + CP_ID_LEN > j ) {
+						break;
+					}
 					for ( k = 0; k < CP_ID_LEN; k++ ) {
-						txt[k] = (char)buf[a + 5 + (SZ)k];
+						txt[k] = (char)buf[o + (SZ)k];
 					}
 					txt[CP_ID_LEN] = 0;
 					if ( ts_str_to_uuid(txt, p_id) >= E_OK ) {
@@ -636,6 +652,8 @@ LOCAL ER cp_record( CPMAP *m, INT me, INT recno, BOOL root, CONST UB *name )
 		at = e;
 	}
 
+	/* the copy may be on another volume: where each link says its object is, made right */
+	(void)om_link_fix(&buf, &len, &m->to[me]);
 	er = om_obj_record_put(&m->to[me], recno, OB_RT_TAD, 0, buf, len);
 	Kfree(buf);
 
@@ -1049,11 +1067,12 @@ EXPORT INT om_store_links( CONST UB *buf, SZ len, TS_UUID *ids, INT max )
  * no more. Either text may be missing -- a record written for the first
  * time, or one thrown away.
  */
-EXPORT void om_store_relink( CONST UB *was, SZ was_len, CONST UB *now,
+EXPORT void om_store_relink( CONST TS_UUID *host, CONST UB *was, SZ was_len, CONST UB *now,
 			     SZ now_len )
 {
-	TS_UUID	*a, *b;
+	TS_UUID	*a, *b, hv, tv;
 	INT	na, nb, i, k;
+	BOOL	known;
 
 	a = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * RF_LINKS * 2);
 	if ( a == NULL ) {
@@ -1076,13 +1095,112 @@ EXPORT void om_store_relink( CONST UB *was, SZ was_len, CONST UB *now,
 			}
 		}
 	}
+	/*
+	 * A link to an object of another volume is not counted here (design
+	 * 8.3): the count of an object is the links to it on its own
+	 * volume, which is what the check of a volume counts as well. That
+	 * volume keeps a record of it instead (knl_obxref_move), which its
+	 * count takes in.
+	 */
+	known = (BOOL)( host != NULL && knl_obfile_vuuid_of(host, &hv) >= E_OK );
 	for ( i = 0; i < na; i++ ) {
-		cp_bump(&a[i], -1);
+		if ( !known || knl_obfile_vuuid_of(&a[i], &tv) < E_OK || ts_uuid_cmp(&tv, &hv) == 0 ) {
+			cp_bump(&a[i], -1);
+		} else {
+			(void)knl_obxref_move(&hv, host, &a[i], -1);
+		}
 	}
 	for ( k = 0; k < nb; k++ ) {
-		cp_bump(&b[k], 1);
+		if ( !known || knl_obfile_vuuid_of(&b[k], &tv) < E_OK || ts_uuid_cmp(&tv, &hv) == 0 ) {
+			cp_bump(&b[k], 1);
+		} else {
+			(void)knl_obxref_move(&hv, host, &b[k], 1);
+		}
 	}
 	Kfree(a);
+}
+
+/*
+ * The ids of the links of an xmlTAD text made to say where their objects
+ * are as seen from the object 'host' the text is a record of (design
+ * 8.3): an object of the same volume by its UUID alone, one of another
+ * volume with that volume's UUID before it. A link whose object is on
+ * no volume attached is left as it is, and so is one that names another
+ * machine. The text is made again when it changes (*p_buf is then a new
+ * one, the old freed). Answers how many were changed, or an error.
+ */
+EXPORT INT om_link_fix( UB **p_buf, SZ *p_len, CONST TS_UUID *host )
+{
+	UB	*buf = *p_buf, *nb;
+	SZ	len = *p_len, at = 0, s, e, a, v0, v1, nlen;
+	TS_UUID	id, hv, tv, mine;
+	INT	n = 0, k, q, vat, mat;
+	char	us[TS_UUID_STRLEN + 1];
+
+	if ( buf == NULL || host == NULL || knl_obfile_vuuid_of(host, &hv) < E_OK ) {
+		return 0;
+	}
+	if ( knl_obfile_machine(&mine) < E_OK ) {
+		knl_memset(&mine, 0, sizeof(mine));
+	}
+	while ( cp_next_link(buf, len, at, &s, &e, &id) ) {
+		at = e;
+		/* where the id's value is: after id=" in the tag */
+		for ( a = s + 5; a + 5 < e && !( ( buf[a] == ' ' || buf[a] == '\t' || buf[a] == '\n'
+				|| buf[a] == '\r' ) && cp_same(buf + a + 1, "id=\"", 4) ); a++ ) ;
+		if ( a + 5 >= e ) {
+			continue;
+		}
+		v0 = a + 5;
+		k = ts_lnk_split(buf + v0, (INT)( e - v0 ), &vat, &mat);
+		if ( mat >= 0 ) {
+			TS_UUID	m;
+
+			for ( q = 0; q < TS_UUID_STRLEN; q++ ) us[q] = (char)buf[v0 + (SZ)mat + (SZ)q];
+			us[TS_UUID_STRLEN] = 0;
+			if ( ts_str_to_uuid(us, &m) < E_OK || ts_uuid_cmp(&m, &mine) != 0 ) {
+				continue;		/* another machine's: as it is */
+			}
+		}
+		if ( knl_obfile_vuuid_of(&id, &tv) < E_OK ) {
+			continue;			/* on no volume attached: as it is */
+		}
+		v1 = v0 + (SZ)k;			/* where the object's UUID starts */
+		if ( ts_uuid_cmp(&tv, &hv) == 0 || cp_zero(&tv) ) {
+			if ( k == 0 ) continue;		/* bare already */
+			nlen = len - (SZ)k;
+			nb = (UB *)Kmalloc(nlen + 1);
+			if ( nb == NULL ) return E_NOMEM;
+			knl_memcpy(nb, buf, (INT)v0);
+			knl_memcpy(nb + v0, buf + v1, (INT)( len - v1 ));
+		} else {
+			if ( k == TS_LNK_PART ) {
+				TS_UUID	said;
+
+				/* it names the right volume already */
+				for ( q = 0; q < TS_UUID_STRLEN; q++ ) us[q] = (char)buf[v0 + (SZ)q];
+				us[TS_UUID_STRLEN] = 0;
+				if ( ts_str_to_uuid(us, &said) >= E_OK && ts_uuid_cmp(&said, &tv) == 0 ) continue;
+			}
+			(void)ts_uuid_to_str(&tv, us, sizeof(us));
+			nlen = len - (SZ)k + TS_LNK_PART;
+			nb = (UB *)Kmalloc(nlen + 1);
+			if ( nb == NULL ) return E_NOMEM;
+			knl_memcpy(nb, buf, (INT)v0);
+			knl_memcpy(nb + v0, us, TS_UUID_STRLEN);
+			nb[v0 + TS_UUID_STRLEN] = '/';
+			knl_memcpy(nb + v0 + TS_LNK_PART, buf + v1, (INT)( len - v1 ));
+		}
+		nb[nlen] = 0;
+		at = (SZ)( (D)e + (D)nlen - (D)len );
+		Kfree(buf);
+		buf = nb;
+		len = nlen;
+		n++;
+	}
+	*p_buf = buf;
+	*p_len = len;
+	return n;
 }
 
 /*
@@ -1141,7 +1259,7 @@ EXPORT ER om_store_delete( CONST TS_UUID *id )
 		if ( rec[i].rt != OB_RT_TAD ) continue;
 		buf = om_obj_record(id, rec[i].recno, &len);
 		if ( buf != NULL ) {
-			om_store_relink(buf, len, NULL, 0);
+			om_store_relink(id, buf, len, NULL, 0);
 			Kfree(buf);
 		}
 	}

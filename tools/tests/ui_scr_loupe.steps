@@ -1,0 +1,54 @@
+# 画面印刷 (design 11.24), for tools/ui_run.py: a rectangle dragged out with
+# the loupe beside the pointer, taken into the tray at PrintScreen, and the
+# picture pasted into a text. The panel (536x284 in the middle of a
+# 1280x800 screen; a part at l,t of the panel at 380+l,266+t): トレーへ複写,
+# 範囲指定, PrntScrnキーで実行. While the rectangle is picked the loupe
+# shows the pixels round the pointer six times as large, below and right
+# of it, above and left of it near the screen's corner; it goes once the
+# rectangle is let go. The picture pasted into the text TADjsについて is
+# written beside the text's record and stands in it as a figure.
+open 01a0d8c4-53d0-7a21-8b32-4c5d6e7f53d0
+expect scrprint: panel 1
+wait 600
+click 414 339
+click 650 395
+click 414 455
+wait 150
+shot loupe_panel
+click 836 511
+expect scrprint: pick 1
+expect scrprint: loupe on
+move 300 260
+wait 400
+shot loupe_hover
+down
+move 420 330
+move 560 420
+wait 400
+shot loupe_drag
+move 1240 770
+wait 400
+shot loupe_corner
+move 560 420
+wait 200
+up
+expect scrprint: loupe off
+expect scrprint: range 1 300 260 561 421
+expect scrprint: armed 1: 1 0 2 1
+wait 300
+shot loupe_gone
+key 46
+expect scrprint: taken 1 300 260 561 421
+expect scrprint: tray 1
+wait 600
+# the tray's picture pasted into a text: beside its record, a figure in it
+open 019a6c96-e262-7dfd-a3bc-1e85d495d60d
+wait 2000
+win TADjsについて
+shot loupe_doc
+key 19 01
+expect tray: picture
+wait 800
+shot loupe_doc_pasted
+# nothing it did was refused for want of a right
+absent !OACV!

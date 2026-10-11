@@ -86,6 +86,7 @@ LOCAL CONST XFEXT xf_ext[] = {
 	{ ".log",  K_TEXT,	"text/plain" },
 	{ ".dic",  K_DICT,	"application/x-dictionary" },
 	{ ".bpk",  K_ARCHIVE,	"application/x-btron-archive" },
+	{ ".pdf",  K_BINARY,	"application/pdf" },
 };
 
 #define NXFEXT	( (INT)( sizeof(xf_ext) / sizeof(xf_ext[0]) ) )
@@ -327,7 +328,7 @@ LOCAL INT meta_of( BUF *w, CONST T_XFSRC *src, UINT kind, CONST char *type, BOOL
 }
 
 LOCAL ER make_object( CONST T_XFSRC *src, UINT kind, CONST char *type, BOOL has1,
-		      UD size, TS_UUID *p_uuid )
+		      UD size, CONST TS_UUID *near, TS_UUID *p_uuid )
 {
 	T_OBCRE		c;
 	BUF		w;
@@ -349,6 +350,7 @@ LOCAL ER make_object( CONST T_XFSRC *src, UINT kind, CONST char *type, BOOL has1
 	c.json = w.b;
 	c.jsonsz = ( n > 0 ) ? n : 0;
 	c.prt = src->prt;
+	if ( near != NULL ) c.near = *near;
 
 	/* the icon of the template of the program it opens in, as one made from that template has */
 	app = ( kind == K_TAD || kind == K_TEXT ) ? "basic-text-editor"
@@ -427,7 +429,7 @@ LOCAL ER take_tad( CONST T_XFSRC *src, UB *first, INT nfirst, TS_UUID *p_uuid )
 		Kfree(all);
 		return E_LIMIT;
 	}
-	er = make_object(src, K_TAD, "application/x-xmltad", FALSE, (UD)n, p_uuid);
+	er = make_object(src, K_TAD, "application/x-xmltad", FALSE, (UD)n, NULL, p_uuid);
 	if ( er >= E_OK ) {
 		key = ob_opn_obj(p_uuid, XF_OPS);
 		er = ( key > 0 ) ? ob_apd_rec(key, OB_RT_TAD, 0, &recno) : (ER)key;
@@ -508,7 +510,7 @@ EXPORT ER xf_import( CONST T_XFSRC *src, CONST TS_UUID *box, TS_UUID *p_uuid )
 		return er;
 	}
 
-	er = make_object(src, kind, type, TRUE, 0, p_uuid);
+	er = make_object(src, kind, type, TRUE, 0, NULL, p_uuid);
 	if ( er < E_OK ) {
 		Kfree(buf);
 		return er;
@@ -972,4 +974,99 @@ EXPORT ER xf_export( CONST TS_UUID *uuid, XF_WRITE write, void *ctx, UB *name, I
 	if ( buf != NULL ) Kfree(buf);
 	ob_cls_obj(key);
 	return ( er >= E_OK ) ? E_OK : er;
+}
+
+/* ---------------------------------------------------------------- made and written as a file */
+
+LOCAL INT read_none( void *ctx, void *buf, SZ n )
+{
+	(void)ctx; (void)buf; (void)n;
+	return 0;
+}
+
+EXPORT ER xf_create( CONST UB *filename, CONST TS_UUID *box, TS_UUID *p_uuid )
+{
+	T_XFSRC		src;
+	CONST char	*type = NULL;
+	UINT		kind;
+	INT		rec = -1;
+	ID		key;
+	ER		er;
+
+	if ( filename == NULL || filename[0] == 0 || p_uuid == NULL ) {
+		return E_PAR;
+	}
+	knl_memset(&src, 0, sizeof(src));
+	src.filename = filename;
+	src.source = "posix";
+	src.read = read_none;
+	(void)dt_gettime(&src.mtime);
+	kind = kind_of(filename, NULL, 0, &type);
+	if ( kind == K_TAD || kind == K_ELF || kind == K_FONT || kind == K_IMAGE ) {
+		kind = K_BINARY;		/* nothing in it yet: what it is comes with its bytes */
+		type = "application/octet-stream";
+	}
+	er = make_object(&src, kind, type, TRUE, 0, box, p_uuid);
+	if ( er < E_OK ) {
+		return er;
+	}
+	key = ob_opn_obj(p_uuid, XF_OPS);
+	er = ( key > 0 ) ? ob_apd_rec(key, OB_RT_TAD, 0, &rec) : (ER)key;
+	if ( er >= E_OK ) er = ob_apd_rec(key, kind_rt(kind), 0, &rec);
+	if ( er >= E_OK ) er = write_rec0(key, &src, kind, (CONST UB *)"", 0);
+	if ( key > 0 ) ob_cls_obj(key);
+	if ( er >= E_OK && box != NULL ) {
+		er = om_obj_link_add(box, p_uuid);
+	}
+	if ( er < E_OK ) {
+		(void)ob_del_obj(p_uuid);
+	}
+	return er;
+}
+
+EXPORT ER xf_refresh( CONST TS_UUID *uuid )
+{
+	T_XFSRC		src;
+	T_OBREC		recs[4];
+	UB		name[XF_NAME_MAX], *text;
+	CONST char	*type = NULL;
+	UINT		kind;
+	SZ		asz = 0;
+	UD		size = 0;
+	INT		cnt = 0, i;
+	ID		key;
+	ER		er;
+
+	if ( uuid == NULL || file_name(uuid, name, sizeof(name)) <= 0 ) {
+		return E_PAR;			/* not one of the file's form */
+	}
+	key = ob_opn_obj(uuid, XF_OPS);
+	if ( key <= 0 ) {
+		return (ER)key;
+	}
+	er = ob_lst_rec(key, recs, 4, &cnt);
+	for ( i = 0; er >= E_OK && i < cnt && i < 4; i++ ) {
+		if ( recs[i].recno == 1 ) size = recs[i].size;
+	}
+	text = (UB *)Kmalloc(XF_TEXT_MAX);
+	if ( er >= E_OK && text == NULL ) er = E_NOMEM;
+	if ( er >= E_OK ) {
+		er = ob_rea_rec(key, 1, 0, text, XF_TEXT_MAX, &asz);
+		if ( er == E_NOEXS ) { er = E_OK; asz = 0; }
+	}
+	if ( er >= E_OK ) {
+		knl_memset(&src, 0, sizeof(src));
+		src.filename = name;
+		src.source = "posix";
+		(void)dt_gettime(&src.mtime);
+		kind = kind_of(name, text, (INT)asz, &type);
+		if ( kind == K_TAD ) {
+			kind = K_TEXT;			/* it stays in record 1 as it is */
+		}
+		er = write_rec0(key, &src, kind, text, (INT)asz);
+		if ( er >= E_OK ) er = meta_again(key, &src, type, size);
+	}
+	if ( text != NULL ) Kfree(text);
+	ob_cls_obj(key);
+	return er;
 }

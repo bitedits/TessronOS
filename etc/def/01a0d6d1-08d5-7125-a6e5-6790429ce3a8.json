@@ -18,7 +18,7 @@
       "id": "accessory-box",
       "kind": "utility",
       "name": "小物箱",
-      "version": "R1.000",
+      "version": "R1.100",
       "builtin": true,
       "base": []
     },

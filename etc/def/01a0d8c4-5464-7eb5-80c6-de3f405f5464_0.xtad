@@ -1,0 +1,6 @@
+<tad version="1.0" encoding="UTF-8" filename="v8prog">
+<document>
+<p>v8prog</p>
+<p>V8 で JavaScript の台本を実行し、答えを標準出力に出すコマンド。引数 bench で機械語への翻訳の速さを測り、bench --jitless でインタプリタだけで測る。答えが正しければ終了コード0。実行形式はレコード1で、make BROWSER=1 のときだけ入る</p>
+</document>
+</tad>

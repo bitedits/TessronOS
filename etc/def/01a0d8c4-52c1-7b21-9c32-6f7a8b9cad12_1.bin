@@ -6,3 +6,5 @@ KBTYPE	0x41
 KBMODE	1
 # VIDEOMODE: 次の画面 幅x高さ, 前の画面 幅x高さ(確かめる前), 有効画面 幅 高さ
 VIDEOMODE	0
+# CPU_MHZ: プロセッサのクロックの上限(MHz)、0 はファームウェアの許す最大。行が無いときも 1800
+CPU_MHZ	1800

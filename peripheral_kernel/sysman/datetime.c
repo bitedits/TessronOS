@@ -18,11 +18,18 @@
  *	Setting the time and the zone goes through objects (design 12.3.1).
  *	The time is the clock device's: whoever sets it must be one who may
  *	write the clock. The zone is kept in the metadata of the calendar
- *	object (SYSDEF_CALENDAR, tessronos.calendar.tz): setting it is writing
- *	that object's attributes, as its protection lets the caller, and it
- *	is read back from there when a volume comes. Either change is told
- *	on the clock with OB_E_CHANGE; the zone's also on the calendar, as
- *	any change of attributes is.
+ *	object (SYSDEF_CALENDAR, tessronos.calendar.tz and .zone): setting it
+ *	is writing that object's attributes, as its protection lets the
+ *	caller, and it is read back from there when a volume comes. Either
+ *	change is told on the clock with OB_E_CHANGE; the zone's also on the
+ *	calendar, as any change of attributes is.
+ *
+ *	The zone is its standard offset, in minutes east of UTC, and the name
+ *	of the IANA time zone it stands for ("Asia/Tokyo"), which programs
+ *	with a time zone database of their own (the browser's ICU) use. The
+ *	local time follows summer time in the zones whose name is in the
+ *	table of rules below (the United States and Canada, the European
+ *	Union, the south-east of Australia, New Zealand).
  */
 
 #include <sys/machine.h>
@@ -43,6 +50,30 @@
 #define TZ_MAX		( 14 * 60 )
 
 LOCAL INT	sys_tz = CNF_TIMEZONE;	/* minutes east of UTC, until the calendar says */
+LOCAL char	sys_zone[DT_ZONE_MAX] = CNF_TIMEZONE_NAME;	/* its IANA name, "" when none */
+
+/* The summer time rules, and the zones that keep them */
+#define DST_NONE	0
+#define DST_US		1	/* 2nd Sunday of March 2:00 to 1st Sunday of November 2:00, local */
+#define DST_EU		2	/* last Sunday of March to last Sunday of October, 1:00 UTC */
+#define DST_AU		3	/* 1st Sunday of October 2:00 to 1st Sunday of April 3:00, local */
+#define DST_NZ		4	/* last Sunday of September 2:00 to 1st Sunday of April 3:00, local */
+
+LOCAL CONST struct {
+	CONST char	*name;
+	UB		rule;
+} dst_zones[] = {
+	{ "America/Anchorage", DST_US },	{ "America/Los_Angeles", DST_US },
+	{ "America/Denver", DST_US },		{ "America/Chicago", DST_US },
+	{ "America/New_York", DST_US },		{ "America/Halifax", DST_US },
+	{ "Atlantic/Azores", DST_EU },		{ "Europe/London", DST_EU },
+	{ "Europe/Paris", DST_EU },		{ "Europe/Berlin", DST_EU },
+	{ "Europe/Athens", DST_EU },		{ "Australia/Adelaide", DST_AU },
+	{ "Australia/Sydney", DST_AU },		{ "Australia/Melbourne", DST_AU },
+	{ "Pacific/Auckland", DST_NZ },
+};
+
+LOCAL UB	sys_dst = DST_NONE;	/* the rule of sys_zone */
 
 LOCAL CONST char *wday_short[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
 LOCAL CONST char *wday_long[]  = { "Sunday", "Monday", "Tuesday", "Wednesday",
@@ -93,6 +124,74 @@ LOCAL D days_from_civil( D y, INT m, INT d )
 	return era * 146097 + doe - 724947;
 }
 
+/* The day of the week of a day number, Sunday 0 (1985-01-01 was a Tuesday) */
+LOCAL INT wday_of( D days )
+{
+	D	w = ( days + 2 ) % 7;
+
+	return (INT)( ( w < 0 ) ? w + 7 : w );
+}
+
+/* The n-th Sunday of a month (the last when n is 0), as a day number */
+LOCAL D sunday_of( D y, INT m, INT n )
+{
+	D	d;
+
+	if ( n > 0 ) {
+		d = days_from_civil(y, m, 1);
+		return d + ( 7 - wday_of(d) ) % 7 + (D)( n - 1 ) * 7;
+	}
+	d = ( ( m == 12 ) ? days_from_civil(y + 1, 1, 1) : days_from_civil(y, m + 1, 1) ) - 1;
+	return d - wday_of(d);
+}
+
+/* The rule of a zone's name */
+LOCAL UB dst_rule( CONST char *name )
+{
+	INT	i;
+
+	for ( i = 0; i < (INT)( sizeof(dst_zones) / sizeof(dst_zones[0]) ); i++ ) {
+		if ( knl_strcmp(dst_zones[i].name, name) == 0 ) {
+			return dst_zones[i].rule;
+		}
+	}
+	return DST_NONE;
+}
+
+LOCAL ER to_tm( TS_TIME t, TS_TM *tm );
+
+/* Whether the system's zone keeps summer time at a moment (UTC) */
+LOCAL BOOL dst_at( TS_TIME t )
+{
+	TS_TM	tm;
+	TS_TIME	std = (TS_TIME)sys_tz * SEC_PER_MIN, a, b;
+	D	y;
+
+	if ( sys_dst == DST_NONE ) {
+		return FALSE;
+	}
+	(void)to_tm(t + std, &tm);
+	y = (D)tm.tm_year + 1900;
+	switch ( sys_dst ) {
+	case DST_US:
+		a = sunday_of(y, 3, 2) * SEC_PER_DAY + 2 * SEC_PER_HOUR - std;
+		b = sunday_of(y, 11, 1) * SEC_PER_DAY + 1 * SEC_PER_HOUR - std;
+		return (BOOL)( t >= a && t < b );
+	case DST_EU:
+		a = sunday_of(y, 3, 0) * SEC_PER_DAY + 1 * SEC_PER_HOUR;
+		b = sunday_of(y, 10, 0) * SEC_PER_DAY + 1 * SEC_PER_HOUR;
+		return (BOOL)( t >= a && t < b );
+	case DST_AU:
+	case DST_NZ:
+		a = sunday_of(y, ( sys_dst == DST_AU ) ? 10 : 9, ( sys_dst == DST_AU ) ? 1 : 0) * SEC_PER_DAY
+		  + 2 * SEC_PER_HOUR - std;
+		b = sunday_of(y, 4, 1) * SEC_PER_DAY + 2 * SEC_PER_HOUR - std;
+		return (BOOL)( t >= a || t < b );
+	default:
+		return FALSE;
+	}
+}
+
 LOCAL BOOL is_leap( D y )
 {
 	return ( (y % 4) == 0 && ((y % 100) != 0 || (y % 400) == 0) );
@@ -129,10 +228,10 @@ EXPORT void knl_dt_time_set( void )
 }
 
 /* The zone written into the calendar's metadata, through a key that may */
-LOCAL ER zone_store( ID key, INT minutes )
+LOCAL ER zone_store( ID key, INT minutes, CONST char *name )
 {
 	UB	*j = (UB *)Kmalloc(OB_META_MAX);
-	UB	v[32];
+	UB	v[32 + DT_ZONE_MAX * 2];
 	SZ	asz = 0;
 	INT	n, len;
 	ER	er;
@@ -144,6 +243,8 @@ LOCAL ER zone_store( ID key, INT minutes )
 	if ( er >= E_OK ) {
 		n = knl_oj_put(v, 0, sizeof(v), "{\"tz\":");
 		n = knl_oj_put_num(v, n, sizeof(v), minutes);
+		n = knl_oj_put(v, n, sizeof(v), ",\"zone\":");
+		n = knl_oj_put_str(v, n, sizeof(v), (CONST UB *)name);
 		n = knl_oj_put(v, n, sizeof(v), "}");
 		len = knl_oj_set_path(j, (INT)asz, OB_META_MAX, "tessronos", "calendar", v, n);
 		er = ( len > 0 ) ? ob_set_atr(key, j, len) : E_LIMIT;
@@ -152,22 +253,30 @@ LOCAL ER zone_store( ID key, INT minutes )
 	return er;
 }
 
-/* The zone the calendar's metadata says; FALSE when it says none */
-LOCAL BOOL zone_read( ID key, INT *p_minutes )
+/*
+ * The zone the calendar's metadata says, and its name into name ("" when
+ * it names none); FALSE when it says no zone
+ */
+LOCAL BOOL zone_read( ID key, INT *p_minutes, char *name )
 {
 	UB	*j = (UB *)Kmalloc(OB_META_MAX);
 	SZ	asz = 0;
 	D	v = 0;
-	INT	p;
+	INT	p, c;
 	BOOL	got = FALSE;
 
 	if ( j == NULL ) {
 		return FALSE;
 	}
+	name[0] = '\0';
 	if ( ob_get_atr(key, j, OB_META_MAX - 1, &asz) >= E_OK ) {
-		p = knl_oj_path(j, (INT)asz, "tessronos", "calendar");
-		p = ( p >= 0 ) ? knl_oj_member(j, (INT)asz, p, "tz") : -1;
+		c = knl_oj_path(j, (INT)asz, "tessronos", "calendar");
+		p = ( c >= 0 ) ? knl_oj_member(j, (INT)asz, c, "tz") : -1;
 		got = (BOOL)( p >= 0 && knl_oj_num(j, (INT)asz, p, &v) && v >= TZ_MIN && v <= TZ_MAX );
+		p = ( c >= 0 ) ? knl_oj_member(j, (INT)asz, c, "zone") : -1;
+		if ( p < 0 || knl_oj_str(j, (INT)asz, p, (UB *)name, DT_ZONE_MAX) < 0 ) {
+			name[0] = '\0';
+		}
 	}
 	Kfree(j);
 	if ( got ) {
@@ -184,6 +293,7 @@ EXPORT void knl_dt_zone_load( void )
 {
 	TS_UUID	cal;
 	INT	z = 0;
+	char	name[DT_ZONE_MAX];
 	ID	key;
 
 	if ( ts_str_to_uuid(SYSDEF_CALENDAR, &cal) < E_OK ) {
@@ -193,9 +303,16 @@ EXPORT void knl_dt_zone_load( void )
 	if ( key <= 0 ) {
 		return;
 	}
-	if ( zone_read(key, &z) && z != sys_tz ) {
-		sys_tz = z;
-		clock_told();
+	if ( zone_read(key, &z, name) ) {
+		if ( name[0] == '\0' && z == CNF_TIMEZONE ) {
+			knl_strcpy(name, CNF_TIMEZONE_NAME);	/* kept before zones had names: the default's */
+		}
+		if ( z != sys_tz || knl_strcmp(name, sys_zone) != 0 ) {
+			sys_tz = z;
+			knl_strcpy(sys_zone, name);
+			sys_dst = dst_rule(sys_zone);
+			clock_told();
+		}
 	}
 	ob_cls_obj(key);
 }
@@ -212,26 +329,61 @@ EXPORT ER dt_getsystz( INT *p_minutes )
 	return E_OK;
 }
 
+/* The zone's IANA name into name (max bytes with the 0): its length, 0 when it has none */
+EXPORT INT dt_getsyszone( char *name, INT max )
+{
+	INT	n = (INT)knl_strlen(sys_zone);
+
+	if ( name == NULL || max <= n ) {
+		return E_PAR;
+	}
+	knl_strcpy(name, sys_zone);
+	return n;
+}
+
 /*
- * The zone set: written into the calendar as the caller may write its
- * attributes. With no calendar to write -- no volume yet -- only an
- * administrator may set it, and only until the calendar says otherwise.
+ * The zone set by its offset alone: the name kept when the offset is the
+ * zone's already, dropped otherwise (it would say another offset)
  */
 EXPORT ER dt_setsystz( INT minutes )
+{
+	char	name[DT_ZONE_MAX];
+
+	knl_strcpy(name, ( minutes == sys_tz ) ? sys_zone : "");
+	return dt_setsyszone(name, minutes);
+}
+
+/*
+ * The zone set, its name and its standard offset: written into the
+ * calendar as the caller may write its attributes. With no calendar to
+ * write -- no volume yet -- only an administrator may set it, and only
+ * until the calendar says otherwise. A name is letters, digits and
+ * "/_+-", as the IANA names are.
+ */
+EXPORT ER dt_setsyszone( CONST char *name, INT minutes )
 {
 	TS_UUID	cal;
 	ID	key;
 	ER	er;
+	INT	i;
 
-	if ( minutes < TZ_MIN || minutes > TZ_MAX ) {
+	if ( minutes < TZ_MIN || minutes > TZ_MAX || name == NULL ) {
 		return E_PAR;
+	}
+	for ( i = 0; name[i] != '\0'; i++ ) {
+		char	c = name[i];
+
+		if ( i >= DT_ZONE_MAX - 1 || !( ( c >= 'A' && c <= 'Z' ) || ( c >= 'a' && c <= 'z' )
+		  || ( c >= '0' && c <= '9' ) || c == '/' || c == '_' || c == '+' || c == '-' ) ) {
+			return E_PAR;
+		}
 	}
 	if ( ts_str_to_uuid(SYSDEF_CALENDAR, &cal) < E_OK ) {
 		return E_SYS;
 	}
 	key = ob_opn_obj(&cal, OB_OP_ATRRD | OB_OP_ATRWR);
 	if ( key > 0 ) {
-		er = zone_store(key, minutes);
+		er = zone_store(key, minutes, name);
 		ob_cls_obj(key);
 		if ( er < E_OK ) {
 			return er;
@@ -239,8 +391,10 @@ EXPORT ER dt_setsystz( INT minutes )
 	} else if ( key != E_NOEXS || !knl_ob_is_admin(knl_ob_crd_of(ts_get_pid())) ) {
 		return ( key == E_NOEXS ) ? E_OACV : (ER)key;
 	}
-	if ( minutes != sys_tz ) {
+	if ( minutes != sys_tz || knl_strcmp(name, sys_zone) != 0 ) {
 		sys_tz = minutes;
+		knl_strcpy(sys_zone, name);
+		sys_dst = dst_rule(sys_zone);
 		clock_told();
 	}
 	return E_OK;
@@ -286,7 +440,11 @@ EXPORT ER dt_localtime( CONST TS_TIME *t, TS_TM *tm )
 	if ( t == NULL || tm == NULL ) {
 		return E_PAR;
 	}
-	return to_tm(*t + (TS_TIME)sys_tz * SEC_PER_MIN, tm);
+	BOOL	dst = dst_at(*t);
+	ER	er = to_tm(*t + (TS_TIME)( sys_tz + ( dst ? 60 : 0 ) ) * SEC_PER_MIN, tm);
+
+	tm->tm_isdst = dst ? 1 : 0;
+	return er;
 }
 
 EXPORT ER dt_mktime( CONST TS_TM *tm, TS_TIME *p_t )
@@ -316,7 +474,11 @@ EXPORT ER dt_mktime_local( CONST TS_TM *tm, TS_TIME *p_t )
 	ER	er = dt_mktime(tm, p_t);
 
 	if ( er >= E_OK ) {
+		/* in summer time the clock is an hour ahead of the standard offset */
 		*p_t -= (TS_TIME)sys_tz * SEC_PER_MIN;
+		if ( dst_at(*p_t - SEC_PER_HOUR) ) {
+			*p_t -= SEC_PER_HOUR;
+		}
 	}
 	return er;
 }

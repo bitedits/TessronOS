@@ -33,6 +33,71 @@
 #define TSN_CLASS_OB		7	/* real objects (design 18.5) */
 #define TSN_CLASS_DP		8	/* drawing in a window of one's own (design 16.4.3) */
 #define TSN_CLASS_WM		9	/* what of the window layer the objects do not cover */
+#define TSN_CLASS_GP		10	/* the GPU (docs/tessronos/13-gpu.md 13.5) */
+#define TSN_CLASS_SR		11	/* the serial ports (design 6.2) */
+#define TSN_CLASS_US		12	/* USB devices of a program's own (design 6.3.1) */
+
+/*
+ * Rights (docs/tessronos/A-svc.md, 権限の表). A call that acts on the whole
+ * system -- the time and the zone, the network interface, the volumes,
+ * the look of the windows, the key layouts -- is a process's to make
+ * only with the right the table of rights in svc_gate.c gives it, and
+ * the gateway looks at that before the call is made (E_OACV). An
+ * administrator has every right. The numbers below that need one say
+ * which; a call that says none acts only on what is the caller's own,
+ * or on what a key, an object's protection or a process's object lets
+ * it at. The system process's tasks are not asked.
+ */
+#define TSN_RIGHT_NONE		0
+#define TSN_RIGHT_ADMIN		1	/* an administrator */
+#define TSN_RIGHT_CLOCK		2	/* who may write the clock device (時計) */
+#define TSN_RIGHT_ZONE		3	/* who may write the attributes of the calendar (暦) */
+#define TSN_RIGHT_CONF_DEV	4	/* who may write the machine's settings (機器の設定) */
+#define TSN_RIGHT_CONF_USER	5	/* who may write the user information (ユーザ情報) */
+
+/*
+ * gp_ (class 10): the GPU for a process (include/ts/gpuapp.h). A
+ * context holds the BOs the process made or took in, by number; the
+ * process names a BO only by its number, and what its contexts hold
+ * goes when it ends.
+ */
+#define TSN_GP_OPN_GPU		TSN(10, 1)
+#define TSN_GP_CLS_GPU		TSN(10, 2)
+#define TSN_GP_REF_GPU		TSN(10, 3)
+#define TSN_GP_CRE_BO		TSN(10, 4)
+#define TSN_GP_DEL_BO		TSN(10, 5)
+#define TSN_GP_MAP_BO		TSN(10, 6)
+#define TSN_GP_SUB_JOB		TSN(10, 7)
+#define TSN_GP_WAI_FEN		TSN(10, 8)
+#define TSN_GP_WAI_BO		TSN(10, 9)
+#define TSN_GP_SHR_BO		TSN(10, 10)
+#define TSN_GP_IMP_BO		TSN(10, 11)
+#define TSN_GP_REF_BO		TSN(10, 12)
+#define TSN_GP_MAX		12
+
+/*
+ * sr_ (class 11): the serial ports for a process (include/ts/ser.h). A
+ * process names a port it opened only by the number it was given, and
+ * what it opened closes when it ends.
+ */
+#define TSN_SR_LST_PRT		TSN(11, 1)
+#define TSN_SR_OPN_PRT		TSN(11, 2)
+#define TSN_SR_CLS_PRT		TSN(11, 3)
+#define TSN_SR_REA_PRT		TSN(11, 4)
+#define TSN_SR_WRI_PRT		TSN(11, 5)
+#define TSN_SR_SET_SPD		TSN(11, 6)
+#define TSN_SR_MAX		6
+
+#define TSN_US_LST_DEV		TSN(12, 1)
+#define TSN_US_GET_DSC		TSN(12, 2)
+#define TSN_US_OPN_DEV		TSN(12, 3)
+#define TSN_US_CLS_DEV		TSN(12, 4)
+#define TSN_US_CTL		TSN(12, 5)
+#define TSN_US_SET_ALT		TSN(12, 6)
+#define TSN_US_CLR_HLT		TSN(12, 7)
+#define TSN_US_XFER		TSN(12, 8)
+#define TSN_US_RST_DEV		TSN(12, 9)
+#define TSN_US_MAX		9
 
 /*
  * dp_ (class 8): drawing, for a process, into the drawing environment of
@@ -71,9 +136,26 @@
 #define TSN_KC_MODE		TSN(9, 15)
 #define TSN_WM_MSG_PUT		TSN(9, 16)
 #define TSN_WM_LOOK		TSN(9, 17)	/* an entry of the look table */
-#define TSN_WM_SET_LOOK		TSN(9, 18)	/* and setting one: an administrator */
+#define TSN_WM_SET_LOOK		TSN(9, 18)	/* and setting one: TSN_RIGHT_CONF_USER, and more by the entry */
 #define TSN_WM_DRAW_BAR		TSN(9, 19)	/* a scroll bar in a window of one's own */
-#define TSN_WM_MAX		19
+#define TSN_TR_PSH_DAT		TSN(9, 20)	/* the tray (include/ts/tray.h) */
+#define TSN_TR_ADD_DAT		TSN(9, 21)
+#define TSN_TR_SET_DAT		TSN(9, 22)
+#define TSN_TR_GET_STS		TSN(9, 23)
+#define TSN_TR_REF_REC		TSN(9, 24)
+#define TSN_TR_REA_REC		TSN(9, 25)
+#define TSN_TR_SEL_DAT		TSN(9, 26)
+#define TSN_TR_MOV_DAT		TSN(9, 27)
+#define TSN_TR_DEL_DAT		TSN(9, 28)
+#define TSN_TR_CLR_TRA		TSN(9, 29)
+#define TSN_WM_OBJ_SURF		TSN(9, 30)	/* a surface to draw the work area in */
+#define TSN_WM_OBJ_PUT		TSN(9, 31)	/* and rectangles of it shown */
+#define TSN_WM_KEY_PUT		TSN(9, 32)	/* a key typed by a screen keyboard */
+#define TSN_KM_GET		TSN(9, 33)	/* the layouts and the keys given others */
+#define TSN_KM_SET		TSN(9, 34)	/* and setting them: TSN_RIGHT_CONF_DEV */
+#define TSN_KM_LABEL		TSN(9, 35)	/* the words a key is written with */
+#define TSN_WM_SCREEN		TSN(9, 36)	/* the size of the screen */
+#define TSN_WM_MAX		36
 
 /* fs_ (class 2): the file management of T2EX, for a process */
 #define TSN_FS_OPEN		TSN(2, 1)
@@ -96,7 +178,16 @@
 #define TSN_FS_DETACH_DEV	TSN(2, 18)
 #define TSN_FS_MOUNTS		TSN(2, 19)
 #define TSN_FS_UTIME		TSN(2, 20)
-#define TSN_FS_MAX		20
+#define TSN_FS_DUP		TSN(2, 21)	/* the POSIX layer's (design 5.8) */
+#define TSN_FS_PIPE		TSN(2, 22)
+#define TSN_FS_XSTAT		TSN(2, 23)
+#define TSN_FS_FXSTAT		TSN(2, 24)
+#define TSN_FS_IOCTL		TSN(2, 25)
+#define TSN_FS_FCNTL		TSN(2, 26)
+#define TSN_FS_POLL		TSN(2, 27)
+#define TSN_FS_LINK		TSN(2, 28)
+#define TSN_FS_CHMOD		TSN(2, 29)
+#define TSN_FS_MAX		29
 
 /*
  * so_ (class 5): the sockets of a process, which are its own and are
@@ -122,10 +213,12 @@
 #define TSN_SO_RESOLVE		TSN(5, 18)
 #define TSN_SO_GETIFADDR	TSN(5, 19)
 #define TSN_SO_GETDNS		TSN(5, 20)
-#define TSN_SO_SETIFADDR	TSN(5, 21)
-#define TSN_SO_DHCP_START	TSN(5, 22)
+#define TSN_SO_SETIFADDR	TSN(5, 21)	/* TSN_RIGHT_ADMIN */
+#define TSN_SO_DHCP_START	TSN(5, 22)	/* TSN_RIGHT_ADMIN */
 #define TSN_SO_GETOBJ		TSN(5, 23)
-#define TSN_SO_MAX		23
+#define TSN_SO_RESOLVEALL	TSN(5, 24)
+#define TSN_SO_RECVTOS		TSN(5, 25)
+#define TSN_SO_MAX		25
 
 /* class 0: tk_ */
 #define TSN_TK_CRE_TSK		TSN(0, 1)
@@ -175,7 +268,7 @@
 #define TSN_TK_REF_MBF		TSN(0, 45)
 #define TSN_TK_DLY_TSK		TSN(0, 46)
 #define TSN_TK_GET_TIM		TSN(0, 47)
-#define TSN_TK_SET_TIM		TSN(0, 48)
+#define TSN_TK_SET_TIM		TSN(0, 48)	/* TSN_RIGHT_CLOCK */
 #define TSN_TK_GET_OTM		TSN(0, 49)
 #define TSN_TK_CRE_CYC		TSN(0, 50)
 #define TSN_TK_DEL_CYC		TSN(0, 51)
@@ -199,13 +292,14 @@
 #define TSN_TK_REF_CYC_U	TSN(0, 69)
 #define TSN_TK_STA_ALM_U	TSN(0, 70)
 #define TSN_TK_REF_ALM_U	TSN(0, 71)
-#define TSN_TK_SET_TIM_U	TSN(0, 72)
+#define TSN_TK_SET_TIM_U	TSN(0, 72)	/* TSN_RIGHT_CLOCK */
 #define TSN_TK_GET_TIM_U	TSN(0, 73)
 #define TSN_TK_GET_OTM_U	TSN(0, 74)
-#define TSN_TK_SET_UTC		TSN(0, 75)
+#define TSN_TK_SET_UTC		TSN(0, 75)	/* TSN_RIGHT_CLOCK */
 #define TSN_TK_GET_UTC		TSN(0, 76)
 #define TSN_TK_GET_PRC		TSN(0, 77)
-#define TSN_TK_MAX		77
+#define TSN_TK_CHG_SLT		TSN(0, 78)
+#define TSN_TK_MAX		78
 
 /* class 1: TessronOS process, memory and IPC */
 #define TSN_TS_GET_MONO		TSN(1, 1)
@@ -223,17 +317,38 @@
 #define TSN_TS_MAP_MEM		TSN(1, 13)	/* memory a process asks for (include/ts/umem.h) */
 #define TSN_TS_UNM_MEM		TSN(1, 14)
 #define TSN_TS_CTL_MEM		TSN(1, 15)
-#define TSN_TS_MAX		15
+#define TSN_TS_REF_CPU		TSN(1, 16)	/* the processors and their load (include/ts/time.h) */
+#define TSN_TS_DEF_FLT		TSN(1, 17)	/* a fault handed back to the program (include/ts/proc.h) */
+#define TSN_TS_FLT_RET		TSN(1, 18)
+#define TSN_TS_SPN_PRC		TSN(1, 19)	/* a POSIX process (include/ts/psx.h, design 5.8) */
+#define TSN_TS_GET_INH		TSN(1, 20)
+#define TSN_TS_WAI_PSX		TSN(1, 21)
+#define TSN_TS_KIL_PRC		TSN(1, 22)
+#define TSN_TS_SIG_SET		TSN(1, 23)
+#define TSN_TS_SIG_RET		TSN(1, 24)
+#define TSN_TS_SIG_SUS		TSN(1, 25)
+#define TSN_TS_SLP_PSX		TSN(1, 26)
+#define TSN_TS_SIG_ALM		TSN(1, 27)
+#define TSN_TS_SET_PGID		TSN(1, 28)
+#define TSN_TS_GET_PGID		TSN(1, 29)
+#define TSN_TS_SET_SID		TSN(1, 30)
+#define TSN_TS_GET_SID		TSN(1, 31)
+#define TSN_TS_GET_PPID		TSN(1, 32)
+#define TSN_TS_REF_PSX		TSN(1, 33)
+#define TSN_TS_LST_PRC		TSN(1, 34)
+#define TSN_TS_MAX		34
 
 /* class 3: calendar */
 #define TSN_DT_GETTIME		TSN(3, 1)
-#define TSN_DT_SETTIME		TSN(3, 2)
+#define TSN_DT_SETTIME		TSN(3, 2)	/* TSN_RIGHT_CLOCK */
 #define TSN_DT_GMTIME		TSN(3, 3)
 #define TSN_DT_LOCALTIME	TSN(3, 4)
 #define TSN_DT_MKTIME		TSN(3, 5)
 #define TSN_DT_GETSYSTZ		TSN(3, 6)
-#define TSN_DT_SETSYSTZ		TSN(3, 7)
-#define TSN_DT_MAX		7
+#define TSN_DT_SETSYSTZ		TSN(3, 7)	/* TSN_RIGHT_ZONE */
+#define TSN_DT_GETSYSZONE	TSN(3, 8)
+#define TSN_DT_SETSYSZONE	TSN(3, 9)	/* TSN_RIGHT_ZONE */
+#define TSN_DT_MAX		9
 
 /* class 7: ob_ */
 #define TSN_OB_OPN_OBJ	TSN(7, 1)
@@ -259,8 +374,8 @@
 #define TSN_OB_GET_CRD	TSN(7, 21)
 #define TSN_OB_LOGIN		TSN(7, 22)
 #define TSN_OB_SET_PWD	TSN(7, 23)
-#define TSN_OB_ATT_VOL	TSN(7, 24)
-#define TSN_OB_DET_VOL	TSN(7, 25)
+#define TSN_OB_ATT_VOL	TSN(7, 24)	/* TSN_RIGHT_ADMIN */
+#define TSN_OB_DET_VOL	TSN(7, 25)	/* TSN_RIGHT_ADMIN */
 #define TSN_OB_REA_RES	TSN(7, 26)
 #define TSN_OB_WRI_RES	TSN(7, 27)
 #define TSN_OB_DEL_RES	TSN(7, 28)
@@ -275,18 +390,29 @@
 #define TSN_OB_MAP_REC	TSN(7, 37)
 #define TSN_OB_UNM_REC	TSN(7, 38)
 #define TSN_OB_GET_DOM	TSN(7, 39)
-#define TSN_OB_SET_DOM	TSN(7, 40)
+#define TSN_OB_SET_DOM	TSN(7, 40)	/* TSN_RIGHT_ADMIN */
 #define TSN_OB_GET_ICO	TSN(7, 41)
 #define TSN_OB_SET_ICO	TSN(7, 42)
 #define TSN_OB_REF_VOL	TSN(7, 43)
 #define TSN_OB_FND_LNK	TSN(7, 44)
 #define TSN_OB_LST_LNK	TSN(7, 45)
-#define TSN_OB_MAX		45
+#define TSN_OB_END_ADM	TSN(7, 46)	/* the administrator's rights given back */
+#define TSN_OB_WIP_VOL	TSN(7, 47)
+#define TSN_OB_MAX		47
 
 /* class 6: tm_ */
 #define TSN_TM_PUTSTRING	TSN(6, 1)
 #define TSN_TM_PUTCHAR		TSN(6, 2)
 #define TSN_TM_LOG_READ		TSN(6, 3)
 #define TSN_TM_MAX		3
+
+/*
+ * A kernel built for its tests only (USE_KTEST): a word of the
+ * process's at x0 read by the kernel, with the way to it opened after
+ * the kernel has made sure of it (x1 = 1) or straight (x1 = 0), which
+ * PAN refuses (docs/tessronos/04-kernel.md 4.6.1). Answers E_RSFN in
+ * any other kernel.
+ */
+#define TSN_TM_PAN_PROBE	TSN(6, 0x7ff0)
 
 #endif /* __TS_SVC_H__ */

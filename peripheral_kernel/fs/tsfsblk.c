@@ -90,6 +90,7 @@
 #define SB_MOUNTTIME	368
 #define SB_FSCKTIME	376
 #define SB_MKFSTIME	384
+#define SB_XREFUUID	400
 #define SB_CRC		4092
 
 /* the common head */
@@ -158,13 +159,30 @@ typedef struct {
 	UD		writes;		/* to the device, since ts_cut_blk last asked */
 	UD		cut_after;	/* writes still to go before the pretended cut */
 	BOOL		cut;		/* a cut is set */
+	ID		no;		/* its number, where it sits in the table */
 	BOOL		used;
 } TSFSBLKVOL;
 
-LOCAL TSFSBLKVOL	tsfsblk_vol[TSFSBLK_MAX_VOL];
+/*
+ * A volume's entry is made the first time one more volume is opened
+ * than there are entries, and is kept, free or in use, from then on: a
+ * number looked up without the lock is never memory given back.
+ * tsfsblk_nvol is how many have been made.
+ */
+LOCAL TSFSBLKVOL	*tsfsblk_vol[TSFSBLK_MAX_VOL];
+LOCAL INT	tsfsblk_nvol = 0;
 LOCAL ID	tsfsblk_mtxid = 0;
 
-#define VOL_ID(v)	( (ID)( (v) - tsfsblk_vol ) + 1 )
+#define VOL_ID(v)	( (v)->no )
+
+/* The entry of a volume's number, whether in use or not */
+LOCAL TSFSBLKVOL *vol_slot( ID vol )
+{
+	if ( vol < 1 || vol > TSFSBLK_MAX_VOL ) {
+		return NULL;
+	}
+	return __atomic_load_n(&tsfsblk_vol[vol - 1], __ATOMIC_ACQUIRE);
+}
 
 /* ---------------------------------------------------------------- little endian */
 
@@ -244,6 +262,7 @@ LOCAL void sb_pack( CONST T_TSFSBLK_SB *sb, UB *buf )
 	wr64(buf + SB_MOUNTTIME, sb->mount_time);
 	wr64(buf + SB_FSCKTIME, sb->fsck_time);
 	wr64(buf + SB_MKFSTIME, sb->mkfs_time);
+	cpy16(buf + SB_XREFUUID, sb->xref_uuid.b);
 	wr32(buf + SB_CRC, ts_crc32c(buf, SB_CRC));
 }
 
@@ -280,6 +299,7 @@ LOCAL ER sb_unpack( CONST UB *buf, T_TSFSBLK_SB *sb )
 	cpy16(sb->root_uuid.b, buf + SB_ROOTUUID);
 	cpy16(sb->sysbox_uuid.b, buf + SB_SYSUUID);
 	cpy16(sb->domain_uuid.b, buf + SB_DOMUUID);
+	cpy16(sb->xref_uuid.b, buf + SB_XREFUUID);
 	sb->compat        = rd64(buf + SB_COMPAT);
 	sb->ro_compat     = rd64(buf + SB_ROCOMPAT);
 	sb->incompat      = rd64(buf + SB_INCOMPAT);
@@ -315,28 +335,18 @@ typedef struct {
 	UD	rd, wr, fl;
 } DEVIO;
 
-LOCAL DEVIO	dev_io[TSFSBLK_MAX_VOL];
+LOCAL DEVIO	dev_io[CNF_MAX_OPNDEV + 1];	/* by descriptor: each is one open device */
 
 LOCAL DEVIO *io_of( ID dd )
 {
-	INT	i;
-
-	for ( i = 0; i < TSFSBLK_MAX_VOL; i++ ) {
-		if ( dev_io[i].dd == dd && dd > 0 ) return &dev_io[i];
-	}
-	return NULL;
+	return ( dd > 0 && dd <= CNF_MAX_OPNDEV && dev_io[dd].dd == dd ) ? &dev_io[dd] : NULL;
 }
 
 LOCAL void io_open( ID dd )
 {
-	INT	i;
-
-	for ( i = 0; i < TSFSBLK_MAX_VOL; i++ ) {
-		if ( dev_io[i].dd <= 0 ) {
-			dev_io[i].dd = dd;
-			dev_io[i].rd = dev_io[i].wr = dev_io[i].fl = 0;
-			return;
-		}
+	if ( dd > 0 && dd <= CNF_MAX_OPNDEV ) {
+		dev_io[dd].rd = dev_io[dd].wr = dev_io[dd].fl = 0;
+		__atomic_store_n(&dev_io[dd].dd, dd, __ATOMIC_RELEASE);
 	}
 }
 
@@ -344,7 +354,7 @@ LOCAL void io_close( ID dd )
 {
 	DEVIO	*d = io_of(dd);
 
-	if ( d != NULL ) d->dd = 0;
+	if ( d != NULL ) __atomic_store_n(&d->dd, 0, __ATOMIC_RELEASE);
 }
 
 LOCAL ER blks_read( ID dd, UD blk, UD n, void *buf )
@@ -408,6 +418,13 @@ LOCAL ER dev_flush( ID dd )
 #define CNF_TSFS_CACHE	( 32 * 1024 * 1024 )	/* bytes a volume keeps */
 #endif
 #define BC_MAX		( CNF_TSFS_CACHE / TSFSBLK_BLOCK_SIZE )
+#ifndef CNF_TSFS_CACHE_ALL
+#define CNF_TSFS_CACHE_ALL	( 128 * 1024 * 1024 )	/* bytes every volume keeps together */
+#endif
+#define BC_ALL_MAX	( CNF_TSFS_CACHE_ALL / TSFSBLK_BLOCK_SIZE )
+#define BC_LEAST	256		/* blocks a volume keeps whatever the others hold */
+
+LOCAL UD	bc_all = 0;		/* blocks every volume's cache holds together */
 #define BC_BUCKETS	1024
 #define BC_VALID	0
 #define BC_LOADING	1
@@ -425,11 +442,8 @@ LOCAL TSFSBLKVOL *bc_vol( ID vol )
 {
 	TSFSBLKVOL	*v;
 
-	if ( vol < 1 || vol > TSFSBLK_MAX_VOL ) {
-		return NULL;
-	}
-	v = &tsfsblk_vol[vol - 1];
-	return ( v->used && v->bc_hash != NULL ) ? v : NULL;
+	v = vol_slot(vol);
+	return ( v != NULL && v->used && v->bc_hash != NULL ) ? v : NULL;
 }
 
 LOCAL ER bc_init( TSFSBLKVOL *v )
@@ -465,6 +479,8 @@ LOCAL void bc_fini( TSFSBLKVOL *v )
 		n = e->next;
 		Kfree(e);
 	}
+	__atomic_sub_fetch(&bc_all, v->bc_n, __ATOMIC_RELAXED);
+	v->bc_n = 0;
 	Kfree(v->bc_hash);
 	v->bc_hash = NULL;
 	tk_del_mtx(v->bc_mtx);
@@ -513,14 +529,25 @@ LOCAL void bc_remove( TSFSBLKVOL *v, BCENT *e )
 	bc_unuse(v, e);
 	Kfree(e);
 	v->bc_n--;
+	__atomic_sub_fetch(&bc_all, 1, __ATOMIC_RELAXED);
 }
+
+/*
+ * Blocks held in the caches of every volume together. Many volumes
+ * attached at once would each keep up to BC_MAX; past BC_ALL_MAX in all a
+ * volume holding more than BC_LEAST takes the place of its own least
+ * recently used block instead of a new one.
+ */
 
 /* A place for a block: a new one, or the least recently used given up */
 LOCAL BCENT *bc_room( TSFSBLKVOL *v, UD blk )
 {
 	BCENT	*e = NULL;
+	BOOL	full = (BOOL)( v->bc_n >= BC_MAX
+			       || ( v->bc_n >= BC_LEAST
+				    && __atomic_load_n(&bc_all, __ATOMIC_RELAXED) >= BC_ALL_MAX ) );
 
-	if ( v->bc_n >= BC_MAX ) {
+	if ( full && v->bc_tail != NULL ) {
 		for ( e = v->bc_tail; e != NULL && e->state == BC_LOADING; e = e->prev ) ;
 		if ( e == NULL ) {
 			return NULL;		/* all of it is being read */
@@ -533,6 +560,7 @@ LOCAL BCENT *bc_room( TSFSBLKVOL *v, UD blk )
 			return NULL;
 		}
 		v->bc_n++;
+		__atomic_add_fetch(&bc_all, 1, __ATOMIC_RELAXED);
 	}
 	e->blk = blk;
 	e->hnext = *bc_bucket(v, blk);
@@ -1034,10 +1062,9 @@ EXPORT ER ts_format_blk( CONST char *devnm, CONST char *label )
 
 LOCAL TSFSBLKVOL *vol_of( ID vol )
 {
-	if ( vol < 1 || vol > TSFSBLK_MAX_VOL || !tsfsblk_vol[vol - 1].used ) {
-		return NULL;
-	}
-	return &tsfsblk_vol[vol - 1];
+	TSFSBLKVOL	*v = vol_slot(vol);
+
+	return ( v != NULL && v->used ) ? v : NULL;
 }
 
 /* The valid superblock of the higher generation */
@@ -1307,11 +1334,23 @@ EXPORT ID ts_opn_vol_blk( CONST char *devnm )
 		if ( tsfsblk_mtxid <= 0 ) return (ER)tsfsblk_mtxid;
 	}
 	tk_loc_mtx(tsfsblk_mtxid, TMO_FEVR);
-	for ( i = 0; i < TSFSBLK_MAX_VOL; i++ ) {
-		if ( !tsfsblk_vol[i].used ) { v = &tsfsblk_vol[i]; break; }
+	for ( i = 0; i < tsfsblk_nvol; i++ ) {
+		if ( !tsfsblk_vol[i]->used ) { v = tsfsblk_vol[i]; break; }
+	}
+	if ( v == NULL && tsfsblk_nvol < TSFSBLK_MAX_VOL ) {
+		/* every entry is in use: one more, kept from now on */
+		v = (TSFSBLKVOL *)Kcalloc(1, sizeof(TSFSBLKVOL));
+		if ( v != NULL ) {
+			v->no = tsfsblk_nvol + 1;
+			__atomic_store_n(&tsfsblk_vol[tsfsblk_nvol], v, __ATOMIC_RELEASE);
+			tsfsblk_nvol++;
+		}
 	}
 	if ( v != NULL ) {
+		ID	no = v->no;
+
 		knl_memset(v, 0, sizeof(*v));
+		v->no = no;
 		v->used = TRUE;			/* claimed while it is being opened */
 	}
 	tk_unl_mtx(tsfsblk_mtxid);
@@ -1340,7 +1379,7 @@ EXPORT ID ts_opn_vol_blk( CONST char *devnm )
 		er = E_NOSPT;			/* a feature this code cannot read */
 		goto fail;
 	}
-	vol = (ID)( v - tsfsblk_vol ) + 1;
+	vol = v->no;
 
 	/* Whatever a cut in the power left behind goes back before
 	   anything else reads the metadata, and the volume is read again
@@ -1409,6 +1448,72 @@ EXPORT ER ts_cls_vol_blk( ID vol )
 	io_close(v->dd);
 	tk_cls_dev(v->dd, 0);
 	v->used = FALSE;
+
+	return er;
+}
+
+EXPORT INT knl_tsfsblk_slots( INT *p_used, UD *p_cached )
+{
+	INT	i, n, used = 0;
+
+	n = __atomic_load_n(&tsfsblk_nvol, __ATOMIC_ACQUIRE);
+	for ( i = 0; i < n; i++ ) {
+		TSFSBLKVOL	*v = vol_slot(i + 1);
+
+		if ( v != NULL && v->used ) used++;
+	}
+	if ( p_used != NULL ) *p_used = used;
+	if ( p_cached != NULL ) *p_cached = __atomic_load_n(&bc_all, __ATOMIC_RELAXED);
+	return n;
+}
+
+/* The volume's top object: kept in the superblock, written with the next change of it */
+EXPORT ER ts_set_top_blk( ID vol, CONST TS_UUID *uuid )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+	ER		er = E_OK;
+
+	if ( v == NULL ) {
+		return E_ID;
+	}
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	if ( v->rdonly ) {
+		er = E_RONLY;
+	} else {
+		if ( uuid != NULL ) {
+			v->sb.root_uuid = *uuid;
+		} else {
+			knl_memset(&v->sb.root_uuid, 0, sizeof(v->sb.root_uuid));
+		}
+		v->sb_dirty = TRUE;
+		er = cache_flush(v);
+	}
+	tk_unl_mtx(v->mtxid);
+
+	return er;
+}
+
+EXPORT ER ts_set_xref_blk( ID vol, CONST TS_UUID *uuid )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+	ER		er = E_OK;
+
+	if ( v == NULL ) {
+		return E_ID;
+	}
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	if ( v->rdonly ) {
+		er = E_RONLY;
+	} else {
+		if ( uuid != NULL ) {
+			v->sb.xref_uuid = *uuid;
+		} else {
+			knl_memset(&v->sb.xref_uuid, 0, sizeof(v->sb.xref_uuid));
+		}
+		v->sb_dirty = TRUE;
+		er = cache_flush(v);
+	}
+	tk_unl_mtx(v->mtxid);
 
 	return er;
 }
@@ -2490,4 +2595,410 @@ EXPORT ER knl_tsfsblk_raw_flush( ID vol )
 	}
 	er = dev_flush(v->dd);
 	return ( er == E_NOSPT ) ? E_OK : er;
+}
+
+/* ---------------------------------------------------------------- the check of a whole volume */
+
+/*
+ * The common head looked at as ts_blk_check looks at it, but nothing is
+ * recorded: the check of a volume finds damage to report it, and only
+ * the repair decides what becomes of the volume.
+ */
+EXPORT ER ts_blk_good( ID vol, CONST UB *buf, CONST char *magic, UD blk )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+
+	if ( v == NULL || buf == NULL || magic == NULL ) {
+		return E_PAR;
+	}
+	return hd_good(&v->sb.vol_uuid, buf, magic, blk) ? E_OK : E_OBJ;
+}
+
+EXPORT ER ts_blk_group( ID vol, UD n, T_TSFSAGREF *pk )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+	TSFSAG		*a;
+
+	if ( v == NULL || pk == NULL ) {
+		return E_ID;
+	}
+	if ( n >= v->sb.ag_count ) {
+		return E_PAR;
+	}
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	a = &v->ag[n];
+	pk->first = a->first;
+	pk->len = a->len;
+	pk->meta = ag_meta(a);
+	pk->free = a->free;
+	pk->map_first = a->map_first;
+	pk->map_blocks = a->map_blocks;
+	pk->spare = a->spare;
+	tk_unl_mtx(v->mtxid);
+	return E_OK;
+}
+
+/* Map block `k` of group `n` as the volume holds it now, or E_OBJ when its checksum is not the head's */
+LOCAL ER map_copy( TSFSBLKVOL *v, UD n, UW k, UB *buf )
+{
+	UD	mapblk = v->ag[n].map_first + k;
+	INT	i;
+
+	if ( v->cache_blk == mapblk ) {
+		knl_memcpy(buf, v->cache, TSFSBLK_BLOCK_SIZE);
+		return E_OK;
+	}
+	i = held_of(v, mapblk);
+	if ( i >= 0 ) {
+		knl_memcpy(buf, v->held_buf[i], TSFSBLK_BLOCK_SIZE);
+		return E_OK;
+	}
+	if ( meta_read(VOL_ID(v), v->dd, mapblk, buf) < E_OK ) {
+		return E_IO;
+	}
+	return ( ts_crc32c(buf, TSFSBLK_BLOCK_SIZE) == v->ag[n].crc[k] ) ? E_OK : E_OBJ;
+}
+
+EXPORT ER ts_blk_map( ID vol, UD n, UW k, UB *buf )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+	ER		er;
+
+	if ( v == NULL || buf == NULL ) {
+		return E_ID;
+	}
+	if ( n >= v->sb.ag_count || k >= v->ag[n].map_blocks ) {
+		return E_PAR;
+	}
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	er = map_copy(v, n, k, buf);
+	tk_unl_mtx(v->mtxid);
+	return er;
+}
+
+/* The free blocks of group `n` its map shows, or -1 when a map block of it cannot be used */
+LOCAL D map_free( TSFSBLKVOL *v, UD n, UB *buf )
+{
+	TSFSAG	*a = &v->ag[n];
+	UD	off, lo = ag_meta(a), cnt = 0;
+	UW	k;
+
+	for ( k = 0; k < a->map_blocks; k++ ) {
+		if ( map_copy(v, n, k, buf) < E_OK ) {
+			return -1;
+		}
+		for ( off = (UD)k * BITS_PER_MAP; off < (UD)( k + 1 ) * BITS_PER_MAP && off < a->len; off++ ) {
+			if ( off >= lo && ( buf[( off % BITS_PER_MAP ) / 8] & ( 1 << ( off % 8 ) ) ) == 0 ) {
+				cnt++;
+			}
+		}
+	}
+	return (D)cnt;
+}
+
+/*
+ * A map block put back whole, made by the check of the volume from the
+ * blocks it found in use: it goes where any changed map block goes (into
+ * the open transaction, or to its place with its group head), and its
+ * checksum and the group's count of free blocks follow it.
+ */
+EXPORT ER ts_blk_map_put( ID vol, UD n, UW k, CONST UB *buf )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+	TSFSAG		*a;
+	UB		*tmp;
+	D		f;
+	ER		er;
+
+	if ( v == NULL || buf == NULL ) {
+		return E_ID;
+	}
+	if ( n >= v->sb.ag_count || k >= v->ag[n].map_blocks ) {
+		return E_PAR;
+	}
+	tmp = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	if ( tmp == NULL ) {
+		return E_NOMEM;
+	}
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	a = &v->ag[n];
+	if ( v->rdonly ) {
+		er = E_RONLY;
+	} else {
+		/* what the cache holds of another block goes first; the bad one is not read */
+		er = ( v->cache_blk == a->map_first + k ) ? E_OK : map_evict(v);
+	}
+	if ( er >= E_OK ) {
+		knl_memcpy(v->cache, buf, TSFSBLK_BLOCK_SIZE);
+		v->cache_blk = a->map_first + k;
+		v->cache_ag = n;
+		v->cache_k = k;
+		v->cache_dirty = TRUE;
+		er = map_evict(v);		/* the checksum into the head */
+	}
+	if ( er >= E_OK ) {
+		f = map_free(v, n, tmp);
+		if ( f >= 0 ) {
+			v->sb.free_blocks = v->sb.free_blocks - a->free + (UD)f;
+			a->free = (UD)f;
+		}
+		a->dirty = TRUE;
+		v->sb_dirty = TRUE;
+		if ( !v->jrnl_on ) er = cache_flush(v);
+	}
+	tk_unl_mtx(v->mtxid);
+	Kfree(tmp);
+	return er;
+}
+
+/*
+ * What the block layer keeps of itself, read from the medium and looked
+ * at without writing: both superblocks and the spares, each group head
+ * against the one in memory, each map against the checksum its head
+ * keeps, and each group's count of free blocks against its map. The
+ * journal is put in place first, so that the medium holds what the
+ * volume does.
+ */
+EXPORT ER ts_blk_inspect( ID vol, T_TSFSBLKINSP *pk )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+	T_TSFSBLK_SB	s;
+	UB		*buf;
+	UD		n, k, blk;
+	D		f;
+	INT		c;
+
+	if ( v == NULL || pk == NULL ) {
+		return E_ID;
+	}
+	knl_memset(pk, 0, sizeof(*pk));
+	(void)ts_sync_blk(vol);
+	buf = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	if ( buf == NULL ) {
+		return E_NOMEM;
+	}
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	for ( c = 0; c < 2; c++ ) {
+		if ( blk_read(v->dd, (UD)c, buf) < E_OK || sb_unpack(buf, &s) < E_OK
+		  || ts_uuid_cmp(&s.vol_uuid, &v->sb.vol_uuid) != 0 ) {
+			if ( pk->sb_bad++ == 0 ) pk->sb_first = (UD)c;
+		}
+	}
+	for ( n = 0; n < v->sb.ag_count; n++ ) {
+		TSFSAG	*a = &v->ag[n];
+
+		if ( a->spare ) {
+			blk = a->first + 1;
+			if ( blk_read(v->dd, blk, buf) < E_OK || sb_unpack(buf, &s) < E_OK
+			  || ts_uuid_cmp(&s.vol_uuid, &v->sb.vol_uuid) != 0 ) {
+				if ( pk->sb_bad++ == 0 ) pk->sb_first = blk;
+			}
+		}
+		if ( blk_read(v->dd, a->first, buf) < E_OK
+		  || !hd_good(&v->sb.vol_uuid, buf, TSFSBLK_MAGIC_AGH, a->first)
+		  || rd64(buf + AG_NO) != n || rd64(buf + AG_FIRST) != a->first
+		  || rd64(buf + AG_LEN) != a->len || rd64(buf + AG_MAPFIRST) != a->map_first ) {
+			if ( pk->head_bad++ == 0 ) pk->head_first = a->first;
+		}
+		for ( k = 0; k < a->map_blocks; k++ ) {
+			blk = a->map_first + k;
+			if ( blk_read(v->dd, blk, buf) < E_OK || ts_crc32c(buf, TSFSBLK_BLOCK_SIZE) != a->crc[k] ) {
+				if ( pk->map_bad++ == 0 ) pk->map_first = blk;
+			}
+		}
+		f = map_free(v, n, buf);
+		if ( f >= 0 && (UD)f != a->free ) {
+			if ( pk->count_bad++ == 0 ) pk->count_first = n;
+		}
+	}
+	pk->error = (BOOL)( ( v->sb.state & TSFSBLK_ST_ERROR ) != 0 || v->err_kind != 0 );
+	pk->rdonly = v->rdonly;
+	tk_unl_mtx(v->mtxid);
+	Kfree(buf);
+	return E_OK;
+}
+
+/*
+ * What ts_blk_inspect finds that the volume can put right from what it
+ * holds in memory: a superblock copy or a spare written again, a group
+ * head written again, and each group's count of free blocks taken from
+ * its map. A map that does not match its head is left alone. Answers
+ * how many were put right.
+ */
+EXPORT ER ts_blk_mend( ID vol, UD *p_mended )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+	T_TSFSBLK_SB	s;
+	UB		*buf, *good;
+	UD		n, blk, sum = 0, mended = 0;
+	D		f;
+	INT		c;
+	ER		er = E_OK;
+
+	if ( v == NULL ) {
+		return E_ID;
+	}
+	(void)ts_sync_blk(vol);
+	buf = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	good = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	if ( buf == NULL || good == NULL ) {
+		if ( buf != NULL ) Kfree(buf);
+		if ( good != NULL ) Kfree(good);
+		return E_NOMEM;
+	}
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	if ( v->rdonly || v->jrnl_on ) {
+		er = v->rdonly ? E_RONLY : E_BUSY;
+		goto exit;
+	}
+	for ( n = 0; n < v->sb.ag_count; n++ ) {
+		TSFSAG	*a = &v->ag[n];
+
+		f = map_free(v, n, buf);
+		if ( f >= 0 && (UD)f != a->free ) {
+			a->free = (UD)f;
+			a->dirty = TRUE;
+			mended++;
+		}
+		sum += a->free;
+		if ( blk_read(v->dd, a->first, buf) < E_OK
+		  || !hd_good(&v->sb.vol_uuid, buf, TSFSBLK_MAGIC_AGH, a->first)
+		  || rd64(buf + AG_NO) != n || rd64(buf + AG_FIRST) != a->first ) {
+			a->dirty = TRUE;
+			mended++;
+		}
+	}
+	if ( v->sb.free_blocks != sum ) {
+		v->sb.free_blocks = sum;
+		v->sb_dirty = TRUE;
+	}
+	er = cache_flush(v);
+
+	/* the superblocks after the heads, each from memory */
+	for ( c = 0; c < 2 && er >= E_OK; c++ ) {
+		if ( blk_read(v->dd, (UD)c, buf) >= E_OK && sb_unpack(buf, &s) >= E_OK
+		  && ts_uuid_cmp(&s.vol_uuid, &v->sb.vol_uuid) == 0 ) {
+			continue;
+		}
+		if ( sb_write(v) >= E_OK && ( v->sb.generation & 1 ) != (UD)c ) {
+			(void)sb_write(v);
+		}
+		mended++;
+	}
+	sb_pack(&v->sb, good);
+	for ( n = 0; n < v->sb.ag_count && er >= E_OK; n++ ) {
+		if ( !v->ag[n].spare ) continue;
+		blk = v->ag[n].first + 1;
+		if ( blk_read(v->dd, blk, buf) >= E_OK && sb_unpack(buf, &s) >= E_OK
+		  && ts_uuid_cmp(&s.vol_uuid, &v->sb.vol_uuid) == 0 ) {
+			continue;
+		}
+		if ( blk_write(v->dd, blk, good) >= E_OK ) {
+			mended++;
+		}
+	}
+
+    exit:
+	tk_unl_mtx(v->mtxid);
+	Kfree(buf);
+	Kfree(good);
+	if ( p_mended != NULL ) {
+		*p_mended = mended;
+	}
+	return er;
+}
+
+LOCAL BOOL held_read_only( TSFSBLKVOL *v );
+
+/*
+ * A volume opened with an error recorded was not replayed: what its log
+ * holds is put back now and the volume read again as it leaves it, so
+ * that a check sees what a mount without the error would. Only for a
+ * volume nothing else has open.
+ */
+EXPORT ER ts_blk_replay( ID vol )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+	ER		er;
+
+	if ( v == NULL ) {
+		return E_ID;
+	}
+	if ( knl_jrnl_ready(vol) ) {
+		return E_OK;
+	}
+	/* the log is put in place past the read-only state the error set */
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	v->rdonly = FALSE;
+	tk_unl_mtx(v->mtxid);
+	er = ts_jrnl_replay(vol);
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	if ( er >= E_OK ) {
+		v->cache_blk = ~(UD)0;		/* the map block held is from before */
+		v->cache_dirty = FALSE;
+		er = vol_load(v);
+	}
+	v->rdonly = held_read_only(v);
+	tk_unl_mtx(v->mtxid);
+	return er;
+}
+
+/* Whether the volume's error, or a feature it does not know, keeps it from writing */
+LOCAL BOOL held_read_only( TSFSBLKVOL *v )
+{
+	return (BOOL)( ( v->sb.state & TSFSBLK_ST_ERROR ) != 0 || v->err_kind != 0
+		    || ( v->sb.ro_compat & ~KNOWN_ROCOMPAT ) != 0 );
+}
+
+/*
+ * A volume an error stopped writing, let write again while it is
+ * repaired (on), and stopped again afterwards if the error is still
+ * there (off). A feature this code does not know keeps it read only.
+ */
+EXPORT ER ts_blk_writable( ID vol, BOOL on )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+	ER		er = E_OK;
+
+	if ( v == NULL ) {
+		return E_ID;
+	}
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	if ( ( v->sb.ro_compat & ~KNOWN_ROCOMPAT ) != 0 ) {
+		er = E_NOSPT;
+	} else if ( on ) {
+		v->rdonly = FALSE;
+	} else {
+		v->rdonly = held_read_only(v);
+	}
+	tk_unl_mtx(v->mtxid);
+	return er;
+}
+
+/*
+ * The volume found whole by a check: the error it recorded is cleared,
+ * the time of the check kept, and it writes again.
+ */
+EXPORT ER ts_blk_checked( ID vol )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+	ER		er = E_OK;
+
+	if ( v == NULL ) {
+		return E_ID;
+	}
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	v->err_kind = 0;
+	v->err_first = v->err_last = v->err_blk = 0;
+	v->sb.state &= (UW)~TSFSBLK_ST_ERROR;
+	v->sb.err_kind = 0;
+	v->sb.err_first = v->sb.err_last = v->sb.err_blk = 0;
+	v->sb.fsck_time = (UD)now_time();
+	v->rdonly = held_read_only(v);
+	v->sb_dirty = TRUE;
+	if ( !v->jrnl_on && !v->rdonly ) {
+		er = sb_write(v);
+	}
+	tk_unl_mtx(v->mtxid);
+	return er;
 }

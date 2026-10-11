@@ -24,30 +24,37 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define DEV_MAX		32
+#define DEV_MAX		2048		/* devices listed: every disk and partition the device manager knows */
 
 /* Where a device's volume is mounted now, or FALSE */
 LOCAL BOOL mounted_at( const TS_UUID *obj, const char *dev, char *dir, INT max )
 {
-	T_FSMNT	mt[FS_MAX_MOUNT];
-	INT	n = fs_mounts(mt, FS_MAX_MOUNT), i;
+	T_FSMNT	*mt;
+	INT	n = fs_mounts(NULL, 0), got, i;
+	BOOL	hit = FALSE;
 
-	for ( i = 0; i < n && i < FS_MAX_MOUNT; i++ ) {
+	/* as many as there are now, and a few more that may come meanwhile */
+	if ( n <= 0 || ( mt = (T_FSMNT *)malloc(sizeof(T_FSMNT) * (size_t)( n + 4 )) ) == NULL ) {
+		return FALSE;
+	}
+	got = fs_mounts(mt, n + 4);
+	for ( i = 0; i < got && i < n + 4 && !hit; i++ ) {
 		if ( ( obj != NULL && memcmp(&mt[i].obj, obj, sizeof(TS_UUID)) == 0 )
 		  || ( dev != NULL && dev[0] != 0 && strcmp((const char *)mt[i].dev, dev) == 0 ) ) {
 			if ( dir != NULL ) {
 				strncpy(dir, (const char *)mt[i].path, (size_t)max - 1);
 				dir[max - 1] = 0;
 			}
-			return TRUE;
+			hit = TRUE;
 		}
 	}
-	return FALSE;
+	free(mt);
+	return hit;
 }
 
 EXPORT INT bk_media_list( BKMEDIA *m, INT max )
 {
-	TS_UUID	ids[DEV_MAX];
+	TS_UUID	*ids = (TS_UUID *)malloc(sizeof(TS_UUID) * DEV_MAX);
 	T_OBREF	r;
 	INT	cnt = 0, i, n = 0;
 	char	dir[FS_PATH_MAX];
@@ -65,7 +72,7 @@ EXPORT INT bk_media_list( BKMEDIA *m, INT max )
 		strcpy(m[n].dir, "/boot");
 		n++;
 	}
-	if ( ob_lst_obj(OB_T_DEVICE, OB_S_DISK, NULL, ids, DEV_MAX, &cnt) >= E_OK ) {
+	if ( ids != NULL && ob_lst_obj(OB_T_DEVICE, OB_S_DISK, NULL, ids, DEV_MAX, &cnt) >= E_OK ) {
 		for ( i = 0; i < cnt && i < DEV_MAX && n < max; i++ ) {
 			/* the device manager lists every kind of device */
 			if ( ob_ref_obj(&ids[i], &r) < E_OK || r.sub != OB_S_DISK ) continue;
@@ -80,6 +87,7 @@ EXPORT INT bk_media_list( BKMEDIA *m, INT max )
 			n++;
 		}
 	}
+	free(ids);
 	return n;
 }
 

@@ -293,6 +293,38 @@ EXPORT void  knl_Ifree( void *ptr )
 }
 
 
+#if USE_KTEST
+/* For the tests: whether the block ptr that knl_Imalloc gave is still taken */
+EXPORT BOOL knl_Iinuse( void *ptr )
+{
+	return chkAreaFlag((QUEUE*)ptr - 1, AREA_USE) ? TRUE : FALSE;
+}
+#endif
+
+/*
+ * Bytes the areas in use hold, and how many areas they are: what the
+ * tests look at for memory not given back
+ */
+EXPORT SZ knl_Iused( INT *p_areas )
+{
+	QUEUE	*aq;
+	SZ	used = 0;
+	INT	n = 0;
+	UINT	imask;
+
+	ISpinLock(&knl_imalloc_lock, &imask);
+	for ( aq = knl_imacb->areaque.next; aq != &knl_imacb->areaque; aq = aq->next ) {
+		if ( aq->next == &knl_imacb->areaque ) break;	/* the end mark */
+		if ( chkAreaFlag(aq, AREA_USE) ) {
+			used += (SZ)AreaSize(aq);
+			n++;
+		}
+	}
+	ISpinUnlock(&knl_imalloc_lock, &imask);
+	if ( p_areas != NULL ) *p_areas = n;
+	return used;
+}
+
 /* ------------------------------------------------------------------------ */
 
 /*

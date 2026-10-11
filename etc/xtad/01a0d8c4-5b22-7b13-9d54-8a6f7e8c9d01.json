@@ -44,9 +44,6 @@
     }
   },
   "webBrowser": {
-    "url": "https://www.tron.org",
-    "title": "ブラウザ",
-    "back": [],
-    "forward": []
+    "title": "ブラウザ"
   }
 }

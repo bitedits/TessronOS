@@ -43,7 +43,7 @@
 
 #define MODE_TEXT_MAX	1024
 
-#ifdef RPI5
+#if defined(RPI5) || defined(RPI4)
 #define DRIVER		"firmware framebuffer (HDMI)"
 #else
 #define DRIVER		"bochs-display"

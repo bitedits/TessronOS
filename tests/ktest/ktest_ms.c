@@ -784,6 +784,7 @@ LOCAL void test_vopen( void )
 	TS_UUID	prog, scr, memo, fig, pu, ch, v1, v2;
 	T_OBCRE	c;
 	T_OBREF	r;
+	T_OBPRT	rp;
 	T_PSTS	psts;
 	T_DTREQ	rq;
 	T_DTANS	an;
@@ -798,10 +799,16 @@ LOCAL void test_vopen( void )
 	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_PROG_MICROSCRIPT, &prog), E_OK);
 	if ( ob_ref_obj(&prog, &r) < E_OK ) KT_SKIP("no microscript program");
 	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &ch) >= E_OK ) KT_SKIP("a desktop is running");
+	/* written by every program, as the desktop's own is (design 8.7.4) */
+	knl_memset(&rp, 0, sizeof(rp));
+	rp.owner = ob_user_system;
+	rp.group = ob_group_admin;
+	rp.mode = 0622;
 	knl_memset(&c, 0, sizeof(c));
 	c.type = OB_T_CHANNEL;
 	c.name = (CONST UB *)DT_REQ_NAME;
 	c.flags = OB_F_GLOBAL;
+	c.prt = &rp;
 	KT_ASSERT_ER(ob_cre_obj(&c, &ch), E_OK);
 	kc = ob_opn_obj(&ch, OB_OP_READ | OB_O_NOWAIT);
 	KT_ASSERT(kc > 0);

@@ -2220,7 +2220,15 @@ static MSV fn_datetm( MSTH *t, MSN *n, MSSCOPE *sc )
 	tm.tm_sec = ms_int32(el_n(v, st + 5));
 	if ( dt_mktime(&tm, &tt) < E_OK ) return mv_num(MS_INVALID);
 	(void)dt_getsystz(&tz);
-	return mv_num((double)tt - tz * 60.0);
+	tt -= (TS_TIME)tz * 60;
+	{
+		/* in summer time the clock is an hour ahead of the standard offset */
+		TS_TIME	before = tt - 3600;
+		TS_TM	k;
+
+		if ( dt_localtime(&before, &k) >= E_OK && k.tm_isdst ) tt -= 3600;
+	}
+	return mv_num((double)tt);
 }
 
 static MSV fn_strnum( MSTH *t, MSN *n, MSSCOPE *sc, MSV *a, INT na )

@@ -79,6 +79,7 @@ F_READABLE = 0x0004
 F_GARBAGE = 0x0100
 F_ORPHAN = 0x0200
 F_RELINK = 0x0400
+F_TRASH = 0x1000          # a cabinet of 隠れ屑実身 the disk repair made
 F_DEFAULT = F_EDITABLE | F_DELETABLE | F_READABLE
 
 FORM_NONE = 0
@@ -111,7 +112,7 @@ XL_N = 64
 XL_ENT = 128
 XL_ESZ = 24
 
-MAX_REC = 64
+MAX_REC = 256                           # records of one object (TSFS_MAX_REC)
 MAX_RES = 64
 EXT_LEN = 16
 META_MAX = 65536

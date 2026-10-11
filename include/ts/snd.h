@@ -17,9 +17,11 @@
  *
  *	Data number 0 or 1:
  *	  read	 recorded bytes since the previous read (0 while playing)
- *	  write	 bytes to play, into the free part of the PCM buffer; while
- *		 stopped, number 0 starts at the top of the buffer and number
- *		 1 goes on after the previous write
+ *	  write	 bytes to play, into the free part of the PCM buffer; the
+ *		 first write after a stop starts a new stream, at the top of
+ *		 the buffer when it is number 0 (what the last stream left
+ *		 unplayed is dropped); every other write goes on after the
+ *		 previous one
  *	A read or write of size 0 answers the bytes there are (read) or the
  *	room there is (write). A negative number is an attribute below; a
  *	read of size 0 answers its size.
@@ -33,8 +35,14 @@
  *	play are mixed into the one stream the hardware plays, so several
  *	programs can sound at once. One channel at a time records.
  *
- *	The hardware behind it is the first USB audio function plugged in,
- *	or, on the Raspberry Pi 5, the I2S interface of the header pins.
+ *	The hardware behind it is the output chosen (DN_SDOUTSEL), or with
+ *	"auto" chosen, the first USB audio function plugged in, else, on the
+ *	Raspberry Pi 5, the I2S interface of the header pins. The Raspberry
+ *	Pi 5 has its two HDMI sockets as outputs too, taken only when chosen.
+ *	An output chosen that is not there (a USB device taken out) leaves
+ *	the sound on what "auto" would take, and it goes back to the chosen
+ *	one when that comes again; a change of output, chosen or forced,
+ *	moves the stream without stopping a channel.
  */
 
 #ifndef __TS_SND_H__
@@ -79,6 +87,10 @@ extern "C" {
 #define DN_SDVOLAUX2		(-134)
 /* TessronOS: SDStat, what the device and the hardware under it have done */
 #define DN_SDSTAT		(-140)
+/* TessronOS: R : SDOut[], "auto" and every output there is now */
+#define DN_SDOUTS		(-141)
+/* TessronOS: RW: SDOutSel, the output chosen; written, it is taken at once */
+#define DN_SDOUTSEL		(-142)
 
 /* DN_SDPCMINFO: one entry per sampling rate code */
 typedef struct {
@@ -174,6 +186,122 @@ typedef struct {
 #define SND_BE_NONE		0
 #define SND_BE_USB		1	/* a USB audio function */
 #define SND_BE_I2S		2	/* the RP1's I2S (Raspberry Pi 5) */
+#define SND_BE_HDMI		3	/* an HDMI socket (Raspberry Pi 5) */
+
+/*
+ * The outputs (DN_SDOUTS, DN_SDOUTSEL). An output is named by an id
+ * that stays the same from one start to the next:
+ *	auto		  what is there, in the order above
+ *	i2s		  the I2S interface on GPIO 18-21 (a DAC board)
+ *	hdmi0, hdmi1	  the HDMI sockets
+ *	usb:VVVV:PPPP@P	  a USB audio function: its vendor and product ids
+ *			  in hex and where it is plugged in (P: the
+ *			  controller from 0, a '-', its root port from 1,
+ *			  then the hub ports, as 0-2.4)
+ * A USB function chosen and plugged into another socket is still the
+ * one chosen: with no function at the port named, the first of the same
+ * ids is taken.
+ */
+/*
+ * The structures this system adds (SDOut, SDOutSel, SDMix ...) are made
+ * of INT and UINT, which are 32 bits in a program and in the kernel
+ * alike; W and UW are not, in a program built without config.h first.
+ */
+#define SND_ID_MAX		32
+#define SND_NAME_MAX		64
+#define SND_OUT_MAX		8	/* DN_SDOUTS answers at most this many */
+#define SND_ID_AUTO		"auto"
+
+typedef struct {
+	UB	id[SND_ID_MAX];		/* as above, NUL ended */
+	UB	name[SND_NAME_MAX];	/* UTF-8: what is attached -- a USB function's
+					   product, a screen's name -- "" when not known */
+	UINT	kind;			/* SND_BE_*; SND_BE_NONE for "auto" */
+	UINT	flags;			/* SND_OF_* */
+	UINT	rate;			/* while it plays: the rate and channels */
+	UINT	channels;
+} SDOut;
+
+#define SND_OF_CHOSEN		0x0001	/* the one chosen */
+#define SND_OF_PLAYING		0x0002	/* the one the stream plays on now */
+#define SND_OF_NOSOUND		0x0004	/* there, but cannot sound now (a screen that
+					   takes no sound, nothing plugged in) */
+#define SND_OF_LEVEL		0x0008	/* has a volume (DN_SDVOLMAIN) */
+
+typedef struct {
+	UB	id[SND_ID_MAX];		/* written: what to choose; read: what was chosen */
+	UB	now[SND_ID_MAX];	/* read: what plays now, "" when nothing does */
+} SDOutSel;
+
+/*
+ * The mixer (DN_SDMIXER, DN_SDMIXSET). Each program's channels are
+ * scaled by the program's volume before they are added together, and
+ * the sum by the whole's volume, left and right apart; a sum beyond
+ * what 16 bits hold is bent softly back rather than cut. A volume is 0
+ * to SND_VOL_MAX and scales the samples by its square (50 by a quarter,
+ * 12dB down), which the ear takes as even steps; a mute silences
+ * without losing the volume.
+ *
+ * A program is its program object: the volume set for it holds for
+ * every process started from it, now and from the next start on (the
+ * machine's settings' lines SOUND_VOL and SOUND_APP, uconf.c). A
+ * process started from a file has its own, for as long as it runs; the
+ * system's own sounds (kernel tasks: the buzzer and the clicks) are one
+ * more, pid 0.
+ */
+#define DN_SDMIXER		(-143)	/* R : SDMix, the whole and the programs that use the device */
+#define DN_SDMIXSET		(-144)	/* W : SDMixSet, a volume and mute set */
+
+#define SND_VOL_MAX		100
+#define SND_APP_MAX		16	/* programs DN_SDMIXER answers at most */
+
+typedef struct {
+	UB	prog[16];		/* the program object's UUID; zeros: none */
+	INT	pid;			/* a process of it, 0 the system's own */
+	UB	name[SND_NAME_MAX];	/* UTF-8, for a person */
+	UINT	vol;			/* 0 .. SND_VOL_MAX */
+	UINT	mute;
+	UINT	channels;		/* channels it has open */
+	UINT	playing;		/* of them, playing */
+	UINT	level;			/* the loudest it sounded of late, 0 .. 32767 */
+} SDMixApp;
+
+typedef struct {
+	UINT	lv, rv;			/* the whole, left and right: 0 .. SND_VOL_MAX */
+	UINT	mute;
+	UINT	level_l, level_r;	/* the loudest it sounded of late, 0 .. 32767 */
+	UINT	napp;
+	SDMixApp app[SND_APP_MAX];
+} SDMix;
+
+#define SND_MIX_ALL		0	/* SDMixSet.what: the whole, lv and rv */
+#define SND_MIX_APP		1	/* a program, lv */
+
+typedef struct {
+	UINT	what;			/* SND_MIX_* */
+	UB	prog[16];		/* SND_MIX_APP: the program object, or zeros ... */
+	INT	pid;			/* ... and then the process (0 the system's own) */
+	UINT	lv, rv;
+	UINT	mute;
+} SDMixSet;
+
+/*
+ * The mixer from inside the kernel: set (keep: and kept for the next
+ * start, as a write of DN_SDMIXSET is), and read without the programs'
+ * names.
+ */
+IMPORT ER   knl_snd_mix_set( CONST SDMixSet *s, BOOL keep );
+IMPORT INT  knl_snd_mix_get( SDMix *m );
+/* The settings of the programs that have an object, as the keeper keeps them: how many */
+IMPORT INT  knl_snd_mix_kept( SDMixSet *s, INT max );
+/* What keeps the mixer's settings: called a second after they last changed */
+IMPORT void knl_snd_mix_keeper( void (*fn)( void ) );
+#ifdef USE_KTEST
+/* For a test: the last frames the mixer gave the hardware, stereo, the newest last */
+IMPORT INT  knl_snd_tap( H *dst, INT frames );
+/* For a test: the caller's channel of a unit taken as a channel of the program prog */
+IMPORT void knl_snd_tag( INT unit, CONST UB *prog );
+#endif
 
 /*
  * Register "snda" (design 10.15). The hardware may come and go later: a
@@ -186,16 +314,52 @@ IMPORT void knl_snd_poll( void );
 IMPORT BOOL knl_snd_active( void );
 
 /*
- * For a test: feed recorded frames as if the hardware had delivered
- * them (16 bit, channels per frame, at the rate the recording started).
+ * Called while a task waits for a USB transfer with the manager's lock
+ * held: a stream not on USB (the I2S) is served meanwhile
+ */
+IMPORT void knl_snd_service( void );
+
+/*
+ * Recorded frames as the hardware delivered them (16 bit, channels per
+ * frame, at the rate the recording started), with the USB manager's
+ * lock held (the drivers call it from their streams, which have it).
  */
 IMPORT void knl_snd_capture( CONST UB *src, INT frames, INT channels );
+
+/*
+ * For a test: the same, from a task that does not hold the manager's
+ * lock (it is taken here), so that the recording cannot end while the
+ * frames go in.
+ */
+IMPORT void knl_snd_feed( CONST UB *src, INT frames, INT channels );
 
 /*
  * For a test: recording takes what knl_snd_capture() is handed, as if it
  * came from hardware at 48kHz in stereo, instead of from a device.
  */
 IMPORT void knl_snd_loopback( BOOL on );
+
+/*
+ * The output chosen, by its id (SND_ID_AUTO for the order above):
+ * taken at once, the stream moved when it plays. The machine's settings
+ * line SOUND_OUT holds it from one start to the next (uconf.c).
+ * E_PAR for an id of no known form.
+ */
+IMPORT ER   knl_snd_select( CONST UB *id );
+
+/*
+ * The stream kept going (on) on the output the choice gives, silence
+ * sent while nothing plays; it stops and starts again only when the
+ * output changes or goes. Off (as it starts): the stream stops when
+ * nothing has played for the output's while (sndhw.h, tail_ms). The
+ * machine's settings line SOUND_KEEP holds it (uconf.c); the system
+ * object's record 8 shows it as KEEP and takes "KEEP 1" or "KEEP 0".
+ */
+IMPORT ER   knl_snd_keep( BOOL on );
+IMPORT BOOL knl_snd_keeping( void );
+
+/* The outputs as DN_SDOUTS has them; how many were put in o */
+IMPORT INT  knl_snd_outputs( SDOut *o, INT max );
 
 #ifdef __cplusplus
 }

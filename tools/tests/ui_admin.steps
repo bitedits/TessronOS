@@ -1,0 +1,61 @@
+# 管理者の権限の一時的な昇格 (design 8.7.2), for tools/ui_run.py: ネットワーク設定 is
+# started from its program as the desktop starts it, and acts as 利用者; its settings
+# are the administrator's, so writing them asks the desktop for the administrator's
+# password. On a disk whose 管理者 has none yet, the panel asks for one to be chosen
+# (typed twice; Tab goes to the second box); then a wrong one is refused and the right
+# one let; then the panel is put away and the settings are not written. The window
+# of ネットワーク設定 is at 200,120, its box 自ホスト at 405,222; Ctrl+S is 設定を更新,
+# and Enter agrees to its question. The password panel is over the desktop's own
+# window, which holds the keys while it is up.
+open 01a0d8c4-52b5-7a41-8c61-2d7e9f0a1b31
+expect netenv: ready
+wait 800
+click 405 222
+text kthost
+wait 300
+key 16 01
+wait 800
+key 28
+wait 1000
+shot adm_choose
+text ktest-admin
+key 2b
+text ktest-admin
+wait 300
+key 28
+expect the administrator's password was set
+expect the administrator's rights for process
+expect netenv: written
+wait 500
+# the second time: a wrong password told, the right one let
+click 405 222
+text 2
+key 16 01
+wait 800
+key 28
+wait 1000
+shot adm_ask
+text wrong
+key 28
+expect password typed wrong (1)
+wait 800
+shot adm_wrong
+key 28
+wait 800
+text ktest-admin
+key 28
+expect netenv: written
+wait 500
+# the third time: the panel put away, nothing written and nothing more said
+wait 1500
+click 405 222
+text 3
+key 16 01
+wait 1500
+key 28
+wait 1000
+key 29
+expect : not asked
+expect netenv: not written: no right
+wait 500
+shot adm_cancel

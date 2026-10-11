@@ -1,0 +1,11 @@
+<tad version="1.0" encoding="UTF-8" filename="キー配列のキーボードの形">
+<document>
+<p>キー配列のキーボードの形</p>
+<p>絵に描くキーボードの形。日本語、英語、TRON。メニューの定義。</p>
+</document>
+<menu>
+<item code="shape.jp">日本語</item>
+<item code="shape.us">英語</item>
+<item code="shape.tron">TRON</item>
+</menu>
+</tad>

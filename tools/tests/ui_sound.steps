@@ -1,0 +1,63 @@
+# システム環境設定's サウンド page (design 11, 6.5), for tools/ui_run.py with --wav (a USB
+# sound device beside the machine's): the outputs listed, one chosen at once and kept in the
+# machine's settings, 〈試聴〉 heard on it, the volume of a USB function, and the choice as
+# kept when the window is opened again. The window is at 160,80: in 機器情報, サウンド at
+# 228,286 and 表示 at 706,184; on the page, 自動 at 480,161, the USB function at 480,178,
+# the volume at 470,420 and 試聴 at 410,458. Ctrl+E closes.
+open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
+expect sysenv: ready
+wait 800
+win システム環境設定
+click 228 286
+wait 200
+click 706 184
+expect sysenv: sound 2 outputs, chosen auto, playing none
+wait 300
+shot snd_page
+# the USB function chosen: taken at once, kept
+click 480 178
+expect sysenv: sound output usb:46f4:0002@
+expect sysenv: sound 2 outputs, chosen usb:46f4:0002@
+# a tone on it
+click 410 458
+expect sysenv: sound test 0
+expect usb: audio plays at 48000 Hz
+wait 150
+shot snd_playing
+# the volume of the function
+click 470 420
+expect sysenv: sound volume
+shot snd_volume
+wait 800
+# opened again: the USB function still chosen
+key 08 01
+expect sysenv: closed
+# (the console's lines of this second opening are the same as some of the first's, so
+# it is waited for long enough to be up -- it takes some seconds -- and the shots tell)
+open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
+wait 8000
+win システム環境設定
+click 228 286
+wait 300
+click 706 184
+wait 1200
+shot snd_again
+# back to 自動
+click 480 161
+expect sysenv: sound output auto
+wait 500
+shot snd_auto
+# 出力を止めずに流し続ける (498,493): on, the stream starts with nothing to play and goes on;
+# off, it stops again (the USB function's while after a sound is none)
+click 498 493
+expect sysenv: sound keep 1 (0)
+expect snd: the stream kept going
+wait 1500
+shot snd_keep
+click 498 493
+expect sysenv: sound keep 0 (0)
+expect snd: the stream stops when nothing plays
+wait 500
+key 08 01
+wait 500
+absent !OACV!

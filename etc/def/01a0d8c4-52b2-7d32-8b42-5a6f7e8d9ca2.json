@@ -26,7 +26,15 @@
       "attr": [
         "perm"
       ],
-      "acl": [],
+      "acl": [
+        {
+          "group": "01a0d680-3aab-7c05-9e47-13d86a2fc158",
+          "ops": [
+            "r",
+            "w"
+          ]
+        }
+      ],
       "records": []
     }
   }

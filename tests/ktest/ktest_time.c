@@ -369,7 +369,7 @@ LOCAL void test_tickless( void )
 	KT_ASSERT_ER(tk_dly_tsk(200), E_OK);
 	n1 = knl_timer_irq_count;
 	tm_printf((UB*)"  timer interrupts during a 200ms delay: %d\n", (INT)(n1 - n0));
-#ifdef RPI5
+#if KT_BOARD
 	/* the Ethernet receiver looks at its ring on a timer (no interrupt yet) */
 	KT_SKIP("the Ethernet receiver polls, so other timers run during the delay");
 #endif
@@ -540,7 +540,7 @@ LOCAL void test_clock_set( void )
 	KT_ASSERT_EQ(changes(), 0);
 	KT_ASSERT_ER(dt_setsystz(0), E_OK);
 	KT_ASSERT_EQ(changes(), 1);
-	KT_ASSERT(cal_says("\"tz\":0}"));
+	KT_ASSERT(cal_says("\"tz\":0,\"zone\":\"\"}"));
 	KT_ASSERT_ER(dt_setsystz(ZONE), E_OK);
 	KT_ASSERT_EQ(changes(), 1);
 
@@ -577,7 +577,106 @@ LOCAL void test_zone_kept( void )
 		KT_ASSERT_EQ(z, ZONE);			/* what the calendar keeps */
 	}
 	KT_ASSERT_ER(dt_setsystz(0), E_OK);
-	KT_ASSERT(cal_says("\"tz\":0}"));
+	KT_ASSERT(cal_says("\"tz\":0,\"zone\":\"\"}"));
+}
+
+/*
+ * The zone by its name: kept in the calendar with its offset, read back,
+ * dropped when the offset alone is set to another. The local time follows
+ * the summer time of the zones that keep it, at the very second it
+ * begins and ends (2026: the United States from 8 March to 1 November,
+ * the European Union from 29 March to 25 October), and the local time
+ * made back into UTC (dt_mktime_local) is the same moment (outside the
+ * hour that comes twice when summer time ends). A name that
+ * is not one is refused. Then the zone as it was.
+ */
+LOCAL TS_TIME utc_of( INT y, INT mo, INT d, INT h, INT mi, INT sec )
+{
+	TS_TM	tm;
+	TS_TIME	t = 0;
+
+	knl_memset(&tm, 0, sizeof(tm));
+	tm.tm_year = y - 1900;
+	tm.tm_mon = mo - 1;
+	tm.tm_mday = d;
+	tm.tm_hour = h;
+	tm.tm_min = mi;
+	tm.tm_sec = sec;
+	(void)dt_mktime(&tm, &t);
+	return t;
+}
+
+/* The local hour, minute and summer time of a moment, as hhmm + 10000 in summer time */
+LOCAL INT local_hm( TS_TIME t )
+{
+	TS_TM	tm;
+	TS_TIME	back = 0;
+
+	if ( dt_localtime(&t, &tm) < E_OK ) return -1;
+	/* and back: the same moment */
+	if ( dt_mktime_local(&tm, &back) < E_OK || back != t ) {
+		tm_printf((UB*)"  %d-%02d-%02d %02d:%02d made back %d s off\n", tm.tm_year + 1900,
+			  tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, (INT)( back - t ));
+		return -2;
+	}
+	return tm.tm_hour * 100 + tm.tm_min + ( tm.tm_isdst ? 10000 : 0 );
+}
+
+LOCAL void test_zone_name( void )
+{
+	char	name[DT_ZONE_MAX], was[DT_ZONE_MAX];
+	INT	z0 = 0, z = 0;
+
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_CALENDAR, &cal), E_OK);
+	KT_ASSERT_ER(dt_getsystz(&z0), E_OK);
+	KT_ASSERT(dt_getsyszone(was, sizeof(was)) >= 0);
+
+	KT_ASSERT_ER(dt_setsyszone("America/New_York", -300), E_OK);
+	KT_ASSERT_EQ(dt_getsyszone(name, sizeof(name)), 16);
+	KT_ASSERT(knl_strcmp(name, "America/New_York") == 0);
+	KT_ASSERT(cal_says("\"tz\":-300,\"zone\":\"America/New_York\"}"));
+	KT_ASSERT_EQ(local_hm(utc_of(2026, 1, 15, 12, 0, 0)), 700);
+	KT_ASSERT_EQ(local_hm(utc_of(2026, 7, 1, 12, 0, 0)), 10800);
+	KT_ASSERT_EQ(local_hm(utc_of(2026, 3, 8, 6, 59, 0)), 159);
+	KT_ASSERT_EQ(local_hm(utc_of(2026, 3, 8, 7, 0, 0)), 10300);
+	KT_ASSERT_EQ(local_hm(utc_of(2026, 11, 1, 5, 59, 0)), 10159);
+	KT_ASSERT_EQ(local_hm(utc_of(2026, 11, 1, 7, 0, 0)), 200);
+
+	KT_ASSERT_ER(dt_setsyszone("Europe/Paris", 60), E_OK);
+	KT_ASSERT_EQ(local_hm(utc_of(2026, 3, 29, 0, 59, 0)), 159);
+	KT_ASSERT_EQ(local_hm(utc_of(2026, 3, 29, 1, 0, 0)), 10300);
+	KT_ASSERT_EQ(local_hm(utc_of(2026, 10, 25, 0, 59, 0)), 10259);
+	KT_ASSERT_EQ(local_hm(utc_of(2026, 10, 25, 2, 0, 0)), 300);
+
+	KT_ASSERT_ER(dt_setsyszone("Australia/Sydney", 600), E_OK);
+	KT_ASSERT_EQ(local_hm(utc_of(2026, 1, 15, 12, 0, 0)), 12300);
+	KT_ASSERT_EQ(local_hm(utc_of(2026, 7, 1, 12, 0, 0)), 2200);
+	KT_ASSERT_ER(dt_setsyszone("Pacific/Auckland", 720), E_OK);
+	KT_ASSERT_EQ(local_hm(utc_of(2026, 1, 15, 9, 0, 0)), 12200);
+	KT_ASSERT_EQ(local_hm(utc_of(2026, 7, 1, 9, 0, 0)), 2100);
+
+	/* no summer time */
+	KT_ASSERT_ER(dt_setsyszone("Asia/Tokyo", 540), E_OK);
+	KT_ASSERT_EQ(local_hm(utc_of(2026, 7, 1, 12, 0, 0)), 2100);
+	KT_ASSERT_EQ(local_hm(utc_of(2026, 1, 15, 12, 0, 0)), 2100);
+	KT_ASSERT_EQ(dt_getsyszone(name, 5), E_PAR);
+
+	/* the offset alone: the name kept for the same, dropped for another */
+	KT_ASSERT_ER(dt_setsystz(540), E_OK);
+	KT_ASSERT_EQ(dt_getsyszone(name, sizeof(name)), 10);
+	KT_ASSERT_ER(dt_setsystz(600), E_OK);
+	KT_ASSERT_EQ(dt_getsyszone(name, sizeof(name)), 0);
+	KT_ASSERT(cal_says("\"tz\":600,\"zone\":\"\"}"));
+
+	/* refused, nothing changed */
+	KT_ASSERT_ER(dt_setsyszone("Asia/To kyo", 540), E_PAR);
+	KT_ASSERT_ER(dt_setsyszone("Asia/Tokyo\"", 540), E_PAR);
+	KT_ASSERT_ER(dt_setsyszone("Abcdefghij/Abcdefghij/Abcdefghij/Abcdefghij/Abcdefghij", 540), E_PAR);
+	KT_ASSERT_ER(dt_setsyszone("Asia/Tokyo", 15 * 60), E_PAR);
+	KT_ASSERT_ER(dt_getsystz(&z), E_OK);
+	KT_ASSERT_EQ(z, 600);
+
+	KT_ASSERT_ER(dt_setsyszone(was, z0), E_OK);
 }
 
 EXPORT void ktest_time( void )
@@ -595,4 +694,5 @@ EXPORT void ktest_time( void )
 	KT_RUN(test_rtc);
 	KT_RUN(test_clock_set);
 	KT_RUN(test_zone_kept);
+	KT_RUN(test_zone_name);
 }

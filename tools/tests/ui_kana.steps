@@ -1,0 +1,121 @@
+# かな入力練習 (design 11.14), for tools/ui_run.py: the template opened, keys held
+# shown on the keyboard, a practice begun and keys judged plain and shifted,
+# the split keyboard, 薙刀式, the Dvorak translation and back, 先読みキー数
+# asked in its panel, ローマ字, and closed. The menu opens with the item last
+# chosen under the pointer, so its rows move as the steps go.
+open 019c403c-bb89-7133-acc4-ddd109fb8182
+expect kanatype: ready
+wait 800
+win かな入力練習
+click 500 690
+keydown 0D
+keydown 09
+wait 300
+shot kana_held
+keyup 0D
+keyup 09
+key 28
+expect kanatype: started
+wait 300
+shot kana_started
+key 14
+expect kanatype: key KeyQ wrong ら
+keydown E1 02
+key 14 02
+keyup E1
+expect kanatype: key KeyQ wrong ひ
+wait 50
+shot kana_wrong
+key 29
+expect kanatype: stopped
+# キーボードレイアウト: TL Split Keyboard
+click 500 400 1
+wait 600
+move 520 461
+wait 150
+move 600 461
+wait 300
+move 700 481
+wait 150
+click 700 481
+expect kanatype: keyboard TL Split Keyboard 16mm Rev0
+wait 300
+shot kana_split
+# かな入力方式: 薙刀式v17
+click 500 400 1
+wait 600
+move 520 421
+wait 150
+move 600 421
+wait 300
+move 700 441
+wait 150
+click 700 441
+expect kanatype: kana 薙刀式v17
+# キーコード変換: Dvorak, and none again
+click 500 400 1
+wait 600
+move 520 420
+wait 150
+move 600 420
+wait 300
+move 700 440
+wait 150
+shot kana_menu_trans
+click 700 440
+expect kanatype: trans Dvorak (ファームウェア)
+click 500 400 1
+wait 600
+move 520 400
+wait 150
+move 600 400
+wait 300
+move 700 400
+wait 150
+click 700 400
+expect kanatype: trans なし
+# 練習: 先読みキー数 asked in its panel
+click 500 400 1
+wait 600
+move 520 420
+wait 150
+move 600 420
+wait 300
+move 720 480
+wait 150
+click 720 480
+wait 800
+text 6
+wait 300
+shot kana_look
+key 28
+expect kanatype: lookahead 6
+wait 300
+click 500 690
+key 28
+expect kanatype: started
+wait 400
+shot kana_naginata
+key 29
+expect kanatype: stopped
+# かな入力方式: ローマ字
+click 500 400 1
+wait 600
+move 520 360
+wait 150
+move 600 360
+wait 300
+move 720 420
+wait 150
+click 720 420
+expect kanatype: kana ローマ字
+key 28
+expect kanatype: started
+wait 400
+shot kana_romaji
+key 29
+expect kanatype: stopped
+key 08 01
+expect kanatype: closed
+# nothing it did was refused for want of a right
+absent !OACV!

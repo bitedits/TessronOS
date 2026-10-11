@@ -45,6 +45,33 @@ IMPORT ER ts_str_to_uuid( CONST char *str, TS_UUID *p_uuid );
 IMPORT INT ts_uuid_cmp( CONST TS_UUID *a, CONST TS_UUID *b );
 
 /*
+ * The id of a link (<link id="...">, design 8.3): where the object it
+ * points at is, from the outside in, each part a UUID and a slash after
+ * it, then the object's UUID and the record ("_0.xtad"):
+ *
+ *	object_0.xtad			an object of the volume the link is on
+ *	volume/object_0.xtad		an object of another volume
+ *	machine/volume/object_0.xtad	an object of another machine
+ *
+ * ts_lnk_split answers where in s (len bytes) the object's UUID starts,
+ * with where the volume's and the machine's are (-1 for none).
+ */
+#define TS_LNK_PART	( TS_UUID_STRLEN + 1 )	/* a UUID and its slash */
+
+static __inline__ INT ts_lnk_split( CONST UB *s, INT len, INT *p_vol, INT *p_mach )
+{
+	INT	n = 0;
+
+	while ( n < 2 && len >= ( n + 1 ) * TS_LNK_PART + TS_UUID_STRLEN
+		&& s[( n + 1 ) * TS_LNK_PART - 1] == '/' ) {
+		n++;
+	}
+	if ( p_vol != NULL ) *p_vol = ( n >= 1 ) ? ( n - 1 ) * TS_LNK_PART : -1;
+	if ( p_mach != NULL ) *p_mach = ( n >= 2 ) ? 0 : -1;
+	return n * TS_LNK_PART;
+}
+
+/*
  * Random bytes. Taken from the hardware generator where the machine has
  * one, otherwise from a generator seeded at start-up with the timer
  * counter and the device tree.

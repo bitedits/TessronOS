@@ -84,6 +84,40 @@ EXPORT ER knl_usb_clear_halt( USBDEV *dev, UB ep )
 			       0, ep, NULL, 0, NULL);
 }
 
+/*
+ * A device reset where it is plugged in (a program's request, uusb.c):
+ * its slot given up, its port reset, and the device addressed again and
+ * given the configuration it had. It keeps its place in the tree, its
+ * descriptors and its number. With the manager's lock held. E_IO when
+ * it does not come back as it was (another speed): it is then left
+ * without a slot, as the manager finds it when it looks at the port.
+ */
+EXPORT ER knl_usb_reset_device( USBDEV *dev )
+{
+	USBHC	*hc = dev->hc;
+	INT	speed = dev->speed;
+	ER	er;
+
+	hc->ops->dev_free(hc, dev);
+	dev->addr = 0;
+	er = ( dev->parent == NULL ) ? hc->ops->port_reset(hc, dev->port, &speed)
+				     : knl_hub_port_reset(dev->parent, dev->port, &speed);
+	if ( er < E_OK ) {
+		return er;
+	}
+	if ( speed != dev->speed ) {
+		return E_IO;
+	}
+	er = hc->ops->dev_init(hc, dev);
+	if ( er < E_OK ) {
+		return er;
+	}
+	er = knl_usb_control(dev, 0x00, USB_REQ_SET_CONFIG, dev->cfg_value, 0, NULL, 0, NULL);
+	USB_LOG("usb: %d-%d route %05x reset, addr %d (%d)\n", hc->index, dev->root_port, dev->route,
+		dev->addr, (INT)er);
+	return er;
+}
+
 /* The descriptor after p, NULL at the end or at one that does not fit */
 EXPORT UB *knl_usb_next_desc( UB *p, UB *end )
 {

@@ -1,0 +1,51 @@
+<tad version="1.0" encoding="UTF-8" filename="10.4 アニメーションとの同期">
+<realtime>
+<figure>
+<figView top="0" left="0" right="1920" bottom="1080"/>
+<figDraw top="0" left="0" right="1920" bottom="1080"/>
+<figScale hunit="-72" vunit="-72"/>
+<rect lineType="0" lineWidth="0" f_pat="1" left="0" top="0" right="1920" bottom="1080" fillColor="#16213e" zIndex="0"/>
+<document>
+<docView viewleft="120" viewtop="400" viewright="1800" viewbottom="500"/>
+<docDraw drawleft="120" drawtop="400" drawright="1800" drawbottom="500"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="10"/>
+<font size="72"/>
+<font color="#FFFFFF"/>
+10.4 アニメーションとの同期
+</document>
+<document>
+<docView viewleft="120" viewtop="540" viewright="1800" viewbottom="620"/>
+<docDraw drawleft="120" drawtop="540" drawright="1800" drawbottom="620"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="10"/>
+<font size="36"/>
+<font color="#A0B4D0"/>
+音と同時に球を補間で動かす
+</document>
+<ellipse id="ball" lineType="0" lineWidth="0" f_pat="1" fillColor="#ffc857" left="0" top="100" right="120" bottom="220" zIndex="20"/>
+</figure>
+<realData>
+<!-- ストリーム定義 -->
+<stream number="1">
+<deviceName>inst:Piano</deviceName>
+</stream>
+<stream number="2">
+<deviceName>display:</deviceName>
+</stream>
+<!-- 音楽と図形を同期 -->
+<realGroup type="parallel" stream="1">
+<timeDelta value="0"/>
+<note pitch="C4" velocity="100" duration="960"/>
+</realGroup>
+<realGroup type="parallel" stream="2">
+<timeDelta value="0"/>
+<!-- 補間で図形をスムーズに移動 -->
+<interpolate function="linear" divisions="10">
+<figureRef id="ball" x="0" y="100"/>
+<figureRef id="ball" x="400" y="100"/>
+</interpolate>
+</realGroup>
+</realData>
+</realtime>
+</tad>

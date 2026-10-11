@@ -1,0 +1,23 @@
+<tad version="1.0" encoding="UTF-8" filename="文字検索のメニュー">
+<document>
+<p>文字検索のメニュー</p>
+<p>文字検索の窓のメニュー。閉じる、入力、テキスト形式TRONコードの入力、トレーへの複写、トレーの文字の文字情報、検索結果のトレーへの保存、表示の倍率と、ウインドウ、小物、実行。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2050-7001-9a10-c1d2e3f45001"/></include>
+<item code="input" key="I">入力</item>
+<item code="inputcode" key="T">テキスト形式TRONコードを入力</item>
+<item code="copy" key="C">複写（トレーへ）</item>
+<item code="trayinfo">トレーの文字の文字情報</item>
+<line/>
+<item code="save1">検索結果をトレーへ（1ページ）</item>
+<item code="saveall">検索結果をトレーへ（全ページ）</item>
+<line/>
+<item code="z1">標準</item>
+<item code="z15">3/2倍</item>
+<item code="z2">2倍</item>
+<item code="z3">3倍</item>
+<item code="z4">4倍</item>
+<include><link id="01a0d889-46bd-7f9c-8bad-e3f4a5b6c789_0.xtad" vobjid="01a0d8c3-2050-7002-9a10-c1d2e3f45002"/></include>
+</menu>
+</tad>

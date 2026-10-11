@@ -1,0 +1,17 @@
+<tad version="1.0" encoding="UTF-8" filename="基本表計算の書式">
+<document>
+<p>基本表計算の書式</p>
+<p>基本表計算の書式。罫線、配置、セルの背景色、グラフ、用紙。メニューの定義。</p>
+</document>
+<menu>
+<item>罫線<link id="01a0d889-46d8-7289-8d9a-becfd0e1f289_0.xtad" vobjid="01a0d8c3-2003-700d-9a10-c1d2e3f40b0d"/></item>
+<item>配置<link id="01a0d889-46d9-739a-9eab-cfd0e1f2039a_0.xtad" vobjid="01a0d8c3-2003-700e-9a10-c1d2e3f40b0e"/></item>
+<item>セルの背景色<link id="01a0d889-46da-74ab-8fbc-d0e1f20314ab_0.xtad" vobjid="01a0d8c3-2003-700f-9a10-c1d2e3f40b0f"/></item>
+<item>グラフ<link id="01a0d889-46db-75bc-9acd-e1f2031425bc_0.xtad" vobjid="01a0d8c3-2003-7010-9a10-c1d2e3f40b10"/></item>
+<line/>
+<item code="paperframe">用紙枠表示オンオフ</item>
+<item code="pagesetup">用紙設定...</item>
+<line/>
+<item code="print" key="P">印刷...</item>
+</menu>
+</tad>

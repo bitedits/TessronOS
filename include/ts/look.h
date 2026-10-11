@@ -129,21 +129,32 @@ extern "C" {
 
 /* ------------------------------------------------------------ settings */
 
+/*
+ * The look of the windows (システム環境設定〈ウィンドウ〉). They are on
+ * the windows with a frame; LK_LOOK at 0 leaves every
+ * window solid, square, without a shadow and without motion, whatever
+ * the others hold. The machine's settings keep them from one start to
+ * the next (lib/libconf, cf_look_items).
+ */
 #define LK_LOOK		9100	/* on or off */
 #define LK_OPACITY	9101	/* how solid a frame is, 0..255 */
-#define LK_WASH		9102	/* a colour washed over the frame */
+#define LK_WASH		9102	/* a colour washed over the frame, 0xRRGGBB */
 #define LK_WASH_STR	9103	/* and how far towards it, 0..255 */
-#define LK_ROUND	9104	/* how far the corners are cut */
-#define LK_SHD_DX	9105
-#define LK_SHD_DY	9106
-#define LK_SHD_SIZE	9107	/* how far the shadow reaches past the window */
+#define LK_ROUND	9104	/* the radius of the corners, in dots */
+#define LK_SHD_DX	9105	/* how far the shadow is thrown across */
+#define LK_SHD_DY	9106	/* and down */
+#define LK_SHD_SIZE	9107	/* how far it fades out past the window */
 #define LK_SHD_DARK	9108	/* how dark it is, 0..255 */
 #define LK_BAR_WASH	9109	/* a colour washed over the title band */
 #define LK_BAR_STR	9110
-#define LK_MOTION	9111	/* how long an opening takes, in ms */
-#define LK_BLUR		9112	/* how far what shows through is blurred */
-#define LK_FROM		9113	/* bit 0: the frame's colours come from the scheme */
-#define LK_LIVE		9114	/* a window dragged is moved as it goes */
+#define LK_MOTION	9111	/* how long an opening or a closing takes, in ms */
+#define LK_BLUR		9112	/* how far what shows through is blurred, in dots */
+#define LK_FROM		9113	/* bit 0: the frame keeps the scheme's colours (not
+				   washed); bit 1: the title band does */
+#define LK_LIVE		9114	/* a window dragged is moved as it goes; 0: an outline */
+#define LK_OPA_WHOLE	9115	/* 1: the work area is seen through as the frame is */
+#define LK_GPU		9116	/* 1: the windows are composited on the GPU where there
+				   is one that passed its check; 0: on the processor */
 
 /*
  * What a person sets for themselves (ユーザ環境設定, design 16.5.23).
@@ -194,6 +205,8 @@ extern "C" {
 /* What the machine's settings say of the keyboard (システム環境設定) */
 #define LK_KBD_US	9170	/* an English keyboard: 1; a Japanese one: 0 */
 #define LK_KBD_MODE	9171	/* the input mode the desktop starts in: 0 かな, 1 英数 */
+#define LK_KBD_LAYOUT	9172	/* the latin layout: KM_LATIN_* (ts/keymap.h) */
+#define LK_KBD_KANA	9173	/* the kana layout: KM_KANA_* */
 
 #ifdef __cplusplus
 }

@@ -47,6 +47,8 @@ EXPORT T_SPACE	*knl_new_task_space = NULL;
  */
 LOCAL UD	sink_pa = 0;
 
+LOCAL void	stk_forget( UD l0_pa );	/* the places of stacks kept for a space that goes */
+
 IMPORT UBINT	knl_user_start_va;	/* __user_start (VA in the process space) */
 IMPORT UBINT	knl_user_text_end_va;
 IMPORT UBINT	knl_user_end_va;
@@ -225,6 +227,7 @@ EXPORT void knl_space_delete( T_SPACE *sp )
 	if ( sp->l0_pa == 0 ) {
 		return;
 	}
+	stk_forget(sp->l0_pa);
 	free_level(sp->l0_pa, 0, FALSE);
 	Asm("dsb ishst" ::: "memory");
 	Asm("tlbi aside1is, %0" :: "r"((UD)sp->asid << 48) : "memory");
@@ -319,7 +322,77 @@ EXPORT ER knl_space_protect( T_SPACE *sp, UBINT va, UD size, UD attr )
 }
 
 /*
- * User stack in a space: npages plus a guard page below it.
+ * The places of user stacks given back, to be handed out again to a
+ * stack of the same size in the same space: without them a space that
+ * makes and ends tasks would use up its stack area, and the tables for
+ * it with it (design 4.6.2). A space's places go with the space. When the
+ * list is full a place is not kept, and only that much is lost.
+ */
+#define STK_FREE_MAX	1024
+
+LOCAL struct {
+	UD	l0_pa;			/* the space */
+	UBINT	base;
+	UD	npages;
+}		stk_free[STK_FREE_MAX];
+LOCAL INT	stk_nfree = 0;
+
+/* Under space_lock: a place of npages in the space at l0_pa given back before, or 0 */
+LOCAL UBINT stk_take( UD l0_pa, UD npages )
+{
+	INT	i;
+	UBINT	base;
+
+	for ( i = stk_nfree - 1; i >= 0; i-- ) {
+		if ( stk_free[i].l0_pa == l0_pa && stk_free[i].npages == npages ) {
+			base = stk_free[i].base;
+			stk_free[i] = stk_free[--stk_nfree];
+			return base;
+		}
+	}
+	return 0;
+}
+
+LOCAL void stk_keep( UD l0_pa, UBINT base, UD npages )
+{
+	UINT	imask;
+
+	ISpinLock(&space_lock, &imask);
+	if ( stk_nfree < STK_FREE_MAX ) {
+		stk_free[stk_nfree].l0_pa = l0_pa;
+		stk_free[stk_nfree].base = base;
+		stk_free[stk_nfree].npages = npages;
+		stk_nfree++;
+	}
+	ISpinUnlock(&space_lock, &imask);
+}
+
+/* The places kept for the space at l0_pa forgotten: the space goes, and its L0 table may be another's next */
+LOCAL void stk_forget( UD l0_pa )
+{
+	UINT	imask;
+	INT	i;
+
+	ISpinLock(&space_lock, &imask);
+	for ( i = 0; i < stk_nfree; ) {
+		if ( stk_free[i].l0_pa == l0_pa ) {
+			stk_free[i] = stk_free[--stk_nfree];
+		} else {
+			i++;
+		}
+	}
+	ISpinUnlock(&space_lock, &imask);
+}
+
+/* User stacks kept to be handed out again, in all spaces (the tests) */
+EXPORT INT knl_ustack_kept( void )
+{
+	return stk_nfree;
+}
+
+/*
+ * User stack in a space: npages plus a guard page below it, at a place
+ * given back before when there is one of that size.
  */
 EXPORT void *knl_ustack_alloc_sp( T_SPACE *sp, UD npages, void **p_top )
 {
@@ -327,9 +400,15 @@ EXPORT void *knl_ustack_alloc_sp( T_SPACE *sp, UD npages, void **p_top )
 	UINT	imask;
 	UD	i;
 
+	(void)knl_pt_reclaim();
 	ISpinLock(&space_lock, &imask);
-	top = sp->stk_next;
-	sp->stk_next -= (npages + 1) << PAGE_SHIFT;
+	base = stk_take(sp->l0_pa, npages);
+	if ( base != 0 ) {
+		top = base + (npages << PAGE_SHIFT);
+	} else {
+		top = sp->stk_next;
+		sp->stk_next -= (npages + 1) << PAGE_SHIFT;
+	}
 	ISpinUnlock(&space_lock, &imask);
 	base = top - (npages << PAGE_SHIFT);
 
@@ -371,7 +450,10 @@ EXPORT void knl_ustack_free_l0( UD l0_pa, void *base, UD npages )
 			}
 		}
 	}
-	/* the virtual range is not reused (bump allocator) */
+	/* the tables left empty go, and the place is handed out again */
+	knl_pt_prune(l0_pa, (UBINT)base, npages << PAGE_SHIFT);
+	stk_keep(l0_pa, (UBINT)base, npages);
+	(void)knl_pt_reclaim();
 }
 
 EXPORT void *knl_ustack_alloc( UD npages, void **p_top )

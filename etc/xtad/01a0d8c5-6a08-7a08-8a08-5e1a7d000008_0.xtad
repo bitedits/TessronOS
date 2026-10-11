@@ -1,0 +1,72 @@
+<tad version="1.0" encoding="UTF-8" filename="10.8 動画再生付きプレゼンテーション">
+<realtime autoplay="true" preload="auto">
+<!-- スライド全体の図形セグメント -->
+<figure>
+<figView top="0" left="0" right="1920" bottom="1080"/>
+<figDraw top="0" left="0" right="1920" bottom="1080"/>
+<figScale hunit="-72" vunit="-72"/>
+<!-- 背景矩形 -->
+<rect lineType="0" lineWidth="0" f_pat="1" left="0" top="0" right="1920" bottom="1080" fillColor="#0f0f23" zIndex="0"/>
+<!-- スライドタイトル（テキストボックス） -->
+<document>
+<docView viewleft="100" viewtop="50" viewright="1820" viewbottom="120"/>
+<docDraw drawleft="100" drawtop="50" drawright="1820" drawbottom="120"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="90"/>
+<font size="36"/>
+<font face="sans-serif"/>
+<font color="#FFFFFF"/>
+製品デモンストレーション
+</document>
+<!-- 説明テキスト（テキストボックス） -->
+<document>
+<docView viewleft="100" viewtop="750" viewright="1820" viewbottom="850"/>
+<docDraw drawleft="100" drawtop="750" drawright="1820" drawbottom="850"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="90"/>
+<font size="20"/>
+<font color="#AAAAAA"/>
+動画が自動再生されます。クリックで一時停止/再開できます。
+</document>
+<!-- ロゴオーバーレイ（右下に常時表示） -->
+<image id="logo_overlay" href="{realId}_0_1.png" left="1700" top="650" right="1850" bottom="720" lineType="0" lineWidth="0" zIndex="100"/>
+</figure>
+<realData>
+<stream number="1">
+<deviceName>display:</deviceName>
+</stream>
+<stream number="2">
+<deviceName>audio:</deviceName>
+</stream>
+<!-- 単位系設定（ミリ秒） -->
+<unitSystem id="10">
+<primaryUnit>
+<dimension>s</dimension>
+<derivation ratio="1/1000" sexp="-1"/>
+</primaryUnit>
+<auxiliaryUnit number="0" name="ms" derivation="1"/>
+</unitSystem>
+<unitSpec unitId="10" unitNumber="0"/>
+<!-- メイン動画（中央に配置、自動再生） -->
+<realGroup type="parallel" stream="1">
+<timeDelta value="0"/>
+<video id="demo_video" href="{realId}_0_0.mp4" format="mp4" left="160" top="140" right="1760" bottom="700" lineType="0" lineWidth="0" width="1920" height="1080" frameRate="30" autoplay="true" trigger="time" volume="0.8" playbackRate="1.0" loop="false" muted="false" zIndex="10" poster="{realId}_0_2.jpg" onended="jump:video_end"/>
+</realGroup>
+<!-- 動画の10秒地点でロゴをフェードアウト -->
+<realGroup type="parallel" stream="1">
+<timeDelta value="10000"/>
+<interpolate function="linear" divisions="20">
+<imageControl ref="logo_overlay" command="setAlpha" value="0.7"/>
+<imageControl ref="logo_overlay" command="setAlpha" value="0.3"/>
+</interpolate>
+</realGroup>
+<!-- 動画終了ラベル -->
+<label id="video_end"/>
+<!-- ロゴを再表示 -->
+<realGroup type="parallel" stream="1">
+<timeDelta value="0"/>
+<imageControl ref="logo_overlay" command="setAlpha" value="0.7"/>
+</realGroup>
+</realData>
+</realtime>
+</tad>

@@ -1,0 +1,14 @@
+<tad version="1.0" encoding="UTF-8" filename="障害情報のメニュー">
+<document>
+<p>障害情報のメニュー</p>
+<p>ディスク修復の障害情報の窓のメニュー。閉じる、前へ、次へ、保存と、ウインドウ、小物、実行。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2047-7e11-9a10-c1d2e3f447f1"/></include>
+<item code="dfix.prev">前へ</item>
+<item code="dfix.next">次へ</item>
+<line/>
+<item code="dfix.save" key="S">保存</item>
+<include><link id="01a0d889-46bd-7f9c-8bad-e3f4a5b6c789_0.xtad" vobjid="01a0d8c3-2047-7e12-9a10-c1d2e3f447f2"/></include>
+</menu>
+</tad>

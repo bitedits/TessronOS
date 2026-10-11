@@ -146,15 +146,24 @@ typedef struct {
 	const char	*prog;
 	const char	*name;
 	UINT		bgoff;		/* where its data keeps the window's colour, 0 none */
+	const char	*kind;		/* the kind of data it opens */
+	UINT		atype;		/* the F_STATE's application type */
 } APPLMAP;
 
+/*
+ * Of the two programs that open an archive, 書庫管理 is the one an
+ * archive written here names first; either is the application 8000
+ * C003 8000 to BTRON, and an archive read is opened with 書庫解凍's
+ * entry, the first of the two.
+ */
 LOCAL const APPLMAP applmap[] = {
-	{ 0x0001, "virtual-object-list", "仮身一覧", 0 },
-	{ 0x0002, "basic-figure-editor", "基本図形編集", 0x1E },
-	{ 0x0003, "basic-text-editor", "基本文章編集", 0x16 },
-	{ 0x0009, "basic-calc-editor", "基本表計算", 0x16 },
-	{ 0x000B, "microscript", "マイクロスクリプト", 0x1E },
-	{ BPK_APPL_ARCHIVE, "unpack-file", "書庫解凍", 0 },
+	{ 0x0001, "virtual-object-list", "仮身一覧", 0, "仮身一覧", 6 },
+	{ 0x0002, "basic-figure-editor", "基本図形編集", 0x1E, "図形", 2 },
+	{ 0x0003, "basic-text-editor", "基本文章編集", 0x16, "文章", 1 },
+	{ 0x0009, "basic-calc-editor", "基本表計算", 0x16, "表計算", 1 },
+	{ 0x000B, "microscript", "マイクロスクリプト", 0x1E, "図形", 2 },
+	{ BPK_APPL_ARCHIVE, "unpack-file", "書庫解凍", 0, "書庫", 1 },
+	{ BPK_APPL_ARCHIVE, "archive-manager", "書庫管理", 0, "書庫", 1 },
 };
 #define NAPPL	( (INT)( sizeof(applmap) / sizeof(applmap[0]) ) )
 
@@ -175,6 +184,78 @@ EXPORT const char *bpk_appl_prog( const UH *appl, const char **p_name )
 
 	if ( p_name != NULL ) *p_name = ( m != NULL ) ? m->name : NULL;
 	return ( m != NULL ) ? m->prog : NULL;
+}
+
+EXPORT BOOL bpk_prog_appl( const char *prog, BPKAPPL *a )
+{
+	INT	i;
+
+	for ( i = 0; prog != NULL && i < NAPPL; i++ ) {
+		if ( strcmp(applmap[i].prog, prog) != 0 ) continue;
+		a->appl[0] = BPK_APPL_HI;
+		a->appl[1] = applmap[i].appl;
+		a->appl[2] = BPK_APPL_HI;
+		a->name = applmap[i].name;
+		a->kind = applmap[i].kind;
+		a->atype = applmap[i].atype;
+		a->bgoff = applmap[i].bgoff;
+		return TRUE;
+	}
+	return FALSE;
+}
+
+EXPORT BOOL bpk_mc_format( const UB *p, UINT n )
+{
+	return (BOOL)( p != NULL && n >= 8 && rd16(p) == 0x2343 && rd16(p + 2) == 0x2352
+		       && rd16(p + 4) == 0x2344 && rd16(p + 6) == 0x0100 );
+}
+
+EXPORT BOOL bpk_mc_file( const BPKFILE *f )
+{
+	INT	i;
+
+	for ( i = 0; i < f->nrec; i++ ) {
+		const BPKREC	*r = &f->rec[i];
+
+		if ( r->type == BPK_RT_MCARD && r->sub == BPK_MC_FORMAT && bpk_mc_format(r->data, r->size) ) return TRUE;
+	}
+	return FALSE;
+}
+
+EXPORT void bpk_mc_xml( BPKBUF *b, const char *name, INT nlink, const BPKHOOK *hook )
+{
+	INT	n;
+
+	bpk_buf_puts(b, "<tad version=\"1.0\" encoding=\"UTF-8\" filename=\"");
+	bpk_buf_xml(b, name);
+	bpk_buf_puts(b, "\">\n<document>\n<p>");
+	bpk_buf_xml(b, name);
+	bpk_buf_puts(b, "</p>\n<p><mclinks/>");
+	for ( n = 0; n < nlink; n++ ) {
+		const char	*t = ( hook->link_target != NULL ) ? hook->link_target(hook->ctx, n) : NULL;
+		char		vid[40];
+
+		if ( t == NULL ) {
+			bpk_buf_puts(b, "<link id=\"\"/>");
+			continue;
+		}
+		vid[0] = 0;
+		if ( hook->new_vobjid != NULL ) hook->new_vobjid(hook->ctx, vid);
+		bpk_buf_printf(b, "<link id=\"%s_0.xtad\" vobjid=\"%s\"/>", t, vid);
+	}
+	bpk_buf_puts(b, "</p>\n</document>\n</tad>\n");
+}
+
+EXPORT UINT bpk_crc16( const UB *p, UINT n, UINT crc )
+{
+	UINT	i;
+	INT	k;
+
+	for ( i = 0; i < n; i++ ) {
+		crc ^= p[i];
+		for ( k = 0; k < 8; k++ ) crc = ( crc & 1 ) ? ( crc >> 1 ) ^ 0xA001 : crc >> 1;
+	}
+	return crc & 0xFFFF;
 }
 
 /* ---------------------------------------------------------------- the archive */
@@ -223,13 +304,29 @@ LOCAL BOOL find_fusen( BPKARC *a, UINT *p_at, UINT *p_len )
 	return FALSE;
 }
 
-/* The entries of a 実行機能付箋 record: 96 bytes and the data each */
+/* A number of a 実行機能付箋, high byte first when be */
+LOCAL UINT ex16( const UB *p, BOOL be )
+{
+	return be ? ( ( (UINT)p[0] << 8 ) | (UINT)p[1] ) : rd16(p);
+}
+
+LOCAL UINT ex32( const UB *p, BOOL be )
+{
+	return be ? ( ( ex16(p, TRUE) << 16 ) | ex16(p + 2, TRUE) ) : rd32(p);
+}
+
+/*
+ * The entries of a 実行機能付箋 record: 96 bytes and the data each. A
+ * record of the standard form, whose numbers have the high byte first,
+ * is told by its first application ID: its first word is 8000.
+ */
 LOCAL void read_exec( BPKFILE *f, const UB *p, UINT size )
 {
 	UINT	at = 0;
+	BOOL	be = (BOOL)( size >= BPK_EXECHEAD && rd16(p + EX_APPL) == 0x0080 && rd16(p + EX_APPL + 4) == 0x0080 );
 
 	while ( at + BPK_EXECHEAD <= size ) {
-		UINT		dlen = rd16(p + at + EX_DLEN), adv;
+		UINT		dlen = ex16(p + at + EX_DLEN, be), adv;
 		const UB	*d = p + at + BPK_EXECHEAD;
 		const APPLMAP	*m;
 		BPKEXEC		*e, *grow;
@@ -239,28 +336,28 @@ LOCAL void read_exec( BPKFILE *f, const UB *p, UINT size )
 		f->exec = grow;
 		e = &f->exec[f->nexec++];
 		memset(e, 0, sizeof(*e));
-		e->appl[0] = (UH)rd16(p + at + EX_APPL);
-		e->appl[1] = (UH)rd16(p + at + EX_APPL + 2);
-		e->appl[2] = (UH)rd16(p + at + EX_APPL + 4);
+		e->appl[0] = (UH)ex16(p + at + EX_APPL, be);
+		e->appl[1] = (UH)ex16(p + at + EX_APPL + 2, be);
+		e->appl[2] = (UH)ex16(p + at + EX_APPL + 4, be);
 		if ( at + BPK_EXECHEAD + dlen <= size ) {
 			/* the window the application opens, a RECT after 4 bytes */
 			if ( dlen >= 0x10 ) {
-				e->wl = (H)rd16(d + 4);
-				e->wt = (H)rd16(d + 6);
-				e->wr = (H)rd16(d + 8);
-				e->wb = (H)rd16(d + 10);
+				e->wl = (H)ex16(d + 4, be);
+				e->wt = (H)ex16(d + 6, be);
+				e->wr = (H)ex16(d + 8, be);
+				e->wb = (H)ex16(d + 10, be);
 				e->haswin = TRUE;
 			}
 			m = appl_find(e->appl);
 			if ( m != NULL && m->bgoff != 0 && dlen >= m->bgoff + 4 ) {
-				e->bgraw = rd32(d + m->bgoff);
+				e->bgraw = ex32(d + m->bgoff, be);
 				e->hasbg = TRUE;
 			}
 			/* マイクロスクリプト keeps $SV, 50 numbers, at the end of its data */
 			if ( m != NULL && m->appl == 0x000B && dlen >= 50 * 4 ) {
 				INT	i;
 
-				for ( i = 0; i < 50; i++ ) e->sv[i] = (INT)rd32(d + dlen - 200 + 4 * i);
+				for ( i = 0; i < 50; i++ ) e->sv[i] = (INT)ex32(d + dlen - 200 + 4 * i, be);
 				e->hassv = TRUE;
 			}
 		}
@@ -351,6 +448,8 @@ EXPORT ER bpk_parse( BPKARC *a, const UB *raw, UINT rawlen, char *err, INT errma
 		memcpy(a->plain, g + BPK_GLOBALHEAD, a->origsize);
 	}
 	a->plainlen = a->origsize;
+	a->crc = bpk_crc16(a->plain, a->plainlen, 0);
+	a->crcok = (BOOL)( a->head.crc == 0 || a->head.crc == a->crc );
 
 	/* the local headers */
 	a->file = calloc(a->nfiles, sizeof(BPKFILE));

@@ -44,4 +44,14 @@ IMPORT void tm_com_set_base( UBINT base );	/* move the console to another PL011 
 IMPORT INT  tm_printf( const UB *format, ... );
 IMPORT INT  tm_sprintf( UB *str, const UB *format, ... );
 
+/*
+ * Urgent output (libtm.c): straight to the UART, without the console's
+ * lock, for what is said as the system stops. tm_urgent_begin/end keep
+ * the lines of one report together, with interrupts disabled between.
+ */
+IMPORT UINT tm_urgent_begin( void );
+IMPORT void tm_urgent_end( UINT intsts );
+IMPORT void tm_urgent_puts( const UB *s );
+IMPORT INT  tm_printf_urgent( const UB *format, ... );
+
 #endif /* __TM_TMONITOR_H__ */

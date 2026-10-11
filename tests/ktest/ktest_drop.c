@@ -325,8 +325,8 @@ LOCAL void link_at( INT left, INT top, INT *x, INT *y )
 
 	*x = *y = -1;
 	if ( cwid > 0 && wm_ref(cwid, &w) >= E_OK ) {
-		*x = w.work.left + DT_MARGIN + left + 20;
-		*y = w.work.top + DT_MARGIN + top + L_H / 2;
+		*x = w.work.left + left + 20;	/* the figure starts at the frame */
+		*y = w.work.top + top + L_H / 2;
 	}
 }
 
@@ -845,6 +845,7 @@ LOCAL void test_grant( void )
 	SZ		asz = 0;
 	INT		wid = -1, recno = -1, t;
 	ID		pid, taker = 0, k;
+	ER		er;
 
 	if ( fs_stat(SVCPROG, &st) < EX_OK ) KT_SKIP("no " SVCPROG);
 	knl_memset(&c, 0, sizeof(c));
@@ -852,7 +853,11 @@ LOCAL void test_grant( void )
 	c.sub = OB_S_FILE;
 	c.json = (CONST UB *)uj;
 	c.jsonsz = s_len(uj);
-	if ( ob_cre_obj(&c, &user) < E_OK ) KT_SKIP("no store for a user object");
+	/* a user object is the system's, not made for a person: one a person made is no one to log in as */
+	knl_ob_make_for_person(FALSE);
+	er = ob_cre_obj(&c, &user);
+	knl_ob_make_for_person(TRUE);
+	if ( er < E_OK ) KT_SKIP("no store for a user object");
 	KT_ASSERT_ER(ob_set_pwd(&user, (CONST UB *)"ktest-pw"), E_OK);
 
 	/* the system's, and nobody else's */
@@ -1080,8 +1085,7 @@ LOCAL INT walk_root( CONST TS_UUID *root, TS_UUID *objs, INT *nref, INT max )
 		ID	key;
 		SZ	asz = 0;
 
-		KT_ASSERT(om_store_name(&objs[i], name, sizeof(name)) > 0);
-		key = ob_opn_obj(&objs[i], OB_OP_R);
+		KT_ASSERT(om_store_name(&objs[i], name, sizeof(name)) > 0);		key = ob_opn_obj(&objs[i], OB_OP_R);
 		KT_ASSERT(key > 0);
 		if ( key > 0 ) {
 			KT_ASSERT(ob_get_ico(key, NULL, 0, &asz) >= E_OK && asz > 0);
@@ -1256,16 +1260,126 @@ out:
 	wm_update();
 }
 
+/*
+ * Letters let go over a figure (df_text_drop, where a carry of letters
+ * ends over a figure's window): on the ground, a new piece of text whose
+ * corner is where the outline's was, holding them; over a piece of text,
+ * into that piece. The record written then has both.
+ */
+#define FT_MAX		( 16 * 1024 )
+
+LOCAL INT fig_text( DTWIN *d, UB *buf )
+{
+	SZ	n = 0;
+
+	if ( d == NULL || tad_write_mem((T_TAD *)d->rec, buf, FT_MAX - 1, &n) < E_OK ) return 0;
+	buf[n] = 0;
+	return (INT)n;
+}
+
+/* The desktop's windows, said when one asked for did not open */
+LOCAL void open_windows( void )
+{
+	UB	t[64];
+	INT	k, n = 0;
+
+	for ( k = 0; k < DT_MAX_WIN; k++ ) {
+		if ( !dt_win_at(k)->used ) continue;
+		n++;
+		t[0] = 0;
+		(void)knl_wm_title(dt_win_at(k)->wid, (char *)t, sizeof(t));
+		tm_printf((UB *)"  the desktop's window %d: %s\n", dt_win_at(k)->wid, t);
+	}
+	tm_printf((UB *)"  %d of the desktop's %d windows open\n", n, DT_MAX_WIN);
+}
+
+LOCAL void test_figtext( void )
+{
+	static CONST char a1[] = "図形へ落とす文字";
+	static CONST char a2[] = "二度目";
+	CONST char *fx = "<tad version=\"1.0\" encoding=\"UTF-8\"><figure>"
+			 "<rect round=\"0\" lineType=\"0\" lineWidth=\"1\" l_pat=\"1\" f_pat=\"0\" angle=\"0\""
+			 " left=\"20\" top=\"120\" right=\"120\" bottom=\"180\" zIndex=\"1\"/>"
+			 "<document><docView viewleft=\"20\" viewtop=\"20\" viewright=\"260\" viewbottom=\"70\"/>"
+			 "<docDraw drawleft=\"20\" drawtop=\"20\" drawright=\"260\" drawbottom=\"70\"/>"
+			 "<docScale hunit=\"-72\" vunit=\"-72\"/><text lang=\"0\" bpat=\"0\" zIndex=\"2\"/>"
+			 "<p>既存の文</p></document></figure></tad>\n";
+	TS_UUID		fig, fwin;
+	DTWIN		*d;
+	T_DPRECT	page;
+	T_WMWIN		ww;
+	UB		*b = NULL;
+	INT		fwid = -1, i, n, e, at;
+
+	if ( !up ) KT_SKIP("no desktop");
+	KT_ASSERT_ER(make("KT図形文字", "basic-figure-editor",
+			  ",\"window\":{\"pos\":{\"x\":360,\"y\":300},\"width\":420,\"height\":300}", fx, &fig), E_OK);
+	KT_ASSERT_ER(ask_open(&fig), E_OK);
+	for ( i = 0; i < 30 && fwid <= 0; i++ ) {
+		fwid = window_showing(&fig);
+		if ( fwid <= 0 ) tk_dly_tsk(100);
+	}
+	KT_ASSERT(fwid > 0);
+	if ( fwid <= 0 ) open_windows();
+	d = ( fwid > 0 ) ? dt_win_of(fwid) : NULL;
+	b = (UB *)Kmalloc(FT_MAX);
+	KT_ASSERT(d != NULL && b != NULL && df_is(d));
+	if ( d == NULL || b == NULL || wm_ref(fwid, &ww) < E_OK ) goto out;
+	dt_work_rect(d, &page);
+	/* the page on the screen */
+	page.left += ww.work.left;
+	page.top += ww.work.top;
+
+	/* on the ground: a new piece of text there */
+	KT_ASSERT_ER(df_text_drop(d, page.left + 200, page.top + 150, (CONST UB *)a1, s_len(a1)), E_OK);
+	n = fig_text(d, b);
+	KT_ASSERT_EQ(count_of(b, n, "<document>"), 2);
+	at = find(b, n, a1, 0);
+	KT_ASSERT(at > 0);
+	e = find(b, n, "<docView viewleft=\"200\" viewtop=\"150\"", 0);
+	KT_ASSERT(e > 0 && e < at);
+	if ( e < 0 ) tm_putstring(b);
+
+	/* over the piece that was there: into it, with what it had */
+	KT_ASSERT_ER(df_text_drop(d, page.left + 30, page.top + 24, (CONST UB *)a2, s_len(a2)), E_OK);
+	n = fig_text(d, b);
+	KT_ASSERT_EQ(count_of(b, n, "<document>"), 2);
+	at = find(b, n, a2, 0);
+	e = find(b, n, "</document>", 0);
+	KT_ASSERT(at > 0 && at < e && find(b, n, "既存", 0) < e);
+	if ( at < 0 || at > e ) tm_putstring(b);
+
+	/* nothing for an empty carry, or a figure that cannot be changed */
+	KT_ASSERT_ER(df_text_drop(d, page.left + 200, page.top + 150, (CONST UB *)a1, 0), E_PAR);
+	KT_ASSERT_ER(dt_save(d), E_OK);
+	{
+		SZ	len = 0;
+		UB	*x = om_obj_record(&fig, 0, &len);
+
+		KT_ASSERT(x != NULL && find(x, (INT)len, a1, 0) > 0 && find(x, (INT)len, a2, 0) > 0);
+		if ( x != NULL ) Kfree(x);
+	}
+out:
+	if ( window_named("KT図形文字", &fwin) > 0 ) (void)ob_del_obj(&fwin);
+	tk_dly_tsk(300);
+	(void)ob_del_obj(&fig);
+	if ( b != NULL ) Kfree(b);
+	wm_update();
+}
+
 EXPORT void ktest_drop( void )
 {
 	logb = (UB *)Kmalloc(LOG_MAX);
 	if ( logb == NULL ) return;
+	/* the objects made here are the person's, as the desktop makes them (design 8.7.4) */
+	knl_ob_make_for_person(TRUE);
 	KT_RUN(test_setup);
 	KT_RUN(test_xfconv);
 	KT_RUN(test_backup);
 	KT_RUN(test_grant);
 	KT_RUN(test_unpack);
 	KT_RUN(test_unpack_fat);
+	KT_RUN(test_figtext);
 	if ( up ) {
 		dt_quit();
 		up = FALSE;
@@ -1278,6 +1392,7 @@ EXPORT void ktest_drop( void )
 		made = FALSE;
 	}
 	wm_update();
+	knl_ob_make_for_person(FALSE);
 	Kfree(logb);
 	logb = NULL;
 }

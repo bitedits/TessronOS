@@ -1,0 +1,17 @@
+<tad version="1.0" encoding="UTF-8" filename="予定表の表示">
+<document>
+<p>予定表の表示</p>
+<p>予定表の窓の表示。月の移動、全画面表示、再表示、背景色、隠蔽仮身。メニューの定義。</p>
+</document>
+<menu>
+<item code="today">今日へ移動</item>
+<item code="month">年月を選択</item>
+<item code="prev">前月</item>
+<item code="next">翌月</item>
+<line/>
+<item code="fullscreen" key="L">全画面表示</item>
+<item code="refresh">再表示</item>
+<item code="bgcolour">背景色変更</item>
+<item code="hidden">隠蔽仮身を表示</item>
+</menu>
+</tad>

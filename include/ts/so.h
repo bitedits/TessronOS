@@ -57,6 +57,14 @@ IMPORT INT so_sendto( INT s, CONST void *data, SZ size, INT flags,
 		      CONST struct sockaddr *to, socklen_t tolen );
 IMPORT INT so_recvfrom( INT s, void *mem, SZ size, INT flags,
 			struct sockaddr *from, socklen_t *fromlen );
+/*
+ * so_recvfrom that also gives the type of service (IPv4) or the traffic
+ * class (IPv6) the datagram arrived with, its ECN in the two low bits,
+ * when the socket asked for it (IP_RECVTOS, IPV6_RECVTCLASS); -1 in
+ * *p_tos when it did not come
+ */
+IMPORT INT so_recvtos( INT s, void *mem, SZ size, INT flags,
+		       struct sockaddr *from, socklen_t *fromlen, INT *p_tos );
 IMPORT INT so_read( INT s, void *mem, SZ size );
 IMPORT INT so_write( INT s, CONST void *data, SZ size );
 
@@ -126,6 +134,76 @@ IMPORT INT so_poll( struct pollfd *fds, INT nfds, TMO tmout );
 IMPORT ER  so_resolve( CONST char *name, UW *p_addr );
 IMPORT ER  so_getdns( UW *p_dns );
 IMPORT ER  so_setifaddr( UW addr, UW mask, UW gw, UW dns );
+
+/*
+ * Addresses of either family.
+ *	so_resolveall	the addresses of a name, IPv4 and IPv6 (family
+ *			AF_INET, AF_INET6 or AF_UNSPEC), up to max into
+ *			addrs, the one to try first first; how many, or an
+ *			error code. With SO_RA_ADDRCONFIG a family the
+ *			interface has no address of to reach the world with
+ *			is not asked for. A numeric address ("2001:db8::1",
+ *			"fe80::1%neta0") is its own answer
+ *	so_getifaddr6	the IPv6 addresses of the card's interface, up to
+ *			max into list; how many. gw (16 bytes, or NULL) the
+ *			router the default route goes through, all zero for
+ *			none
+ *	so_getdns6	the nth (0 up) IPv6 name server that is asked: those
+ *			the settings name first, then those the routers
+ *			named; E_NOEXS for none
+ */
+typedef struct {
+	INT	family;		/* AF_INET or AF_INET6 */
+	UINT	scope;		/* the interface of a link-local IPv6 address, else 0 */
+	UB	addr[16];	/* network byte order; an IPv4 one in the first four */
+} T_SOADDR;
+
+#define SO_RA_ADDRCONFIG	0x0001
+
+typedef struct {
+	UB	addr[16];
+	INT	plen;		/* the prefix length */
+	UINT	flags;		/* SO_IF6_ */
+	UINT	vltime;		/* seconds of its valid lifetime left; 0xffffffff: no end */
+	UINT	pltime;		/* of its preferred lifetime */
+} T_SOIF6;
+
+#define SO_IF6_ANYCAST		0x01
+#define SO_IF6_TENTATIVE	0x02	/* still being checked for a duplicate on the link */
+#define SO_IF6_DUPLICATED	0x04	/* another machine on the link has it */
+#define SO_IF6_DETACHED		0x08
+#define SO_IF6_DEPRECATED	0x10	/* past its preferred lifetime */
+#define SO_IF6_AUTOCONF		0x40	/* made from a router's prefix */
+#define SO_IF6_TEMPORARY	0x80	/* a temporary address (RFC 8981) */
+
+IMPORT INT so_resolveall( CONST char *name, INT family, INT flags, T_SOADDR *addrs, INT max );
+IMPORT INT so_getifaddr6( T_SOIF6 *list, INT max, UB *gw );
+IMPORT ER  so_getdns6( INT n, UB *addr );
+
+/*
+ * IPv6 of the card's interface, as the settings say (so_conf.c).
+ *	so_setip6	SO_IP6_OFF: no IPv6 on it at all; SO_IP6_LINK: its
+ *			link-local address only; SO_IP6_AUTO: addresses from
+ *			the routers' advertisements (SLAAC), and temporary
+ *			ones as well with SO_IP6_TEMP; SO_IP6_FIXED: addr
+ *			with prefix length plen, and gw (NULL or all zero for
+ *			none) as the default router. The same settings again
+ *			change nothing
+ *	so_getip6	what so_setip6 was last given (with SO_IP6_TEMP)
+ *	so_setdns6	the nth (0, 1) IPv6 name server the settings name,
+ *			asked before those the routers name; NULL or all
+ *			zero for none
+ */
+#define SO_IP6_OFF		0
+#define SO_IP6_LINK		1
+#define SO_IP6_AUTO		2
+#define SO_IP6_FIXED		3
+#define SO_IP6_MODE		0x0f
+#define SO_IP6_TEMP		0x100
+
+IMPORT ER   so_setip6( UINT mode, CONST UB *addr, INT plen, CONST UB *gw );
+IMPORT UINT so_getip6( void );
+IMPORT ER   so_setdns6( INT n, CONST UB *addr );
 
 /*
  * The settings of design 16.5.23.

@@ -50,6 +50,7 @@ LOCAL CONST CODECMD doc_cmds[] = {
 	{ "selectall",		DM_SELECT_ALL },
 	{ "find",		DM_FIND },
 	{ "virtualize",		DM_VIRTUALIZE },
+	{ "worddic",		DM_WORDDIC },
 	{ "font.list",		DM_FONT_LIST },
 	{ "font.gothic",	DM_FONT_GOTHIC },
 	{ "font.mincho",	DM_FONT_MINCHO },
@@ -94,6 +95,11 @@ LOCAL CONST CODECMD doc_cmds[] = {
 	{ "pagebreak",		DM_PAGEBREAK },
 	{ "paperframe",		DM_PAPER_FRAME },
 	{ "pagesetup",		DM_PAGE_SETUP },
+	{ "dir.vert",		DM_DIR_VERT },
+	{ "dir.horiz",		DM_DIR_HORIZ },
+	{ "comb",		DM_COMB },
+	{ "turn",		DM_TURN },
+	{ "print",		DM_PRINT },
 };
 
 #define NCMD	( (INT)( sizeof(doc_cmds) / sizeof(doc_cmds[0]) ) )
@@ -128,6 +134,16 @@ EXPORT ER doc_menu_make( CONST T_DOCMENU *st, ID *p_mid )
 	(void)mn_chg_atr(mid, NULL, "virtualize", st->has_pick ? 0 : MN_GREY);
 	(void)mn_chg_atr(mid, NULL, "paste", st->can_paste ? 0 : MN_GREY);
 	(void)mn_chg_atr(mid, NULL, "moveback", st->can_paste ? 0 : MN_GREY);
+	/*
+	 * 縦書き and 横書き: the one the text is written in is ticked.
+	 * 縦中横 wants letters picked; it and 回転 are ticked when what is
+	 * picked has them.
+	 */
+	(void)mn_chg_atr(mid, NULL, "dir.vert", st->vertical ? MN_TICK : 0);
+	(void)mn_chg_atr(mid, NULL, "dir.horiz", st->vertical ? 0 : MN_TICK);
+	(void)mn_chg_atr(mid, NULL, "comb", !st->has_pick ? MN_GREY
+			 : st->comb ? MN_TICK : 0);
+	(void)mn_chg_atr(mid, NULL, "turn", st->turned ? MN_TICK : 0);
 
 	/* the faces used last, their names shown without the quotes */
 	shown = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * DM_RECENT_MAX);

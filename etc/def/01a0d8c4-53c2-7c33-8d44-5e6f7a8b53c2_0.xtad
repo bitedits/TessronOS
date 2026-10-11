@@ -1,0 +1,47 @@
+<tad version="1.0" encoding="UTF-8" filename="電子手帳のデータボックス">
+<document>
+<p>電子手帳のデータボックス</p>
+<p>電子手帳の検索パネル、印刷処理の選択、レイアウト用紙設定、閉じるときの保存の確認、メッセージのパネルの定義。予定表、カレンダー、住所録のウインドウは電子手帳が自分で描く。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,330,84" title="検索パネル" kind="bare">
+<text x="12" y="28">検索：</text>
+<box num="11" rect="62,8,318,36" max="100" jp="true"/>
+<button num="101" rect="12,46,164,74">最初のページから</button>
+<button num="102" rect="174,46,318,74" emph="true">次のページから</button>
+</panel>
+<panel num="2" rect="0,0,460,96" title="印刷">
+<text x="150" y="30">処理を選択してください。</text>
+<button num="101" rect="12,52,100,80" answer="cancel">取り消し</button>
+<button num="102" rect="108,52,222,80">全部を印刷</button>
+<button num="103" rect="230,52,448,80" emph="true">表示されている１枚を印刷</button>
+</panel>
+<panel num="3" rect="0,0,440,236" title="レイアウト用紙設定">
+<text x="16" y="30">用紙</text>
+<select num="11" rect="16,38,424,66" across="true" value="1"><name>A4</name><name>A5</name><name>B5</name><name>B4</name><name>A3</name><name>レター</name></select>
+<text x="16" y="96">向き</text>
+<select num="12" rect="64,78,244,106" across="true" value="1"><name>縦</name><name>横</name></select>
+<text x="16" y="138">余白(mm)　上</text>
+<serial num="13" rect="124,118,180,148"><f w="2" lo="0" hi="99" value="20"/></serial>
+<text x="196" y="138">下</text>
+<serial num="14" rect="220,118,276,148"><f w="2" lo="0" hi="99" value="20"/></serial>
+<text x="124" y="176">左</text>
+<serial num="15" rect="148,156,204,186"><f w="2" lo="0" hi="99" value="20"/></serial>
+<text x="216" y="176">右</text>
+<serial num="16" rect="240,156,296,186"><f w="2" lo="0" hi="99" value="20"/></serial>
+<button num="101" rect="240,198,328,226" answer="cancel">取消</button>
+<button num="102" rect="336,198,424,226" answer="ok" emph="true">設定</button>
+</panel>
+<panel num="4" rect="0,0,340,112" title="電子手帳">
+<text x="20" y="40">変更を保存してから閉じますか？</text>
+<button num="101" rect="16,72,92,98" answer="cancel">取消</button>
+<button num="103" rect="100,72,212,98">保存しない</button>
+<button num="102" rect="220,72,324,98" emph="true">保存</button>
+</panel>
+<panel num="5" rect="0,0,420,112" title="電子手帳">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<button num="101" rect="316,76,404,102" answer="ok" emph="true">確認</button>
+</panel>
+</databox>
+</tad>

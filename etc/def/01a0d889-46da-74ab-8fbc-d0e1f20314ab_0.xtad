@@ -1,0 +1,17 @@
+<tad version="1.0" encoding="UTF-8" filename="基本表計算のセルの背景色">
+<document>
+<p>基本表計算のセルの背景色</p>
+<p>基本表計算のセルの背景色。メニューの定義。</p>
+</document>
+<menu>
+<item code="ground" value="16777215">白</item>
+<item code="ground" value="16777164">薄い黄</item>
+<item code="ground" value="16769248">薄い赤</item>
+<item code="ground" value="14745568">薄い緑</item>
+<item code="ground" value="14741759">薄い青</item>
+<item code="ground" value="15658734">薄い灰</item>
+<item code="ground" value="16776960">黄</item>
+<item code="ground" value="8900331">水色</item>
+<item code="ground" value="12632256">灰</item>
+</menu>
+</tad>

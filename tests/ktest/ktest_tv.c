@@ -966,8 +966,9 @@ LOCAL void test_pages( void )
 
 /*
  * A picture written as a PNG reads back as the same pixels, the clear
- * ones clear -- large enough that its data runs to more than one of
- * the blocks it is stored in.
+ * ones clear -- large enough that its data runs past 64KB, the most one
+ * block of deflate's may hold stored. Its data is packed: no larger than
+ * the rows themselves, and a picture of one colour comes to little.
  */
 LOCAL void test_png( void )
 {
@@ -986,7 +987,8 @@ LOCAL void test_png( void )
 		}
 	}
 	KT_ASSERT_ER(img_png_encode(px, w, h, &png, &len), E_OK);
-	KT_ASSERT(len > (SZ)w * h * 4);
+	tm_printf((UB *)"  %dx%d as PNG: %d bytes (rows %d)\n", w, h, (INT)len, w * h * 4 + h);
+	KT_ASSERT(len < (SZ)w * h * 4 + h);
 	KT_ASSERT_ER(img_png_decode(png, len, &back, &rw, &rh), E_OK);
 	KT_ASSERT_EQ(rw, w);
 	KT_ASSERT_EQ(rh, h);
@@ -1001,6 +1003,19 @@ LOCAL void test_png( void )
 		Kfree(back);
 	}
 	KT_ASSERT_EQ(bad, 0);
+	if ( png != NULL ) Kfree(png);
+	png = NULL;
+	for ( y = 0; y < w * h; y++ ) px[y] = 0x00FFFFFFU;
+	KT_ASSERT_ER(img_png_encode(px, w, h, &png, &len), E_OK);
+	tm_printf((UB *)"  one colour: %d bytes\n", (INT)len);
+	KT_ASSERT(len < 2048);
+	if ( png != NULL && img_png_decode(png, len, &back, &rw, &rh) >= E_OK && back != NULL ) {
+		for ( y = 0, bad = 0; y < w * h; y++ ) {
+			if ( back[y] != 0x00FFFFFFU ) bad++;
+		}
+		KT_ASSERT_EQ(bad, 0);
+		Kfree(back);
+	}
 	if ( png != NULL ) Kfree(png);
 	Kfree(px);
 }
@@ -1017,9 +1032,13 @@ LOCAL CONST char pats_doc[] =
 "<mask id=\"200\" type=\"0\" width=\"16\" height=\"16\" data=\"8000,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0\"/>"
 "<mask id=\"201\" type=\"0\" width=\"8\" height=\"1\" data=\"0100\"/>"
 "<pattern id=\"5\" ncol=\"1\" fgcolors=\"#123456\" masks=\"\"/>"
+"<pattern id=\"140\" type=\"0\" width=\"4\" height=\"4\" ncol=\"1\" fgcolors=\"#51aefb\" bgcolor=\"transparent\" masks=\"7\"/>"
+"<pattern id=\"141\" type=\"0\" width=\"4\" height=\"4\" ncol=\"1\" fgcolors=\"#ff7f50\" bgcolor=\"transparent\" masks=\"4\"/>"
 "</patterns>"
 "<rect l_pat=\"1\" f_pat=\"130\" left=\"0\" top=\"0\" right=\"10\" bottom=\"10\"/>"
 "<rect l_pat=\"5\" f_pat=\"5\" left=\"20\" top=\"0\" right=\"30\" bottom=\"10\"/>"
+"<rect l_pat=\"1\" f_pat=\"140\" left=\"40\" top=\"0\" right=\"50\" bottom=\"10\"/>"
+"<rect l_pat=\"1\" f_pat=\"141\" left=\"60\" top=\"0\" right=\"70\" bottom=\"10\"/>"
 "</figure></tad>";
 
 LOCAL void test_patterns( void )
@@ -1033,7 +1052,23 @@ LOCAL void test_patterns( void )
 	if ( doc == NULL ) return;
 	KT_ASSERT_ER(tv_fig(doc, &f), E_OK);
 	if ( f == NULL ) { tad_free(doc); return; }
-	KT_ASSERT_EQ(f->nsh, 2);
+	KT_ASSERT_EQ(f->nsh, 4);
+	/* masks the figure does not define: the standard ones, 7 all of it, 4 every other dot */
+	if ( f->nsh == 4 ) {
+		INT	y;
+
+		p = f->sh[2].fill_pat;
+		KT_ASSERT(p != NULL);
+		for ( y = 0; p != NULL && y < 16; y++ ) KT_ASSERT_EQ(p->mask[y], 0xFFFF0000U);
+		if ( p != NULL ) KT_ASSERT_EQ(p->tile[5 * 16 + 9], 0x0051AEFBU);
+		p = f->sh[3].fill_pat;
+		KT_ASSERT(p != NULL);
+		if ( p != NULL ) {
+			KT_ASSERT_EQ(p->mask[0], 0xAAAA0000U);
+			KT_ASSERT_EQ(p->mask[1], 0x55550000U);
+			KT_ASSERT_EQ(p->tile[0], 0x00FF7F50U);
+		}
+	}
 	p = f->sh[0].fill_pat;
 	KT_ASSERT(p != NULL);
 	KT_ASSERT(tv_fig_pattern(f, 130) == p);

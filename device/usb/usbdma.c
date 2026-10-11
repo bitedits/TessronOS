@@ -52,8 +52,12 @@ LOCAL T_SPLOCK	usbdma_lock;
  * What the controller adds to a physical address to reach memory, and
  * whether it sees the caches.
  */
-#ifdef RPI5
+#if defined(RPI5)
 #define USB_DMA_BUS_OFFSET	RP1_DMA_BUS_OFFSET
+#define USB_DMA_UNCACHED	1
+#elif defined(RPI4)
+/* the VL805 (or a card in the CM4's slot) through the PCIe inbound window, not coherent */
+#define USB_DMA_BUS_OFFSET	PCIE_DMA_BUS_OFFSET
 #define USB_DMA_UNCACHED	1
 #else
 #define USB_DMA_BUS_OFFSET	0

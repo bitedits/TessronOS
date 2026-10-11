@@ -72,6 +72,7 @@ typedef struct {
 
 typedef struct {
 	BOOL	used;
+	ID	tsk;			/* the task that made it */
 	TS_UUID	def;			/* the definition the menu was made from */
 	INT	nnode;
 	MNNODE	*node[MN_NODE_MAX];
@@ -121,8 +122,35 @@ LOCAL ID menu_take( void )
 		}
 	}
 	ISpinUnlock(&mn_tab_lock, &imask);
+	if ( mid > 0 ) {
+		mn_tab[mid - 1].tsk = tk_get_tid();
+	}
 
 	return mid;
+}
+
+/*
+ * The menus the tasks tids made, deleted: the desktop's tasks were
+ * stopped, and the desktop that starts again makes its own (fquit.c).
+ * There are few menus, and they would otherwise be gone for good.
+ */
+EXPORT INT knl_mn_tsk_end( CONST ID *tids, INT n )
+{
+	INT	i, k, c = 0;
+
+	for ( i = 0; i < MN_MAX; i++ ) {
+		if ( !mn_tab[i].used ) {
+			continue;
+		}
+		for ( k = 0; k < n; k++ ) {
+			if ( mn_tab[i].tsk == tids[k] ) {
+				(void)mn_del_men(i + 1);
+				c++;
+				break;
+			}
+		}
+	}
+	return c;
 }
 
 LOCAL INT str_cpy( UB *dst, INT max, CONST UB *src )
@@ -164,6 +192,8 @@ LOCAL BOOL link_in( CONST T_TADNODE *nd, TS_UUID *p_uuid )
 		if ( !name_is(c, "link") || ( id = tad_attr(c, "id") ) == NULL ) {
 			continue;
 		}
+		for ( i = 0; id[i] != 0; i++ ) ;
+		id += ts_lnk_split(id, i, NULL, NULL);	/* past a volume it names (design 8.3) */
 		for ( i = 0; i < TS_UUID_STRLEN && id[i] != 0; i++ ) {
 			s[i] = (char)id[i];
 		}
@@ -760,6 +790,31 @@ EXPORT void mn_winlist_fill( ID mid )
 	Kfree(names);
 }
 
+LOCAL FP_MNFILL	mn_tail_filler = NULL;
+LOCAL FP_MNDO	mn_tail_actor = NULL;
+
+EXPORT void mn_tail_hooks( FP_MNFILL fill, FP_MNDO act )
+{
+	mn_tail_filler = fill;
+	mn_tail_actor = act;
+}
+
+EXPORT void mn_tail_fill( ID mid )
+{
+	FP_MNFILL	f = mn_tail_filler;
+
+	if ( f != NULL ) {
+		f(mid);
+	}
+}
+
+EXPORT BOOL mn_tail_do( CONST T_MNSEL *sel )
+{
+	FP_MNDO		f = mn_tail_actor;
+
+	return (BOOL)( f != NULL && sel != NULL && f(sel) );
+}
+
 EXPORT BOOL mn_winlist_do( CONST T_MNSEL *sel )
 {
 	TS_UUID	wd;
@@ -771,7 +826,7 @@ EXPORT BOOL mn_winlist_do( CONST T_MNSEL *sel )
 	if ( sel->index >= 0 && sel->index < mn_nwin ) {
 		(void)wm_raise(mn_wins[sel->index]);
 		(void)wm_focus(mn_wins[sel->index]);
-		(void)wm_composite();
+		(void)wm_update();
 	}
 	return TRUE;
 }

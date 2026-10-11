@@ -1,0 +1,20 @@
+<tad version="1.0" encoding="UTF-8" filename="電卓のメニュー">
+<document>
+<p>電卓のメニュー</p>
+<p>電卓の窓のメニュー。閉じる、複写(トレーへ)、貼り込み(トレーから)、標準と関数電卓の切替え、桁区切り、ラジアン、全消去と、ウインドウ、小物、実行。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2020-7001-9a10-c1d2e3f42001"/></include>
+<item code="copy" key="C">複写（トレーへ）</item>
+<item code="paste" key="V">貼り込み（トレーから）</item>
+<line/>
+<item code="std">標準</item>
+<item code="sci">関数電卓</item>
+<line/>
+<item code="sep">桁区切り</item>
+<item code="rad">ラジアン</item>
+<line/>
+<item code="clear">全消去</item>
+<include><link id="01a0d889-46bd-7f9c-8bad-e3f4a5b6c789_0.xtad" vobjid="01a0d8c3-2020-7002-9a10-c1d2e3f42002"/></include>
+</menu>
+</tad>

@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
 """Tests of what the desktop shows, quickly.
 
-  tools/ui_run.py [--elf E] [--disk D] [--out DIR] [--tag T] [--fresh] STEPS...
+  tools/ui_run.py [--elf E] [--disk D] [--out DIR] [--tag T] [--fresh] [--wav F]
+                  [--keep-disk F] [--cdrom ISO] STEPS...
 
 Run from build_make after `make TARGET=_QEMU_VIRT_ DESKTOP=1 UITEST=1
-BUILD_ID=<id>` and a KTEST build that made the test disk.
+BUILD_ID=<id>` and a KTEST build that made the test disk. --wav F adds
+a USB sound device whose output QEMU writes to the WAVE file F, so
+that what a test sounded can be looked at afterwards. --keep-disk F
+copies the disk as the run left it to F, so that what the run wrote
+(a file printed, an object saved) can be read afterwards
+(tools/tsfs-export --partition 3 F); with --vols, the images of DIR
+are replaced by the ones the run wrote as well. --cdrom ISO puts the image in a
+USB CD-ROM drive (blocks of 2048 bytes), as tools/tests/mkbtcd.py makes
+one for ファイル変換. --vols DIR gives the machine a USB hub with
+nothing on it, and copies the disk images of DIR (tools/tests/
+mkvoldisk.py) beside the run, where a step plugs them in.
 
 The first run starts the machine, waits until the desktop says it is
 up, and keeps the machine as it is then (its memory, and a copy of the
@@ -20,6 +31,12 @@ where it is). A few lines are the runner's own:
 
   shot NAME        the screen, as NAME.png (or .ppm) in --out
   expect TEXT      the console must say TEXT (waits up to 20 seconds)
+  absent TEXT      the console must not have said TEXT so far in this run
+                   ("absent !OACV!": no call of a program refused for want
+                   of a right, which a UITEST kernel tells)
+  hmp COMMAND      a command to the QEMU monitor, $VOLS standing for where
+                   the copies of the --vols images are (drive_add, device_add
+                   usb-storage on the hub and device_del plug disks in and out)
   # ...            a comment
 
 Exit status: 0 when every step was answered ok and every expect was
@@ -52,13 +69,24 @@ def free_port():
     return p
 
 
-def machine_args(elf, disk, con_log, ut_port, mon_port, net="socket"):
+def machine_args(elf, disk, con_log, ut_port, mon_port, net="socket", wav=None, cdrom=None, vols=False):
+    snd = []
+    if vols:
+        # a hub the disks of a test are plugged into
+        snd += ["-device", "usb-hub,bus=xhci.0,id=hubv"]
+    if wav:
+        # a USB sound device whose output is written to a WAVE file
+        snd = ["-audiodev", "wav,id=snd0,path=%s" % wav, "-device", "usb-audio,bus=xhci.0,audiodev=snd0"]
+    if cdrom:
+        # a USB CD-ROM drive: a drive of media=cdrom makes the usb-storage answer as one
+        snd += ["-drive", "file=%s,if=none,id=btcd,format=raw,media=cdrom,readonly=on" % cdrom,
+                "-device", "usb-storage,bus=xhci.0,drive=btcd,removable=on"]
     return [QEMU, "-M", "virt,gic-version=2", "-cpu", "cortex-a76", "-smp", "4", "-m", "2G",
             "-display", "none", "-no-reboot",
             "-global", "virtio-mmio.force-legacy=false",
             "-drive", "file=%s,if=none,format=raw,id=hd0" % disk,
             "-device", "virtio-blk-device,drive=hd0",
-            "-device", "qemu-xhci,id=xhci", "-device", "usb-kbd", "-device", "usb-mouse",
+            "-device", "qemu-xhci,id=xhci", "-device", "usb-kbd", "-device", "usb-mouse"] + snd + [
             "-device", "bochs-display",
             "-netdev", "user,id=n0" if net == "user" else "socket,id=n0,mcast=230.0.0.1:12347",
             "-device", "virtio-net-device,netdev=n0",
@@ -245,6 +273,10 @@ def main():
     p.add_argument("--fresh", action="store_true")
     p.add_argument("--net", choices=("socket", "user"), default="socket",
                    help="user: the machine reaches the host and the internet through QEMU")
+    p.add_argument("--wav", help="a USB sound device; what it plays is written to this WAVE file")
+    p.add_argument("--keep-disk", help="the disk as the run left it, copied to this file")
+    p.add_argument("--cdrom", help="an image put in a USB CD-ROM drive")
+    p.add_argument("--vols", help="a directory of disk images a step plugs in (hmp)")
     p.add_argument("steps", nargs="*")
     a = p.parse_args()
 
@@ -254,14 +286,21 @@ def main():
     base, state, keyf = [os.path.join(tmp, n) for n in ("base.img", "vm.state", "key")]
     run_img, con = [os.path.join(tmp, n) for n in ("run.img", "console.log")]
     uts, mons = free_port(), free_port()
-    key = key_of(a.elf, a.disk) + a.net
+    key = key_of(a.elf, a.disk) + a.net + ("wav" if a.wav else "") + (key_of(a.cdrom, a.cdrom) if a.cdrom else "")         + ("vols" if a.vols else "")
+    vdir = os.path.join(tmp, "vols")
+    if a.vols:
+        # the images as they were made, every run: a run writes to them
+        os.makedirs(vdir, exist_ok=True)
+        for n in os.listdir(a.vols):
+            if n.endswith(".img"):
+                shutil.copyfile(os.path.join(a.vols, n), os.path.join(vdir, n))
     warm = (not a.fresh and os.path.exists(state) and os.path.exists(base)
             and os.path.exists(keyf) and open(keyf).read() == key)
     for f in (con,):
         if os.path.exists(f):
             os.remove(f)
     shutil.copyfile(base if warm else a.disk, run_img)
-    args = machine_args(a.elf, run_img, con, uts, mons, a.net)
+    args = machine_args(a.elf, run_img, con, uts, mons, a.net, a.wav, a.cdrom, bool(a.vols))
     if warm:
         inport = free_port()
         args += ["-incoming", "tcp:127.0.0.1:%d" % inport]
@@ -310,10 +349,24 @@ def main():
                     continue
                 if l.startswith("shot "):
                     print("shot", shot(mon, a.out, l[5:].strip(), tmp))
+                elif l.startswith("hmp "):
+                    cmd = l[4:].strip().replace("$VOLS", vdir.replace("\\", "/"))
+                    out = mon.cmd(cmd)
+                    # the monitor echoes what is typed with its editing codes: the answer is the last line
+                    lines = [x.strip() for x in out.replace("(qemu)", "").split("\n")]
+                    lines = [x for x in lines if x and "\x1b" not in x]
+                    print("hmp %s -> %s" % (cmd, lines[-1] if lines else "ok"))
                 elif l.startswith("expect "):
                     met = wait_for(con, l[7:].strip(), 20)
                     print("expect %s: %s" % (l[7:].strip(), "met" if met else "NOT MET"))
                     ok = ok and met
+                elif l.startswith("absent "):
+                    said = [x for x in open(con, encoding="utf-8", errors="replace").read().splitlines()
+                            if l[7:].strip() in x]
+                    print("absent %s: %s" % (l[7:].strip(), "met" if not said else "NOT MET"))
+                    for x in said[:20]:
+                        print("    " + x.strip())
+                    ok = ok and not said
                 else:
                     ans = drv.ask(l)
                     print("%s -> %s" % (l, ans))
@@ -335,8 +388,17 @@ def main():
             q.wait(10)
         except subprocess.TimeoutExpired:
             q.kill()
+        if a.keep_disk and os.path.exists(run_img):
+            shutil.copyfile(run_img, a.keep_disk)
         if os.path.exists(run_img):
             os.remove(run_img)
+        if a.vols and os.path.isdir(vdir):
+            if a.keep_disk:
+                # the disks as the run left them too, for a run that starts from the disk kept
+                for n in os.listdir(vdir):
+                    if n.endswith(".img"):
+                        shutil.copyfile(os.path.join(vdir, n), os.path.join(a.vols, n))
+            shutil.rmtree(vdir, ignore_errors=True)
     return 0 if ok else 1
 
 

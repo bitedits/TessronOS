@@ -27,7 +27,12 @@
 #include "kernel.h"
 #include <tk/tkernel.h>
 #include <stddef.h>
+#include <stdarg.h>
 #include "tstdlib.h"
+
+/* Declared by the compiler's stdio.h, which the kernel does not otherwise use */
+int vsnprintf( char *s, size_t n, const char *fmt, va_list ap );
+int snprintf( char *s, size_t n, const char *fmt, ... );
 
 /* ---------------------------------------------------------------- text */
 
@@ -177,6 +182,36 @@ long atol( const char *s )
 	return neg ? -v : v;
 }
 
+/* Digits in base 2 to 36 (0: 8 after "0", 16 after "0x", else 10) */
+unsigned long strtoul( const char *s, char **end, int base )
+{
+	unsigned long	v = 0;
+	int		neg = 0, d, any = 0;
+	const char	*p = s;
+
+	while ( *p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' ) p++;
+	if ( *p == '-' ) { neg = 1; p++; }
+	else if ( *p == '+' ) { p++; }
+	if ( ( base == 0 || base == 16 ) && p[0] == '0' && ( p[1] == 'x' || p[1] == 'X' ) ) {
+		p += 2;
+		base = 16;
+	} else if ( base == 0 ) {
+		base = ( p[0] == '0' ) ? 8 : 10;
+	}
+	for ( ;; p++ ) {
+		if ( *p >= '0' && *p <= '9' ) d = *p - '0';
+		else if ( *p >= 'a' && *p <= 'z' ) d = *p - 'a' + 10;
+		else if ( *p >= 'A' && *p <= 'Z' ) d = *p - 'A' + 10;
+		else break;
+		if ( d >= base ) break;
+		v = v * (unsigned long)base + (unsigned long)d;
+		any = 1;
+	}
+	if ( end != NULL ) *end = (char *)( any ? p : s );
+
+	return neg ? -v : v;
+}
+
 long labs( long v )
 {
 	return ( v < 0 ) ? -v : v;
@@ -187,6 +222,143 @@ char *getenv( const char *name )
 	(void)name;
 
 	return NULL;			/* there is no environment to look in */
+}
+
+/* ---------------------------------------------------------------- formatting */
+
+typedef struct {
+	char	*s;
+	size_t	n, k;			/* room, characters made */
+} FMTOUT;
+
+LOCAL void fmt_put( FMTOUT *o, char c )
+{
+	if ( o->k + 1 < o->n ) o->s[o->k] = c;
+	o->k++;
+}
+
+/*
+ * The conversions the code built into the kernel uses: %d %i %u %x %X
+ * %o %c %s %p %%, with '-', '0', a width and a precision, and the
+ * lengths h, l, ll and z. No floating point: the kernel does not use
+ * its registers.
+ */
+int vsnprintf( char *s, size_t n, const char *fmt, va_list ap )
+{
+	FMTOUT	o;
+
+	o.s = s;
+	o.n = n;
+	o.k = 0;
+	while ( *fmt != 0 ) {
+		char		c = *fmt++, buf[24], pad = ' ';
+		int		left = 0, width = 0, prec = -1, lng = 0, neg = 0, len = 0, i, base = 10;
+		unsigned long long u = 0;
+		const char	*str = NULL;
+
+		if ( c != '%' ) {
+			fmt_put(&o, c);
+			continue;
+		}
+		for ( ;; fmt++ ) {
+			if ( *fmt == '-' ) left = 1;
+			else if ( *fmt == '0' ) pad = '0';
+			else if ( *fmt != ' ' && *fmt != '+' && *fmt != '#' ) break;
+		}
+		if ( *fmt == '*' ) {
+			width = va_arg(ap, int);
+			fmt++;
+		}
+		while ( *fmt >= '0' && *fmt <= '9' ) width = width * 10 + ( *fmt++ - '0' );
+		if ( *fmt == '.' ) {
+			prec = 0;
+			fmt++;
+			if ( *fmt == '*' ) {
+				prec = va_arg(ap, int);
+				fmt++;
+			}
+			while ( *fmt >= '0' && *fmt <= '9' ) prec = prec * 10 + ( *fmt++ - '0' );
+		}
+		for ( ;; fmt++ ) {
+			if ( *fmt == 'l' ) lng++;
+			else if ( *fmt == 'z' || *fmt == 'j' || *fmt == 't' ) lng = 2;
+			else if ( *fmt != 'h' ) break;
+		}
+		c = *fmt;
+		if ( c != 0 ) fmt++;
+		switch ( c ) {
+		case 'd':
+		case 'i': {
+			long long v = ( lng >= 2 ) ? va_arg(ap, long long) : ( lng == 1 ) ? va_arg(ap, long) : va_arg(ap, int);
+
+			neg = ( v < 0 );
+			u = neg ? (unsigned long long)( -( v + 1 ) ) + 1 : (unsigned long long)v;
+			break;
+		}
+		case 'u': case 'x': case 'X': case 'o':
+			u = ( lng >= 2 ) ? va_arg(ap, unsigned long long) : ( lng == 1 ) ? va_arg(ap, unsigned long)
+			  : va_arg(ap, unsigned int);
+			base = ( c == 'o' ) ? 8 : ( c == 'u' ) ? 10 : 16;
+			break;
+		case 'p':
+			u = (unsigned long long)(unsigned long)va_arg(ap, void *);
+			base = 16;
+			fmt_put(&o, '0');
+			fmt_put(&o, 'x');
+			break;
+		case 'c':
+			buf[0] = (char)va_arg(ap, int);
+			str = buf;
+			len = 1;
+			break;
+		case 's':
+			str = va_arg(ap, const char *);
+			if ( str == NULL ) str = "(null)";
+			for ( len = 0; str[len] != 0 && ( prec < 0 || len < prec ); len++ ) ;
+			break;
+		case '%':
+			fmt_put(&o, '%');
+			continue;
+		default:
+			continue;
+		}
+		if ( str == NULL ) {
+			const char *dg = ( c == 'X' ) ? "0123456789ABCDEF" : "0123456789abcdef";
+
+			do {
+				buf[len++] = dg[u % (unsigned)base];
+				u /= (unsigned)base;
+			} while ( u != 0 && len < (int)sizeof(buf) );
+			while ( len < prec && len < (int)sizeof(buf) ) buf[len++] = '0';
+			if ( neg && pad == '0' && !left ) {
+				fmt_put(&o, '-');
+				width--;
+				neg = 0;
+			}
+			if ( neg ) buf[len++] = '-';
+			if ( !left ) for ( i = len; i < width; i++ ) fmt_put(&o, pad);
+			for ( i = len - 1; i >= 0; i-- ) fmt_put(&o, buf[i]);
+		} else {
+			if ( !left ) for ( i = len; i < width; i++ ) fmt_put(&o, ' ');
+			for ( i = 0; i < len; i++ ) fmt_put(&o, str[i]);
+		}
+		if ( left ) for ( i = len; i < width; i++ ) fmt_put(&o, ' ');
+	}
+	if ( n > 0 ) s[( o.k < n ) ? o.k : n - 1] = 0;
+
+	return (int)o.k;
+}
+
+int snprintf( char *s, size_t n, const char *fmt, ... )
+{
+	va_list	ap;
+	int	k;
+
+	va_start(ap, fmt);
+	k = vsnprintf(s, n, fmt, ap);
+	va_end(ap);
+
+	return k;
 }
 
 /* ---------------------------------------------------------------- memory */

@@ -24,16 +24,9 @@
  * the link is down.
  */
 IMPORT INT knl_pcie_rc_init( void );
+IMPORT ER  knl_fan_init( void );		/* fan.c */
 
-/*
- * One call of the firmware's property interface (kernel/sysdepend/rpi5/
- * mbox.c). 'buf' is the whole message, its size in bytes in word 0; it
- * lies below 1GB physical and is 16 byte aligned. Answers E_OK when the
- * firmware accepted the message, E_TMOUT when it did not answer.
- */
-IMPORT ER knl_mbox_property( UW *buf );
-
-/* One value the firmware tells for a tag asked with one word (mbox.c) */
-IMPORT ER knl_fw_value( UW tag, UW id, UW *p_val );
+/* The firmware's property interface (kernel/sysdepend/rpi/mbox.c) */
+#include "../rpi/rpi_fw.h"
 
 #endif /* _SYSDEPEND_TARGET_SYSDEPEND_ */

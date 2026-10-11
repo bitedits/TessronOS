@@ -1,0 +1,11 @@
+<tad version="1.0" encoding="UTF-8" filename="基本表計算の横の配置">
+<document>
+<p>基本表計算の横の配置</p>
+<p>基本表計算のセルの横の配置。メニューの定義。</p>
+</document>
+<menu>
+<item code="align.left">左揃え</item>
+<item code="align.center">中央揃え</item>
+<item code="align.right">右揃え</item>
+</menu>
+</tad>

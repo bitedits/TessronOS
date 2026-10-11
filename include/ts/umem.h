@@ -27,14 +27,32 @@
  *	zeros. ts_unm_mem takes the pages away and gives the addresses
  *	back. Both take a part of a reservation and split it as needed.
  *
- *	A page is never writable and executable, and a process gets no
- *	page to execute this way (TS_MEM_EXEC is E_NOSPT): a program that
- *	would write code and run it cannot, by the rule of W^X.
+ *	A page is never writable and executable at once (W^X).
+ *	TS_MEM_EXEC (with or without TS_MEM_READ) makes the pages
+ *	executable and read-only; what was written into them is made
+ *	visible to the instruction fetch of every processor before they
+ *	can be run. TS_MEM_RW | TS_MEM_EXEC (TS_MEM_JIT) asks for pages
+ *	that are written and run by turns: each is made zero filled the
+ *	first time it is touched, and is writable or executable, never
+ *	both; a write to it while it is executable, or running it while it
+ *	is writable, turns it the other way and the access goes on (the
+ *	turn to executable makes the instructions fetchable as above). A
+ *	compiler to machine code writes and runs such pages as if they were
+ *	both. They are not to be handed to a call of the system: the
+ *	kernel does not turn them for its own accesses.
+ *
+ *	ts_ctl_mem with TS_MEM_DISCARD (alone) gives up what the pages
+ *	hold and keeps what they allow: the pages read as zeros after it
+ *	(those written and run by turns are taken away, to be made again
+ *	when touched; the others are zero filled where they are).
+ *
+ *	A process may clean and invalidate the caches by address itself
+ *	(dc cvau, ic ivau and CTR_EL0 are open to EL0).
  *
  *	Errors: E_PAR (not page aligned, not all of it reserved, a size
- *	of 0, an alignment that is not a power of two), E_NOMEM (no room
- *	for the addresses or no pages), E_MACV (p_adr not the process's
- *	to write), E_NOSPT (execution asked for).
+ *	of 0, an alignment that is not a power of two, a protection not
+ *	known), E_NOMEM (no room for the addresses or no pages), E_MACV
+ *	(p_adr not the process's to write).
  */
 
 #ifndef __TS_UMEM_H__
@@ -48,7 +66,9 @@ extern "C" {
 #define TS_MEM_READ	0x01
 #define TS_MEM_WRITE	0x02		/* read and write */
 #define TS_MEM_RW	( TS_MEM_READ | TS_MEM_WRITE )
-#define TS_MEM_EXEC	0x04		/* refused */
+#define TS_MEM_EXEC	0x04		/* read and run, not written */
+#define TS_MEM_JIT	( TS_MEM_RW | TS_MEM_EXEC )	/* written and run by turns */
+#define TS_MEM_DISCARD	0x08		/* ts_ctl_mem: contents given up, protection kept */
 
 /* Where the reservations are made: below the shared window (design 6.8) */
 #define TS_MEM_BASE	0x0000100000000000ULL

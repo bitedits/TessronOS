@@ -37,6 +37,20 @@ SECTIONS
 	__kernel_start = .;
 
 	.text : AT(ADDR(.text) - KVA_BASE) ALIGN(0x1000) {
+		/*
+		 * The desktop's code, data and zeroed data, each in one place:
+		 * 強制終了 knows the desktop's tasks by where they start, and puts
+		 * its variables back as they were when the machine started
+		 * before it starts the desktop again (outer_kernel/wm/fquit.c).
+		 * The test driver of the screen stays out: it goes on across.
+		 */
+		__dt_text_start = .;
+		EXCLUDE_FILE(*/dtuitest.o) */application/desktop/*.o(.text .text.*)
+		*/application/cab/*.o(.text .text.*)
+		*/application/doc/*.o(.text .text.*)
+		*/application/fig/*.o(.text .text.*)
+		*/lib/librtad/*.o(.text .text.*)
+		__dt_text_end = .;
 		*(.text .text.*)
 	}
 
@@ -62,7 +76,23 @@ SECTIONS
 
 	.data : AT(ADDR(.data) - KVA_BASE) ALIGN(0x200000) {
 		__data_start = .;
+		/* the desktop's data (see .text) */
+		__dt_data_start = .;
+		EXCLUDE_FILE(*/dtuitest.o) */application/desktop/*.o(.data .data.*)
+		*/application/cab/*.o(.data .data.*)
+		*/application/doc/*.o(.data .data.*)
+		*/application/fig/*.o(.data .data.*)
+		*/lib/librtad/*.o(.data .data.*)
+		. = ALIGN(16);
+		__dt_data_end = .;
 		*(.data .data.*)
+		/*
+		 * The global offset table (the NetBSD stack's object reaches the
+		 * ends of its link sets through it) belongs to the flat image:
+		 * boot.S copies the image up to __image_end_pa when the firmware
+		 * placed it elsewhere, and a table left outside would stay zero
+		 */
+		*(.got .got.*)
 		. = ALIGN(16);
 	}
 
@@ -72,6 +102,15 @@ SECTIONS
 
 	.bss (NOLOAD) : AT(ADDR(.bss) - KVA_BASE) ALIGN(16) {
 		_bss_start = .;
+		/* the desktop's zeroed data (see .text) */
+		__dt_bss_start = .;
+		EXCLUDE_FILE(*/dtuitest.o) */application/desktop/*.o(.bss .bss.*)
+		*/application/cab/*.o(.bss .bss.*)
+		*/application/doc/*.o(.bss .bss.*)
+		*/application/fig/*.o(.bss .bss.*)
+		*/lib/librtad/*.o(.bss .bss.*)
+		. = ALIGN(16);
+		__dt_bss_end = .;
 		*(.bss .bss.*)
 		*(COMMON)
 		. = ALIGN(16);

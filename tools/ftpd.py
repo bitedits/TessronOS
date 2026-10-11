@@ -8,6 +8,7 @@ tried against a real server without anything installed.
 
     ftpd.py [--host 127.0.0.1] [--port 2121] [--user NAME --password PW]
             [--pasv-address A.B.C.D] [--active-via HOST:PORT]
+            [--http PORT] [--echo6 PORT]
             [--exit-on-eof] [--quiet] <directory>
 
 Without --user any name is let in (anonymous), with any password. The
@@ -25,6 +26,11 @@ server connects there. The guest's address (10.0.2.15) cannot be reached
 from the host through QEMU's user mode network; a port forwarded into
 the guest (hostfwd) can, so --active-via gives the host's end of that
 forward, which the server connects to instead of what was named.
+
+With --echo6 a second server listens on [::1]:PORT and sends back
+whatever a connection sends it. QEMU's user mode network takes the
+guest's connections to [fec0::2] there, which is how the guest's IPv6 is
+tried against the host.
 
 With --exit-on-eof the server ends when its standard input reaches its
 end. Whoever started it stops it by closing that pipe, which also
@@ -390,6 +396,35 @@ class Server(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
+class Echo(socketserver.BaseRequestHandler):
+    """Whatever comes is sent back, until the other end closes."""
+
+    def handle(self):
+        while True:
+            data = self.request.recv(65536)
+            if not data:
+                return
+            self.request.sendall(data)
+
+
+class Echo6Server(socketserver.ThreadingTCPServer):
+    address_family = socket.AF_INET6
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+def serve_echo6(port, quiet):
+    """The echo server on [::1]:port, in a thread of its own."""
+    try:
+        srv = Echo6Server(('::1', port), Echo)
+    except OSError as e:
+        sys.stderr.write('ftpd: no IPv6 echo server on [::1]:%d (%s)\n' % (port, e))
+        return
+    if not quiet:
+        sys.stderr.write('ftpd: echo on [::1]:%d\n' % port)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+
 def main():
     ap = argparse.ArgumentParser(description='A small FTP server for the tests.')
     ap.add_argument('directory', help='the directory to serve')
@@ -406,7 +441,11 @@ def main():
     ap.add_argument('--quiet', action='store_true')
     ap.add_argument('--http', type=int, default=0,
                     help='also the test HTTP server (tools/httpd_test.py) on this port and the next')
+    ap.add_argument('--echo6', type=int, default=0,
+                    help='also an echo server on [::1] at this port')
     args = ap.parse_args()
+    if args.echo6:
+        serve_echo6(args.echo6, args.quiet)
     if args.http:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import httpd_test

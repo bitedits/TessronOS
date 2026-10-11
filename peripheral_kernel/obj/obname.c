@@ -39,6 +39,9 @@
 #include <ts/proc.h>
 #include <ts/tsfs.h>
 #include <ts/dt.h>
+#include <ts/tsfsck.h>
+#include <ts/tsfsjrnl.h>
+#include <ts/uuid.h>
 #include "obj.h"
 
 /*
@@ -68,6 +71,7 @@ typedef struct {
 	BOOL	used;
 	INT	hnd;
 	ID	pid;			/* who holds it; 0 the kernel */
+	ID	tsk;			/* the kernel's: the task that opened it */
 	UINT	ops;			/* OB_OP_* it may be used for */
 	BOOL	nowait;
 } OBKEY;
@@ -172,14 +176,47 @@ EXPORT CONST TS_UUID ob_uuid_system = OB_UUID_SYSTEM_INIT;
 EXPORT CONST TS_UUID ob_uuid_random = OB_UUID_RANDOM_INIT;
 EXPORT CONST TS_UUID ob_uuid_input = OB_UUID_INPUT_INIT;
 EXPORT CONST TS_UUID ob_uuid_display = OB_UUID_DISPLAY_INIT;
+EXPORT CONST TS_UUID ob_user_person = OB_USER_PERSON_INIT;
+EXPORT CONST TS_UUID ob_group_users = OB_GROUP_USERS_INIT;
+EXPORT CONST TS_UUID ob_user_admin = OB_USER_ADMIN_INIT;
 
 /* The kernel's own tasks, and init: the system, an administrator */
 EXPORT CONST T_OBCRD knl_ob_crd_system = {
 	OB_USER_SYSTEM_INIT, 1, { OB_GROUP_ADMIN_INIT }
 };
 
+/* The ordinary user 利用者: what a program from the desktop acts as when no one logged in */
+EXPORT CONST T_OBCRD knl_ob_crd_person = {
+	OB_USER_PERSON_INIT, 1, { OB_GROUP_USERS_INIT }
+};
+
 /* A process whose credentials were lost: nobody, in no group */
 LOCAL CONST T_OBCRD ob_crd_nobody;
+
+/*
+ * The person logged in at the desktop (knl_ob_session), as a kept set
+ * without the administrators' group; NULL: no one, and the programs
+ * the desktop starts act as 利用者.
+ */
+LOCAL CONST T_OBCRD	*ob_session = NULL;
+
+/*
+ * The processes acting as administrators for a while (knl_ob_adm_give):
+ * what each acted as before, given back by ob_end_adm, when the time is
+ * up, or when the process ends. A few at a time at most -- a person
+ * types the password for each -- so a short table, looked at only when
+ * it has something in it.
+ */
+#define OB_ADM_MAX	16
+
+typedef struct {
+	ID		pid;		/* 0: free */
+	CONST T_OBCRD	*base;		/* what it acted as before */
+	UD		until;		/* the system time (ms) the rights go at */
+} OBADM;
+
+LOCAL OBADM	ob_adm[OB_ADM_MAX];
+LOCAL INT	ob_nadm = 0;
 
 #define LOCK()		tk_loc_mtx(ob_mtx, TMO_FEVR)
 #define UNLOCK()	tk_unl_mtx(ob_mtx)
@@ -274,6 +311,105 @@ EXPORT UINT knl_ob_permit_on( CONST TS_UUID *uuid, CONST T_OBCRD *crd )
 	return ops;
 }
 
+#ifdef OB_DENY_LOG
+/*
+ * A refusal told on the console (make UITEST=1 or OACVLOG=1), for
+ * finding what a program the person starts is not let do: which
+ * process, which object, what it asked and what it may. A line is not
+ * said again while it is one of the last few said; the few are kept
+ * without a lock, so that two processes refused at once may each have
+ * their line said twice, which a tool for looking does not mind.
+ */
+#define DENY_SEEN	16
+LOCAL struct {
+	ID	pid;
+	TS_UUID	uuid;
+	UINT	want;
+	CONST char *at;
+}	deny_seen[DENY_SEEN];
+LOCAL UINT	deny_next = 0;
+
+/* The "name" of an object's metadata, or nothing */
+LOCAL void deny_obj_name( CONST TS_UUID *u, UB *name, INT max )
+{
+	UB	*j = (UB *)Kmalloc(1024);
+	INT	len = 0, i, n = 0;
+
+	name[0] = 0;
+	if ( j == NULL ) {
+		return;
+	}
+	if ( knl_ob_meta_read(u, j, 1024, &len) >= E_OK ) {
+		for ( i = 0; i + 7 < len; i++ ) {
+			if ( j[i] == '"' && j[i + 1] == 'n' && j[i + 2] == 'a' && j[i + 3] == 'm'
+			  && j[i + 4] == 'e' && j[i + 5] == '"' ) {
+				i += 6;
+				while ( i < len && j[i] != '"' ) i++;
+				for ( i++; i < len && j[i] != '"' && n < max - 1; i++ ) {
+					name[n++] = j[i];
+				}
+				break;
+			}
+		}
+	}
+	name[n] = 0;
+	Kfree(j);
+}
+
+EXPORT void knl_ob_deny_note( CONST char *at, CONST TS_UUID *u, UINT want, UINT may )
+{
+	CONST T_OBMGR	*m;
+	ID		pid = ts_get_pid();
+	UB		*who, *what;
+	char		us[40];
+	UINT		i;
+
+	if ( pid <= 0 ) {
+		return;				/* the kernel's own: refused on purpose or a fault of its own */
+	}
+	for ( i = 0; i < DENY_SEEN; i++ ) {
+		if ( deny_seen[i].pid == pid && deny_seen[i].want == want && deny_seen[i].at == at
+		  && ( u == NULL || same_uuid(&deny_seen[i].uuid, u) ) ) {
+			return;
+		}
+	}
+	i = deny_next++ % DENY_SEEN;
+	deny_seen[i].pid = pid;
+	deny_seen[i].want = want;
+	deny_seen[i].at = at;
+	if ( u != NULL ) deny_seen[i].uuid = *u;
+
+	who = (UB *)Kmalloc(64 + 64);
+	if ( who == NULL ) {
+		return;
+	}
+	what = who + 64;
+	(void)knl_prc_name(pid, who, 64);
+	us[0] = 0;
+	what[0] = 0;
+	m = ( u != NULL ) ? knl_ob_mgr_of(u) : NULL;
+	if ( u != NULL ) {
+		(void)ts_uuid_to_str(u, us, sizeof(us));
+		if ( m != NULL && m->type == OB_T_STORAGE && m->sub == OB_S_FILE ) {
+			deny_obj_name(u, what, 64);
+		}
+	}
+	if ( u == NULL ) {
+		tm_printf((UB *)"!OACV! pid=%d \"%s\" %s want=0x%x may=0x%x\n", (INT)pid, who, at, want, may);
+	} else {
+		tm_printf((UB *)"!OACV! pid=%d \"%s\" %s obj=%s type=%d.%d \"%s\" want=0x%x may=0x%x\n",
+			  (INT)pid, who, at, us, ( m != NULL ) ? (INT)m->type : 0,
+			  ( m != NULL ) ? (INT)m->sub : 0, what, want, may);
+	}
+	Kfree(who);
+}
+#else
+EXPORT void knl_ob_deny_note( CONST char *at, CONST TS_UUID *u, UINT want, UINT may )
+{
+	(void)at;  (void)u;  (void)want;  (void)may;
+}
+#endif
+
 /* ---------------------------------------------------------------- credentials */
 
 EXPORT BOOL knl_ob_is_admin( CONST T_OBCRD *crd )
@@ -291,14 +427,50 @@ EXPORT BOOL knl_ob_is_admin( CONST T_OBCRD *crd )
 	return FALSE;
 }
 
+/* The system time in milliseconds, for the administrator's rights given for a while */
+LOCAL UD now_ms( void )
+{
+	SYSTIM	t;
+
+	if ( tk_get_otm(&t) < E_OK ) {
+		return 0;
+	}
+	return ( (UD)(UW)t.hi << 32 ) | t.lo;
+}
+
+/*
+ * What an administrator for a while acted as before, once the time is
+ * up: NULL while the rights hold, or when pid has none. Read without
+ * the lock -- a slot is filled before its pid is set and its pid
+ * cleared before it is used again -- since the credentials are asked
+ * for under the lock as well.
+ */
+LOCAL CONST T_OBCRD *adm_lapsed( ID pid )
+{
+	INT	i;
+
+	if ( __atomic_load_n(&ob_nadm, __ATOMIC_ACQUIRE) == 0 ) {
+		return NULL;
+	}
+	for ( i = 0; i < OB_ADM_MAX; i++ ) {
+		if ( __atomic_load_n(&ob_adm[i].pid, __ATOMIC_ACQUIRE) == pid ) {
+			return ( now_ms() >= ob_adm[i].until ) ? ob_adm[i].base : NULL;
+		}
+	}
+	return NULL;
+}
+
 EXPORT CONST T_OBCRD *knl_ob_crd_of( ID pid )
 {
-	CONST T_OBCRD	*c;
+	CONST T_OBCRD	*c, *was;
 
 	if ( pid <= 0 ) {
 		return &knl_ob_crd_system;
 	}
 	c = ( pid < CNF_PID_MAX ) ? ob_crd_pid[pid] : NULL;
+	if ( c != NULL && ( was = adm_lapsed(pid) ) != NULL ) {
+		c = was;
+	}
 
 	return ( c != NULL ) ? c : &ob_crd_nobody;
 }
@@ -342,15 +514,259 @@ LOCAL CONST T_OBCRD *crd_intern( CONST T_OBCRD *crd )
 	return &c->crd;
 }
 
-/* A new process acts as its parent did */
-EXPORT void knl_ob_prc_start( ID pid, ID ppid )
+/* The slot of pid among the administrators for a while, or -1. Under the lock. */
+LOCAL INT adm_slot( ID pid )
+{
+	INT	i;
+
+	for ( i = 0; i < OB_ADM_MAX && ob_nadm > 0; i++ ) {
+		if ( ob_adm[i].pid == pid ) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+/* The rights of slot i given back: the process acts as it did. Under the lock. */
+LOCAL void adm_drop( INT i, BOOL restore )
+{
+	ID	pid = ob_adm[i].pid;
+
+	if ( restore && pid > 0 && pid < CNF_PID_MAX && ob_crd_pid[pid] != NULL ) {
+		ob_crd_pid[pid] = ob_adm[i].base;
+	}
+	__atomic_store_n(&ob_adm[i].pid, 0, __ATOMIC_RELEASE);
+	ob_nadm--;
+}
+
+/* What pid acts as, the administrator's rights for a while left out. Under the lock. */
+LOCAL CONST T_OBCRD *crd_base( ID pid )
+{
+	INT	i = adm_slot(pid);
+
+	return ( i >= 0 ) ? ob_adm[i].base : knl_ob_crd_of(pid);
+}
+
+/*
+ * A new process acts as its parent did, without the administrator's
+ * rights the parent may have for a while: they were given for what the
+ * parent was doing, not for what it starts. One the kernel starts acts
+ * as the system, or for the person at the machine when 'person' says so
+ * (TS_PRC_USER): the user logged in at the desktop, or 利用者.
+ */
+EXPORT void knl_ob_prc_start( ID pid, ID ppid, BOOL person )
 {
 	if ( ob_mtx <= 0 || pid <= 0 || pid >= CNF_PID_MAX ) {
 		return;
 	}
 	LOCK();
-	ob_crd_pid[pid] = knl_ob_crd_of(ppid);
+	if ( ppid > 0 ) {
+		ob_crd_pid[pid] = crd_base(ppid);
+	} else if ( person ) {
+		ob_crd_pid[pid] = ( ob_session != NULL ) ? ob_session : &knl_ob_crd_person;
+	} else {
+		ob_crd_pid[pid] = &knl_ob_crd_system;
+	}
 	UNLOCK();
+}
+
+/*
+ * The person logged in at the desktop: the programs the desktop starts
+ * from now on act as crd (NULL: as 利用者). The administrators' group is
+ * left out, so that a program does not act as an administrator because
+ * the person is one; it asks for the rights when it needs them, as any
+ * program does (DT_RQ_ADMIN).
+ */
+EXPORT ER knl_ob_session( CONST T_OBCRD *crd )
+{
+	T_OBCRD		*s;
+	CONST T_OBCRD	*c = NULL;
+	INT		g;
+
+	if ( crd == NULL ) {
+		LOCK();
+		ob_session = NULL;
+		UNLOCK();
+		return E_OK;
+	}
+	s = (T_OBCRD *)Kmalloc(sizeof(T_OBCRD));
+	if ( s == NULL ) {
+		return E_NOMEM;
+	}
+	knl_memset(s, 0, sizeof(*s));
+	s->user = crd->user;
+	for ( g = 0; g < crd->ngrp && g < CNF_OB_MAX_GROUPS; g++ ) {
+		if ( !same_uuid(&crd->grp[g], &ob_group_admin) ) {
+			s->grp[s->ngrp++] = crd->grp[g];
+		}
+	}
+	LOCK();
+	if ( !same_uuid(&s->user, &ob_user_system) ) {
+		c = crd_intern(s);
+		if ( c != NULL ) {
+			ob_session = c;
+		}
+	}
+	UNLOCK();
+	Kfree(s);
+
+	return ( c != NULL ) ? E_OK : same_uuid(&crd->user, &ob_user_system) ? E_PAR : E_NOMEM;
+}
+
+/*
+ * The kernel's tasks that make objects for the person at the machine:
+ * the desktop's, which make documents as the person works them. What
+ * such a task makes with no protection given is the person's
+ * (ob_cre_obj); what the other tasks of the kernel make is the system's.
+ */
+#define OB_MAKER_MAX	8
+LOCAL ID	ob_maker_tsk[OB_MAKER_MAX];
+
+EXPORT void knl_ob_make_for_person( BOOL on )
+{
+	ID	me = tk_get_tid();
+	INT	i, free = -1;
+
+	for ( i = 0; i < OB_MAKER_MAX; i++ ) {
+		if ( ob_maker_tsk[i] == me ) {
+			if ( !on ) ob_maker_tsk[i] = 0;
+			return;
+		}
+		if ( ob_maker_tsk[i] == 0 && free < 0 ) free = i;
+	}
+	if ( on && free >= 0 ) {
+		ob_maker_tsk[free] = me;
+	}
+}
+
+LOCAL BOOL maker_for_person( void )
+{
+	ID	me = tk_get_tid();
+	INT	i;
+
+	for ( i = 0; i < OB_MAKER_MAX; i++ ) {
+		if ( ob_maker_tsk[i] == me ) return TRUE;
+	}
+	return FALSE;
+}
+
+/* What the programs the desktop starts act as now */
+EXPORT CONST T_OBCRD *knl_ob_session_crd( void )
+{
+	CONST T_OBCRD	*c = ob_session;
+
+	return ( c != NULL ) ? c : &knl_ob_crd_person;
+}
+
+/*
+ * Process pid acts as an administrator for ms milliseconds (at most
+ * OB_ADM_MS), or until it gives the rights back (ob_end_adm) or ends:
+ * the credentials it has, with the administrators' group. Given only by
+ * the kernel, once the administrator's password was typed for it.
+ * Asked again while it has them, the time starts again.
+ */
+EXPORT ER knl_ob_adm_give( ID pid, UINT ms )
+{
+	T_OBCRD		*a;
+	CONST T_OBCRD	*base, *c;
+	INT		i, g;
+	ER		er = E_OK;
+
+	if ( pid <= 0 ) {
+		return E_OK;			/* the kernel is an administrator */
+	}
+	if ( pid >= CNF_PID_MAX ) {
+		return E_NOEXS;
+	}
+	if ( ms == 0 || ms > OB_ADM_MS ) {
+		ms = OB_ADM_MS;
+	}
+	a = (T_OBCRD *)Kmalloc(sizeof(T_OBCRD));
+	if ( a == NULL ) {
+		return E_NOMEM;
+	}
+	LOCK();
+	/* a slot whose time is up is given back first */
+	for ( i = 0; i < OB_ADM_MAX && ob_nadm > 0; i++ ) {
+		if ( ob_adm[i].pid > 0 && now_ms() >= ob_adm[i].until ) {
+			adm_drop(i, TRUE);
+		}
+	}
+	if ( ob_crd_pid[pid] == NULL ) {
+		er = E_NOEXS;
+		goto out;
+	}
+	i = adm_slot(pid);
+	if ( i >= 0 ) {
+		ob_adm[i].until = now_ms() + ms;
+		goto out;
+	}
+	base = ob_crd_pid[pid];
+	if ( knl_ob_is_admin(base) ) {
+		goto out;			/* one already */
+	}
+	*a = *base;
+	if ( a->ngrp >= CNF_OB_MAX_GROUPS ) {
+		a->ngrp = CNF_OB_MAX_GROUPS - 1;
+	}
+	for ( g = a->ngrp; g > 0; g-- ) {
+		a->grp[g] = a->grp[g - 1];
+	}
+	a->grp[0] = ob_group_admin;
+	a->ngrp++;
+	for ( i = 0; i < OB_ADM_MAX && ob_adm[i].pid != 0; i++ ) ;
+	if ( i >= OB_ADM_MAX ) {
+		er = E_LIMIT;
+		goto out;
+	}
+	c = crd_intern(a);
+	if ( c == NULL ) {
+		er = E_NOMEM;
+		goto out;
+	}
+	ob_adm[i].base = base;
+	ob_adm[i].until = now_ms() + ms;
+	ob_nadm++;
+	__atomic_store_n(&ob_adm[i].pid, pid, __ATOMIC_RELEASE);
+	ob_crd_pid[pid] = c;
+    out:
+	UNLOCK();
+	Kfree(a);
+
+	return er;
+}
+
+/* Whether pid acts as an administrator for a while now */
+EXPORT BOOL knl_ob_adm_held( ID pid )
+{
+	BOOL	held;
+
+	if ( pid <= 0 || pid >= CNF_PID_MAX || ob_mtx <= 0 ) {
+		return FALSE;
+	}
+	LOCK();
+	held = (BOOL)( adm_slot(pid) >= 0 && adm_lapsed(pid) == NULL );
+	UNLOCK();
+
+	return held;
+}
+
+EXPORT ER ob_end_adm( void )
+{
+	ID	pid = ts_get_pid();
+	INT	i;
+
+	if ( pid <= 0 || ob_mtx <= 0 ) {
+		return E_OK;
+	}
+	LOCK();
+	i = adm_slot(pid);
+	if ( i >= 0 ) {
+		adm_drop(i, TRUE);
+	}
+	UNLOCK();
+
+	return E_OK;
 }
 
 LOCAL void hnd_release( INT hi );
@@ -388,12 +804,79 @@ EXPORT void knl_ob_prc_end( ID pid )
 	}
 }
 
+/*
+ * The keys the kernel's tasks tids opened, closed: the desktop's tasks
+ * were stopped where they stood and cannot close them themselves
+ * (fquit.c). An object a key kept open is let go with it.
+ */
+EXPORT INT knl_ob_tsk_end( CONST ID *tids, INT ntid )
+{
+	INT	i, k, c = 0;
+
+	if ( ob_mtx <= 0 || ntid <= 0 ) {
+		return 0;
+	}
+	/* what they made was the person's (knl_ob_make_for_person): no more */
+	for ( i = 0; i < OB_MAKER_MAX; i++ ) {
+		for ( k = 0; k < ntid; k++ ) {
+			if ( ob_maker_tsk[i] == tids[k] ) {
+				ob_maker_tsk[i] = 0;
+			}
+		}
+	}
+	for ( i = 0; i < OB_KEY_MAX; ) {
+		INT	his[16], n = 0, j;
+		ID	keys[16];
+
+		LOCK();
+		for ( ; i < OB_KEY_MAX && n < 16; i++ ) {
+			if ( !ob_key[i].used || ob_key[i].pid != 0 ) {
+				continue;
+			}
+			for ( k = 0; k < ntid; k++ ) {
+				if ( ob_key[i].tsk == tids[k] ) {
+					break;
+				}
+			}
+			if ( k == ntid ) {
+				continue;
+			}
+			his[n] = ob_key[i].hnd;
+			keys[n] = (ID)( ( ( (*ob_hndp[ob_key[i].hnd]).mgr + 1 ) << KEY_MGR_SHIFT ) | ( i + 1 ) );
+			n++;
+			ob_key[i].used = FALSE;
+		}
+		UNLOCK();
+		for ( j = 0; j < n; j++ ) {
+			ntf_drop(keys[j], 0);
+			hnd_release(his[j]);
+		}
+		c += n;
+	}
+	return c;
+}
+
+#if USE_KTEST
+/* The objects' lock held by a test, for a process's call to wait on */
+EXPORT void knl_ob_test_hold( BOOL on )
+{
+	if ( on ) {
+		LOCK();
+	} else {
+		UNLOCK();
+	}
+}
+#endif
+
 EXPORT void knl_ob_prc_gone( ID pid )
 {
 	if ( ob_mtx <= 0 || pid <= 0 || pid >= CNF_PID_MAX ) {
 		return;
 	}
 	LOCK();
+	if ( adm_slot(pid) >= 0 ) {
+		adm_drop(adm_slot(pid), FALSE);
+	}
 	ob_crd_pid[pid] = NULL;
 	UNLOCK();
 }
@@ -430,6 +913,9 @@ EXPORT ER knl_ob_set_crd( ID pid, CONST T_OBCRD *crd )
 	} else if ( ( c = crd_intern(crd) ) == NULL ) {
 		er = E_NOMEM;
 	} else {
+		if ( adm_slot(pid) >= 0 ) {
+			adm_drop(adm_slot(pid), FALSE);	/* a login is what it acts as from now */
+		}
 		ob_crd_pid[pid] = c;
 	}
 	UNLOCK();
@@ -473,6 +959,24 @@ LOCAL INT hnd_new( INT mgr, INT h, CONST TS_UUID *uuid, CONST T_OBPRT *prt )
 	return -1;
 }
 
+/*
+ * The entries of the table of opened objects made so far, and the bytes
+ * of one: an entry is made the first time its place comes round and is
+ * kept, so the table grows by itself up to OB_HND_MAX entries.
+ */
+EXPORT INT knl_ob_hnd_made( SZ *p_each )
+{
+	INT	i, n = 0;
+
+	LOCK();
+	for ( i = 0; i < OB_HND_MAX; i++ ) {
+		if ( ob_hndp[i] != NULL ) n++;
+	}
+	UNLOCK();
+	if ( p_each != NULL ) *p_each = (SZ)sizeof(OBHND);
+	return n;
+}
+
 LOCAL ID key_new( INT hi, ID pid, UINT ops, BOOL nowait )
 {
 	INT	i, n;
@@ -486,6 +990,7 @@ LOCAL ID key_new( INT hi, ID pid, UINT ops, BOOL nowait )
 			ob_key[i].used = TRUE;
 			ob_key[i].hnd = hi;
 			ob_key[i].pid = pid;
+			ob_key[i].tsk = ( pid == 0 ) ? tk_get_tid() : 0;
 			ob_key[i].ops = ops;
 			ob_key[i].nowait = nowait;
 			(*ob_hndp[hi]).refs++;
@@ -570,7 +1075,10 @@ LOCAL ER key_take( ID key, UINT need, INT recno, INT *p_hi, BOOL *p_nowait )
 		}
 	}
 	if ( ( ops & need ) != need ) {
+		TS_UUID	u = o->uuid;
+
 		UNLOCK();
+		knl_ob_deny_note(( recno >= 0 ) ? "record" : "key", &u, need, ops);
 		return E_OACV;
 	}
 	o->refs++;
@@ -695,6 +1203,7 @@ EXPORT ID ob_opn_obj( CONST TS_UUID *uuid, UINT ops )
 	}
 	if ( ( ops & ~allowed ) != 0 ) {
 		Kfree(prt);
+		knl_ob_deny_note("open", uuid, ops, allowed);
 		return E_OACV;
 	}
 	h = m->open(uuid, ops);
@@ -1221,6 +1730,7 @@ EXPORT ER ob_cre_obj( CONST T_OBCRE *c, TS_UUID *p_uuid )
 	if ( !knl_ob_uuid_zero(&c->uuid) ) {
 		if ( !knl_ob_is_admin(crd) ) {
 			Kfree(prt);
+			knl_ob_deny_note("create-with-uuid", &c->uuid, 0, 0);
 			return E_OACV;
 		}
 		if ( mgr_index(&c->uuid) >= 0 ) {
@@ -1240,6 +1750,7 @@ EXPORT ER ob_cre_obj( CONST T_OBCRE *c, TS_UUID *p_uuid )
 		prot_of(pm, &c->prog, prt);
 		if ( ( permit_on(pm, &c->prog, crd, prt) & OB_OP_EXEC ) == 0 ) {
 			Kfree(prt);
+			knl_ob_deny_note("run", &c->prog, OB_OP_EXEC, 0);
 			return E_OACV;
 		}
 	}
@@ -1249,6 +1760,15 @@ EXPORT ER ob_cre_obj( CONST T_OBCRE *c, TS_UUID *p_uuid )
 		if ( !knl_ob_is_admin(crd) ) {
 			prt->owner = crd->user;	/* nobody makes objects for another */
 		}
+	} else if ( ts_get_pid() <= 0 && c->type == OB_T_STORAGE && c->sub == OB_S_FILE
+		 && knl_ob_uuid_zero(&c->uuid) && maker_for_person() ) {
+		/*
+		 * A real object the desktop makes with nothing said of its
+		 * protection -- a document made from a template, a copy, a
+		 * new version -- is made for the person at the machine, whose
+		 * programs are to open and change it.
+		 */
+		knl_ob_prt_default(prt, knl_ob_session_crd());
 	} else {
 		knl_ob_prt_default(prt, crd);
 	}
@@ -1270,8 +1790,11 @@ LOCAL ER allowed( CONST T_OBMGR *m, CONST TS_UUID *uuid, UINT ops )
 	prot_of(m, uuid, prt);
 	may = permit_on(m, uuid, knl_ob_crd_of(ts_get_pid()), prt);
 	Kfree(prt);
-
-	return ( ( may & ops ) == ops ) ? E_OK : E_OACV;
+	if ( ( may & ops ) != ops ) {
+		knl_ob_deny_note("object", uuid, ops, may);
+		return E_OACV;
+	}
+	return E_OK;
 }
 
 EXPORT ER ob_del_obj( CONST TS_UUID *uuid )
@@ -2371,6 +2894,14 @@ EXPORT void knl_ob_post_as( CONST TS_UUID *watched, CONST TS_UUID *uuid, INT rec
 		if ( r->recno != OB_REC_ANY && recno != OB_REC_ANY && r->recno != recno ) {
 			continue;
 		}
+		if ( event == OB_E_KEY && n != NULL && ( n->mods & OB_KEY_SEEN ) != 0 ) {
+			if ( ( r->flags & OB_N_KEYSEEN ) == 0 ) {
+				continue;		/* every key as it came: only to who asked */
+			}
+		} else if ( event == OB_E_KEY && n != NULL && ( n->mods & OB_KEY_UP ) != 0
+		  && ( r->flags & OB_N_KEYUP ) == 0 ) {
+			continue;			/* a key let go: only to who asked for those */
+		}
 		to[cnt].port = r->port;
 		to[cnt].nid = (ID)( i + 1 );
 		to[cnt].id = r->id;
@@ -2488,6 +3019,8 @@ EXPORT ER ob_set_prt( CONST TS_UUID *uuid, CONST T_OBPRT *pk_prt )
 	Kfree(cur);
 	if ( er >= E_OK ) {
 		er = m->setprot(uuid, pk_prt);
+	} else {
+		knl_ob_deny_note("protection", uuid, OB_OP_PROT, 0);
 	}
 	return er;
 }
@@ -2545,6 +3078,31 @@ EXPORT ER knl_ob_meta_write( CONST TS_UUID *uuid, CONST UB *buf, INT len )
 
 /* ---------------------------------------------------------------- transactions */
 
+EXPORT ER ob_wip_vol( CONST TS_UUID *near )
+{
+	CONST T_OBMGR	*m;
+	ID		vol;
+
+	if ( near == NULL ) {
+		return E_PAR;
+	}
+	m = knl_ob_mgr_of(near);
+	if ( m == NULL ) {
+		return E_NOEXS;
+	}
+	if ( m->type != OB_T_STORAGE || m->sub != OB_S_FILE ) {
+		return E_NOSPT;
+	}
+	if ( ( knl_ob_permit_on(near, knl_ob_crd_of(ts_get_pid())) & OB_OP_WRITE ) == 0 ) {
+		return E_OACV;
+	}
+	vol = knl_obfile_vol_of(near);
+	if ( vol <= 0 ) {
+		return ( vol < 0 ) ? (ER)vol : E_NOEXS;
+	}
+	return ts_jrnl_wipe(vol);
+}
+
 EXPORT ER ob_beg_trx( CONST TS_UUID *on )
 {
 	return ( on != NULL ) ? knl_obfile_trx(on, TRUE, FALSE) : E_PAR;
@@ -2601,6 +3159,7 @@ EXPORT ER ob_att_vol( CONST char *path, UINT flags )
 	ER	er;
 
 	if ( !knl_ob_is_admin(knl_ob_crd_of(ts_get_pid())) ) {
+		knl_ob_deny_note("attach-volume", NULL, 0, 0);
 		return E_OACV;
 	}
 	er = knl_obfile_attach(path, flags);
@@ -2613,6 +3172,7 @@ EXPORT ER ob_att_vol( CONST char *path, UINT flags )
 EXPORT ER ob_det_vol( CONST char *path )
 {
 	if ( !knl_ob_is_admin(knl_ob_crd_of(ts_get_pid())) ) {
+		knl_ob_deny_note("detach-volume", NULL, 0, 0);
 		return E_OACV;
 	}
 	return knl_obfile_detach(path);
@@ -2629,6 +3189,7 @@ EXPORT ER ob_set_dom( CONST char *vol, CONST T_OBPRT *pk_prt )
 		return E_PAR;
 	}
 	if ( !knl_ob_is_admin(knl_ob_crd_of(ts_get_pid())) ) {
+		knl_ob_deny_note("volume-domain", NULL, 0, 0);
 		return E_OACV;
 	}
 	return knl_obfile_set_dom(vol, pk_prt);
@@ -2669,6 +3230,7 @@ EXPORT ER knl_ob_init( void )
 	   when the machine has one, else the store on the boot file system */
 	er = E_NOEXS;
 #ifdef CNF_OB_SYSVOL
+	(void)knl_ob_chk_boot(CNF_OB_SYSVOL);	/* a repair asked for: before anything uses it */
 	er = knl_obfile_attach(CNF_OB_SYSVOL, TSFS_STORE_BLK);
 	if ( er >= E_OK ) {
 		tm_printf((UB *)"ob: the system volume is %s\n", CNF_OB_SYSVOL);

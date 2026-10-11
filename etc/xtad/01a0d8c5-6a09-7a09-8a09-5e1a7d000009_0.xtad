@@ -1,0 +1,81 @@
+<tad version="1.0" encoding="UTF-8" filename="10.9 複数動画の連続再生">
+<realtime autoplay="true" preload="auto">
+<!-- タイトル画像 -->
+<figure>
+<figView top="0" left="0" right="1920" bottom="1080"/>
+<figDraw top="0" left="0" right="1920" bottom="1080"/>
+<figScale hunit="-72" vunit="-72"/>
+<image id="title_card" href="{realId}_0_3.png" left="0" top="0" right="1920" bottom="1080" lineType="0" lineWidth="0" zIndex="50"/>
+</figure>
+<realData>
+<stream number="1">
+<deviceName>display:</deviceName>
+</stream>
+<stream number="2">
+<deviceName>audio:</deviceName>
+</stream>
+<!-- 単位系設定（ミリ秒） -->
+<unitSystem id="10">
+<primaryUnit>
+<dimension>s</dimension>
+<derivation ratio="1/1000" sexp="-1"/>
+</primaryUnit>
+<auxiliaryUnit number="0" name="ms" derivation="1"/>
+</unitSystem>
+<unitSpec unitId="10" unitNumber="0"/>
+<!-- タイトルカードを3秒表示後フェードアウト -->
+<realGroup type="parallel" stream="1">
+<timeDelta value="3000"/>
+<interpolate function="linear" divisions="30">
+<imageControl ref="title_card" command="setAlpha" value="1.0"/>
+<imageControl ref="title_card" command="setAlpha" value="0.0"/>
+</interpolate>
+</realGroup>
+<!-- 動画1（イントロ） -->
+<realGroup type="parallel" stream="1">
+<timeDelta value="1000"/>
+<video id="clip1" href="{realId}_0_0.mp4" format="mp4" left="0" top="0" right="1920" bottom="1080" lineType="0" lineWidth="0" autoplay="true" trigger="time" volume="1.0" loop="false" zIndex="10" onended="jump:clip1_end"/>
+</realGroup>
+<label id="clip1_end"/>
+<!-- 動画1終了後、フェードアウトしながら動画2を開始 -->
+<realGroup type="parallel" stream="1">
+<timeDelta value="0"/>
+<!-- 動画1をフェードアウト -->
+<interpolate function="linear" divisions="15">
+<videoControl ref="clip1" command="setAlpha" value="1.0"/>
+<videoControl ref="clip1" command="setAlpha" value="0.0"/>
+</interpolate>
+</realGroup>
+<!-- 動画2（メインコンテンツ） -->
+<realGroup type="parallel" stream="1">
+<timeDelta value="0"/>
+<video id="clip2" href="{realId}_0_1.mp4" format="mp4" left="0" top="0" right="1920" bottom="1080" lineType="0" lineWidth="0" autoplay="true" trigger="time" volume="1.0" loop="false" zIndex="5" onended="jump:clip2_end"/>
+</realGroup>
+<!-- 動画2をフェードイン -->
+<realGroup type="parallel" stream="1">
+<timeDelta value="0"/>
+<interpolate function="linear" divisions="15">
+<videoControl ref="clip2" command="setAlpha" value="0.0"/>
+<videoControl ref="clip2" command="setAlpha" value="1.0"/>
+</interpolate>
+</realGroup>
+<label id="clip2_end"/>
+<!-- 動画2終了後、動画3へ -->
+<realGroup type="parallel" stream="1">
+<timeDelta value="0"/>
+<videoControl ref="clip2" command="setAlpha" value="0.0"/>
+</realGroup>
+<!-- 動画3（エンディング） -->
+<realGroup type="parallel" stream="1">
+<timeDelta value="0"/>
+<video id="clip3" href="{realId}_0_2.mp4" format="mp4" left="0" top="0" right="1920" bottom="1080" lineType="0" lineWidth="0" autoplay="true" trigger="time" volume="1.0" loop="false" zIndex="10" onended="jump:all_end"/>
+</realGroup>
+<label id="all_end"/>
+<!-- 全動画終了後、タイトルカードを再表示 -->
+<realGroup type="parallel" stream="1">
+<timeDelta value="0"/>
+<imageControl ref="title_card" command="setAlpha" value="1.0"/>
+</realGroup>
+</realData>
+</realtime>
+</tad>

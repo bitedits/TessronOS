@@ -507,11 +507,22 @@ def _attr(t, a, b, name):
 NIL = uuid.UUID(int=0)
 
 
+def link_split(idv):
+    """Where the object's UUID starts in the value of a link's id: past
+    the volume's UUID and a slash, and the machine's before it, when the
+    id names them (the kernel's ts_lnk_split)."""
+    n = 0
+    while n < 2 and len(idv) >= (n + 1) * 37 + 36 and idv[(n + 1) * 37 - 1:(n + 1) * 37] == b"/":
+        n += 1
+    return n * 37
+
+
 def scan_links(data, rid, out, limit=None):
     """The <link> elements of an xmlTAD text added to `out` as (vobjid,
     target, rid), as the kernel's lk_scan takes them: "<link" and a
     blank, the tag ending at the first '>'; the target from the 36 bytes
-    the id attribute starts with, the vobjid (all zero when it is not
+    of the id attribute after the volume and the machine it may name
+    ("volume/object_0.xtad", design 8.3), the vobjid (all zero when it is not
     there or not a UUID) from the vobjid attribute. An element whose
     vobjid is not zero and came before in `out` is left out. Answers
     False when `out` would hold more than `limit`."""
@@ -526,6 +537,8 @@ def scan_links(data, rid, out, limit=None):
         if j < 0:
             break
         v = _attr(t, i + 5, j, b"id")
+        if v >= 0:
+            v += link_split(t[v:j])
         target = link_uuid(t[v:j]) if v >= 0 else None
         if target is not None:
             if limit is not None and len(out) >= limit:

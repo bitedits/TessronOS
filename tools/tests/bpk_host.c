@@ -23,6 +23,12 @@
  *	      Decodes one compressed plane into rows of (W + 7) / 8 bytes.
  *	  bpk_host totron UTF8FILE / bpk_host fromtron WORDSFILE
  *	      UTF-8 to TRON code words (little endian) and back, to stdout.
+ *	  bpk_host lh5 IN OUT
+ *	      Encodes IN with lh5_encode into OUT, decodes it again and
+ *	      says whether it came back the same.
+ *	  bpk_host rewrite ARCHIVE lh5|lh0 OUT
+ *	      Writes the archive again with bpk_write from what bpk_parse
+ *	      gave, reads OUT back and compares the two streams.
  *
  *	cc -O2 -I include -o bpk_host tools/tests/bpk_host.c lib/libbpk/bpk_*.c
  */
@@ -196,9 +202,88 @@ LOCAL INT do_fax( CONST char *mode, CONST char *in, INT w, INT h, CONST char *ou
 	return 0;
 }
 
+/* A file encoded by lh5_encode, decoded again by lh5_decode and compared */
+LOCAL INT do_lh5( CONST char *in, CONST char *out )
+{
+	long	n;
+	UB	*raw = load(in, &n), *enc, *dec;
+	UINT	room = (UINT)n + (UINT)n / 4 + 4096;
+	BPKLH5E	*ze = malloc(sizeof(BPKLH5E));
+	BPKLH5	*zd = malloc(sizeof(BPKLH5));
+	INT	m, k;
+
+	enc = malloc(room);
+	dec = malloc((size_t)n + 1);
+	m = lh5_encode(ze, raw, (UINT)n, enc, room);
+	if ( m < 0 ) {
+		printf("encode failed\n");
+		return 1;
+	}
+	save(out, enc, m);
+	k = lh5_decode(zd, enc, (UINT)m, dec, (UINT)n);
+	printf("in %ld out %d back %d same %d\n", n, m, k, ( k == (INT)n && memcmp(dec, raw, (size_t)n) == 0 ) ? 1 : 0);
+	return ( k == (INT)n && memcmp(dec, raw, (size_t)n) == 0 ) ? 0 : 1;
+}
+
+/*
+ * An archive read and written again by bpk_write from what bpk_parse
+ * gave -- the objects' local headers and records, the extension as it
+ * was -- with LH5 or stored, into OUT; then OUT read and its stream
+ * compared with the first's.
+ */
+LOCAL INT do_rewrite( CONST char *in, CONST char *method, CONST char *out )
+{
+	long		n;
+	UB		*raw = load(in, &n), *w = NULL;
+	BPKARC		a, b;
+	BPKWRITE	wr;
+	BPKWFILE	*f;
+	BPKWSTAT	st;
+	UINT		len = 0, i;
+	char		err[256];
+	ER		er;
+
+	if ( bpk_parse(&a, raw, (UINT)n, err, sizeof(err)) < E_OK ) {
+		printf("error %s\n", err);
+		return 1;
+	}
+	f = calloc(a.nfiles, sizeof(BPKWFILE));
+	for ( i = 0; i < a.nfiles; i++ ) {
+		f[i].head = a.file[i].head;
+		f[i].nrec = a.file[i].nrec;
+		f[i].rec = a.file[i].rec;
+	}
+	memset(&wr, 0, sizeof(wr));
+	wr.name = a.name;
+	wr.time = a.head.time;
+	wr.method = ( strcmp(method, "lh0") == 0 ) ? BPK_LH0 : BPK_LH5;
+	wr.nfiles = (INT)a.nfiles;
+	wr.file = f;
+	wr.ext = a.plain;
+	wr.extlen = a.extsize;
+	er = bpk_write(&wr, &w, &len, &st, err, sizeof(err));
+	if ( er < E_OK ) {
+		printf("error %d %s\n", (int)er, err);
+		return 1;
+	}
+	save(out, w, len);
+	if ( bpk_parse(&b, w, len, err, sizeof(err)) < E_OK ) {
+		printf("error reading back %s\n", err);
+		return 1;
+	}
+	printf("files %u orig %u comp %u crc %04x was %04x same %d crcok %d filesize %u was %u\n", b.nfiles, b.origsize,
+	       b.compsize, b.head.crc, a.head.crc,
+	       ( a.plainlen == b.plainlen && memcmp(a.plain, b.plain, a.plainlen) == 0 ) ? 1 : 0, b.crcok ? 1 : 0,
+	       b.head.filesize, a.head.filesize);
+	return 0;
+}
+
 int main( int argc, char **argv )
 {
 	long	n;
+
+	if ( argc == 4 && strcmp(argv[1], "lh5") == 0 ) return do_lh5(argv[2], argv[3]);
+	if ( argc == 5 && strcmp(argv[1], "rewrite") == 0 ) return do_rewrite(argv[2], argv[3], argv[4]);
 
 	if ( argc == 4 && strcmp(argv[1], "archive") == 0 ) return do_archive(argv[2], argv[3]);
 	if ( argc == 4 && strcmp(argv[1], "tad") == 0 ) return do_tad(argv[2], argv[3]);
@@ -223,6 +308,6 @@ int main( int argc, char **argv )
 		fputs(o, stdout);
 		return 0;
 	}
-	fprintf(stderr, "usage: bpk_host archive|tad|fax|totron|fromtron ...\n");
+	fprintf(stderr, "usage: bpk_host archive|tad|fax|totron|fromtron|lh5|rewrite ...\n");
 	return 2;
 }

@@ -333,6 +333,8 @@ LOCAL UW colour_or( UW c, UW def )
 
 /* What a band shows: any of the picture, the name, the relationship, the kind and the date */
 #define OM_D_BAND	( TAD_D_NAME | TAD_D_PICT | TAD_D_ROLE | TAD_D_TYPE | TAD_D_UPDATE )
+#define OM_GONE_INK	0x00A8A8A8U	/* a 虚身's frame and words */
+#define OM_GONE_PAPER	0x00F4F4F4U	/* and what they are on */
 
 /*
  * How tall the band along the top of a virtual object is: the letters
@@ -435,6 +437,7 @@ LOCAL ER draw_vob_body( INT gid, CONST T_DPRECT *rect, CONST T_VOBJ *vobj,
 	UW		frcol, tbcol, bgcol, chcol;
 	INT		bh, ch, tx;
 	CONST UB	*text = NULL;
+	BOOL		gone;
 
 	if ( rect == NULL || vobj == NULL ) {
 		return E_PAR;
@@ -443,10 +446,17 @@ LOCAL ER draw_vob_body( INT gid, CONST T_DPRECT *rect, CONST T_VOBJ *vobj,
 	if ( r.right <= r.left || r.bottom <= r.top ) {
 		return E_PAR;
 	}
+	band = r;
 	frcol = colour_or(vobj->frcol, OM_DEF_FRCOL);
 	tbcol = colour_or(vobj->tbcol, OM_DEF_TBCOL);
 	bgcol = colour_or(vobj->bgcol, OM_DEF_BGCOL);
 	chcol = colour_or(vobj->chcol, OM_DEF_CHCOL);
+	gone = (BOOL)( look != NULL && ( look->state & OM_LOOK_GONE ) != 0 );
+	if ( gone ) {
+		/* a 虚身: what it points at is on a disk not attached, and it is drawn pale */
+		frcol = chcol = OM_GONE_INK;
+		tbcol = bgcol = OM_GONE_PAPER;
+	}
 	ch = ( vobj->chsz > 0 ) ? vobj->chsz : 14;
 	bh = om_band_h(vobj);
 	if ( look != NULL && look->text != NULL ) {
@@ -477,7 +487,7 @@ LOCAL ER draw_vob_body( INT gid, CONST T_DPRECT *rect, CONST T_VOBJ *vobj,
 			pict.top    = band.top + 1;
 			pict.bottom = band.bottom - 1;
 			pict.right  = pict.left + ( pict.bottom - pict.top );
-			if ( look != NULL && look->icon != NULL ) {
+			if ( look != NULL && look->icon != NULL && !gone ) {
 				draw_icon(gid, &pict, look->icon, look->icon_w, look->icon_h);
 			} else {
 				draw_leaf(gid, &pict, chcol, bgcol);
@@ -520,6 +530,47 @@ LOCAL ER draw_vob_body( INT gid, CONST T_DPRECT *rect, CONST T_VOBJ *vobj,
 	}
 	if ( (vobj->disp & TAD_D_FRAME) != 0 ) {
 		dp_frame_rect(gid, &r, frcol, OM_FRAME_W);
+	}
+	if ( gone && open && bh > 0 && r.bottom - OM_FRAME_W > band.bottom + 1 ) {
+		/* an opened 虚身: lines across the room it has nothing to show in */
+		T_DPRECT	room = r;
+		T_DPENV		env;
+		INT		x;
+
+		room.left += OM_FRAME_W;
+		room.right -= OM_FRAME_W;
+		room.top = band.bottom + 1;
+		room.bottom -= OM_FRAME_W;
+		if ( dp_ref(gid, &env) >= E_OK ) {
+			T_DPRECT	cut = env.visible;
+
+			if ( cut.left < room.left ) cut.left = room.left;
+			if ( cut.top < room.top ) cut.top = room.top;
+			if ( cut.right > room.right ) cut.right = room.right;
+			if ( cut.bottom > room.bottom ) cut.bottom = room.bottom;
+			if ( cut.right > cut.left && cut.bottom > cut.top ) {
+				dp_set_visible(gid, &cut);
+				for ( x = room.left - ( room.bottom - room.top ); x < room.right; x += 8 ) {
+					dp_line(gid, x, room.bottom - 1, x + ( room.bottom - room.top ), room.top,
+						OM_GONE_INK);
+				}
+				dp_set_visible(gid, &env.visible);
+			}
+		}
+	}
+	if ( look != NULL && ( look->state & OM_LOOK_OTHER ) != 0 ) {
+		/* on another volume than the object it is in: the top left corner filled */
+		T_DPPOINT	tri[3];
+		T_DPPAT		pat;
+		INT		s = ( bh > 0 ) ? bh / 3 : 6;
+
+		if ( s < 4 ) s = 4;
+		if ( s > 10 ) s = 10;
+		tri[0].x = r.left;  tri[0].y = r.top;
+		tri[1].x = r.left + s;  tri[1].y = r.top;
+		tri[2].x = r.left;  tri[2].y = r.top + s;
+		dp_pat_colour(&pat, gone ? OM_GONE_INK : frcol);
+		dp_fill_poly(gid, tri, 3, DP_POLY_ODD, &pat);
 	}
 	if ( p_inner != NULL ) {
 		p_inner->left   = r.left + OM_FRAME_W;

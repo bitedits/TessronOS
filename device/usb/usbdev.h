@@ -36,7 +36,7 @@
 /* ---------------------------------------------------------------- limits */
 
 #define USB_MAX_HC		4	/* controllers served */
-#define USB_MAX_DEV		32	/* devices in the tree, hubs included */
+#define USB_MAX_DEV		192	/* devices in the tree, hubs included */
 #define USB_MAX_DEPTH		5	/* hubs between a device and its root port */
 #define USB_CFG_MAX		4096	/* the longest configuration taken */
 
@@ -146,6 +146,8 @@ struct usb_dev {
 	void	*hid;		/* the class drivers' */
 	void	*msc;
 	void	*audio;
+	void	*camera;
+	void	*user;		/* a process's, opened through SVC class 12 (uusb.c) */
 };
 
 /* An endpoint as its descriptors describe it */
@@ -233,6 +235,7 @@ struct usb_hc {
 #define USBF_IRQ	0x0001	/* a controller raised an interrupt */
 #define USBF_RESCAN	0x0002	/* the ports are to be looked at */
 #define USBF_HUB	0x0004	/* a hub reported a change */
+#define USBF_STREAM	0x0008	/* a sound stream started: its service begins */
 
 /* ---------------------------------------------------------------- counters */
 
@@ -273,6 +276,9 @@ IMPORT void knl_usb_hub_changed( void );
 
 /* The manager's task is to call knl_snd_poll() often */
 IMPORT BOOL knl_usb_streaming( void );
+
+/* A stream started: the manager's task wakes now rather than at its next event */
+IMPORT void knl_usb_kick( void );
 
 /* ---------------------------------------------------------------- usbcore.c */
 
@@ -334,6 +340,19 @@ IMPORT BOOL knl_uac_match( USBDEV *dev );
 IMPORT ER   knl_uac_attach( USBDEV *dev );
 IMPORT void knl_uac_detach( USBDEV *dev );
 IMPORT void knl_uac_notify( void );
+
+/* ---------------------------------------------------------------- uusb.c */
+IMPORT USBDEV *knl_usb_dev_of( INT handle );	/* with the manager's lock held */
+IMPORT void knl_uusb_detach( USBDEV *dev );
+IMPORT BOOL knl_uusb_active( void );
+IMPORT ER   knl_usb_reset_device( USBDEV *dev );	/* usbcore.c, with the lock held */
+
+/* ---------------------------------------------------------------- uvc.c */
+IMPORT BOOL knl_uvc_match( USBDEV *dev );
+IMPORT ER   knl_uvc_attach( USBDEV *dev );
+IMPORT void knl_uvc_detach( USBDEV *dev );
+IMPORT void knl_uvc_notify( void );
+IMPORT BOOL knl_uvc_active( void );
 
 /* the log that goes to the console */
 #define USB_LOG(...)	tm_printf((UB *)__VA_ARGS__)

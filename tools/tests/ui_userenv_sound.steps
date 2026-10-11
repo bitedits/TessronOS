@@ -1,0 +1,34 @@
+# ユーザ環境設定's 音属性 (design 11.6, 6.5.1), for tools/ui_run.py with --wav F: 〈試聴〉 of the
+# buzzer and of the clicks, and the clicks of a pointer's button, all played as the system
+# plays its sounds, on the output it has chosen (the USB sound device the --wav option puts
+# beside the machine), so they are in F afterwards. The window is at 180,90: the tag 音属性
+# at 520,134; the buzzer's 試聴 at 414,270, the clicks' at 414,408, and the switch ボタン of
+# 有無 at 515,445. Ctrl+E closes; what was set is put back (元に戻して終了 at 530,393).
+open 01a0d8c4-52b7-7c63-8e83-4f9a012c3d53
+expect userenv: ready
+wait 800
+win ユーザ環境設定
+click 520 134
+wait 400
+shot ue_sound
+click 414 270
+expect userenv: PLAY buzzer tone 0
+wait 1500
+click 414 408
+expect userenv: PLAY press tone 0
+expect userenv: PLAY release tone 0
+wait 1500
+# a pointer's button clicks: the desktop's own sounds, by the same way
+click 515 445
+wait 1500
+click 600 520
+wait 800
+click 600 520
+wait 1500
+shot ue_sound_on
+click 515 445
+wait 500
+key 08 01
+wait 800
+shot ue_close
+absent !OACV!

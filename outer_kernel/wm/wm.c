@@ -42,8 +42,13 @@
 #include <ts/part.h>
 #include <ts/img.h>
 #include <ts/proc.h>
+#include <ts/conf.h>
+#include <ts/time.h>
 #include "sysman/pfalloc.h"
+#include <ts/fquit.h>
+#include <ts/lockup.h>
 #include "wmobj.h"
+#include "compose.h"
 
 /*
  * What the frame takes, in pixels. One place, per 16.2.2: the numbers
@@ -62,6 +67,16 @@
 #define GRIP_W		12		/* a side that can be pulled but has no bar */
 #define BAR_SMALL	12		/* the bar of a window whose size is fixed */
 #define WORK_LEAST	16		/* the least work area a window may be left with */
+
+/* A surface a process draws a window's work area in (wm_surf_get) */
+typedef struct {
+	UB		*kva;		/* NULL: none */
+	UD		pages;
+	UBINT		uva;		/* where its process has it */
+	ID		pid;
+	INT		w, h;		/* pixels; rows w long */
+	UW		serial;
+} WMSURF;
 
 typedef struct {
 	BOOL		used;
@@ -86,16 +101,26 @@ typedef struct {
 	T_WMBAR		bar[WM_BAR_MAX];
 	T_DPRGN		*shape;		/* NULL: the plain rectangle */
 	T_DPRGN		*own;		/* the outline it was given, or NULL */
-	UINT		opacity;	/* 255: nothing behind it shows */
+	UINT		opacity;	/* the program's own: 255, nothing behind it shows */
 	UW		tint;		/* laid over the frame before mixing */
 	UINT		tint_str;	/* 0: no tint at all */
+	UD		mo_t0;		/* when its opening began (ms) */
+	UINT		mo_dur;		/* and how long it takes; 0: not opening */
+	UW		serial;		/* which opening of its number this is */
+	WMSURF		surf;		/* what its process draws in, if any */
+	ID		mktsk;		/* the task that opened it */
 } WMWIN;
 
 LOCAL WMWIN		wm_win[WM_MAX_WIN];
+LOCAL UW		wm_win_serial = 0;	/* counted up as windows open */
 
 /* The outlines of what is being carried, on the screen */
 LOCAL T_DPRECT		wm_drag[WM_DRAG_MAX];
 LOCAL INT		wm_ndrag = 0;
+/* A picture laid over every window (wm_set_loupe), NULL none */
+LOCAL UW		*wm_loupe = NULL;
+LOCAL T_DPRECT		wm_loupe_at;
+LOCAL BOOL		wm_loupe_on = FALSE;
 LOCAL INT		wm_nwin = 0;
 LOCAL BOOL		wm_ready = FALSE;
 LOCAL ID		wm_mtxid = 0;
@@ -160,6 +185,8 @@ LOCAL UINT		wm_wall_mode = WM_WALL_TILE;
 LOCAL UW		*wm_ground = NULL;
 LOCAL UD		wm_ground_pages = 0;
 LOCAL INT		wm_ground_w = 0, wm_ground_h = 0;
+LOCAL UW		wm_ground_desk = 0;	/* the desk's colour it was worked out with */
+LOCAL UINT		wm_ground_gen = 0;	/* counted up each time it is worked out */
 
 LOCAL void ground_drop( void )
 {
@@ -178,10 +205,12 @@ LOCAL void ground_make( void )
 	INT	x, y, ox = 0, oy = 0;
 	SZ	want;
 
-	if ( wm_ground != NULL && wm_ground_w == sw && wm_ground_h == sh ) {
+	if ( wm_ground != NULL && wm_ground_w == sw && wm_ground_h == sh
+	  && wm_ground_desk == desk ) {
 		return;
 	}
 	ground_drop();
+	wm_ground_desk = desk;
 	if ( sw <= 0 || sh <= 0 ) {
 		return;
 	}
@@ -194,6 +223,7 @@ LOCAL void ground_make( void )
 	}
 	wm_ground_w = sw;
 	wm_ground_h = sh;
+	wm_ground_gen++;
 
 	if ( wm_wall != NULL && wm_wall_mode == WM_WALL_CENTRE ) {
 		ox = (sw - wm_wall_w) / 2;
@@ -235,32 +265,62 @@ LOCAL void ground_make( void )
 }
 
 LOCAL void draw_frame( CONST WMWIN *w );
+LOCAL void gone_all( void );
 LOCAL void shape_of( WMWIN *w );
 
-EXPORT ER wm_set( UINT num, INT value )
+/*
+ * One of the windows' look (LK_LOOK..LK_OPA_WHOLE) set, within the range
+ * the machine's settings give it (cf_look_items): 1 when it changed, 0
+ * when it already was that, or an error. The shapes follow a change of
+ * the corners and of the switch; what is on the screen is built again
+ * by the caller, once for however many were set.
+ */
+EXPORT ER knl_wm_look( UINT num, INT value )
 {
-	INT	i;
-	ER	er;
+	CONST CF_ITEM	*it = cf_look_look(num);
+	INT		i;
 
-	if ( value < 0 ) {
+	if ( it == NULL || value < it->lo || value > it->hi ) {
 		return E_PAR;
 	}
-	if ( ( num == WM_SET_SHADOW || num == WM_SET_OPACITY
-	    || num == WM_SET_WASH_STR ) && value > 255 ) {
-		return E_PAR;
+	if ( wm_num(num, it->dflt) == value ) {
+		return 0;
+	}
+	if ( !wm_ready ) {
+		(void)knl_look_setting(num, (UW)value);
+		return 1;
 	}
 	tk_loc_mtx(wm_mtxid, TMO_FEVR);
-	er = wm_set_look(num, (UW)value);
-	if ( er >= E_OK ) {
-		ground_drop();		/* the desk's own colour may have moved */
-	}
-	if ( er >= E_OK && num == WM_SET_ROUND ) {
+	(void)knl_look_setting(num, (UW)value);
+	if ( num == LK_ROUND || num == LK_LOOK ) {
 		for ( i = 0; i < WM_MAX_WIN; i++ ) {
 			if ( wm_win[i].used ) {
 				shape_of(&wm_win[i]);
 			}
 		}
 	}
+	if ( ( num == LK_BLUR || num == LK_LOOK ) && value == 0 ) {
+		cp_release();			/* the room the spread kept */
+	}
+	gone_all();
+	tk_unl_mtx(wm_mtxid);
+
+	return 1;
+}
+
+EXPORT ER wm_set( UINT num, INT value )
+{
+	ER	er;
+
+	if ( cf_look_look(num) != NULL ) {
+		er = knl_wm_look(num, value);
+		return ( er < E_OK ) ? er : E_OK;
+	}
+	if ( value < 0 ) {
+		return E_PAR;
+	}
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	er = wm_set_look(num, (UW)value);
 	tk_unl_mtx(wm_mtxid);
 
 	return er;
@@ -289,6 +349,7 @@ EXPORT ER wm_set_scheme( UINT n )
 		return er;
 	}
 	ground_drop();				/* the kept ground is out of date */
+	gone_all();
 	for ( i = 0; i < WM_MAX_WIN; i++ ) {
 		WMWIN	*w = &wm_win[i];
 
@@ -319,42 +380,10 @@ EXPORT ER wm_set_wall( CONST UW *pixels, INT w, INT h, UINT mode )
 	wm_wall_h = ( pixels != NULL ) ? h : 0;
 	wm_wall_mode = mode;
 	ground_drop();				/* the kept ground is out of date */
+	if ( wm_ready ) gone_all();
 	tk_unl_mtx(wm_mtxid);
 
 	return E_OK;
-}
-
-
-/* Whether a place falls in one of a row's spans */
-LOCAL BOOL in_span( CONST INT *sp, INT n, INT x )
-{
-	INT	i;
-
-	for ( i = 0; i < n; i++ ) {
-		if ( x >= sp[i * 2] && x < sp[i * 2 + 1] ) {
-			return TRUE;
-		}
-	}
-
-	return FALSE;
-}
-
-/*
- * Two colours mixed, channel by channel: 'over' at the strength given
- * and what was there for the rest. The channels are kept apart because
- * mixing the whole word at once carries the bits of one channel into
- * the next, which shows as a colour nobody chose.
- */
-LOCAL UW mix( UW under, UW over, UINT strength )
-{
-	UINT	a = strength & 0xFFU, b = 255U - (strength & 0xFFU);
-	UW	r, g, bl;
-
-	r  = ((( over >> 16) & 0xFFU) * a + ((under >> 16) & 0xFFU) * b) / 255U;
-	g  = ((( over >>  8) & 0xFFU) * a + ((under >>  8) & 0xFFU) * b) / 255U;
-	bl = ((  over        & 0xFFU) * a + ( under        & 0xFFU) * b) / 255U;
-
-	return (r << 16) | (g << 8) | bl;
 }
 
 /* ---------------------------------------------------------------- shapes */
@@ -458,19 +487,97 @@ LOCAL BOOL rect_covers( CONST T_DPRECT *a, CONST T_DPRECT *b )
 	      && a->right >= b->right && a->bottom >= b->bottom );
 }
 
+LOCAL BOOL rect_meets( CONST T_DPRECT *a, CONST T_DPRECT *b )
+{
+	return ( a->left < b->right && b->left < a->right
+	      && a->top < b->bottom && b->top < a->bottom );
+}
+
+/* ---------------------------------------------------------------- parts of the screen */
+
+/*
+ * What is to be built, as a few separate rectangles rather than one
+ * round all of them: a caret blinking at the top left and a window
+ * drawn in at the bottom right are two small parts, not the screen
+ * between them. Two that overlap or lie close together are joined when
+ * the rectangle round both is at most WM_PART_SLACK pixels larger than
+ * the two are, because each part built costs a walk of the windows
+ * besides its pixels. When the list is full, a new rectangle is joined
+ * to the one it adds least to. Parts may overlap: each is built from
+ * the ground up, so a pixel built twice comes out the same.
+ */
+#define WM_PARTS	16
+#define WM_PART_SLACK	8192
+
+typedef struct {
+	INT		n;
+	T_DPRECT	r[WM_PARTS];
+} PARTS;
+
+LOCAL UD part_area( CONST T_DPRECT *r )
+{
+	return (UD)( r->right - r->left ) * (UD)( r->bottom - r->top );
+}
+
+/* The rectangle round a and b, and how many pixels it holds that neither of them does */
+LOCAL UD part_waste( CONST T_DPRECT *a, CONST T_DPRECT *b, T_DPRECT *u )
+{
+	T_DPRECT	o = *a;
+	UD		both = part_area(a) + part_area(b);
+
+	u->left   = ( a->left < b->left ) ? a->left : b->left;
+	u->top    = ( a->top < b->top ) ? a->top : b->top;
+	u->right  = ( a->right > b->right ) ? a->right : b->right;
+	u->bottom = ( a->bottom > b->bottom ) ? a->bottom : b->bottom;
+	if ( rect_cut(&o, b) ) {
+		both -= part_area(&o);
+	}
+	return part_area(u) - both;
+}
+
+LOCAL void parts_add( PARTS *s, CONST T_DPRECT *r0 )
+{
+	T_DPRECT	r = *r0, u;
+	UD		w, best_w;
+	INT		i, best;
+
+	if ( r.right <= r.left || r.bottom <= r.top ) {
+		return;
+	}
+	for ( ;; ) {
+		for ( i = 0; i < s->n; i++ ) {
+			if ( part_waste(&s->r[i], &r, &u) <= WM_PART_SLACK ) {
+				break;
+			}
+		}
+		if ( i == s->n ) {
+			if ( s->n < WM_PARTS ) {
+				s->r[s->n++] = r;
+				return;
+			}
+			best = 0;
+			best_w = part_waste(&s->r[0], &r, &u);
+			for ( i = 1; i < s->n; i++ ) {
+				w = part_waste(&s->r[i], &r, &u);
+				if ( w < best_w ) {
+					best_w = w;
+					best = i;
+				}
+			}
+			i = best;
+			(void)part_waste(&s->r[i], &r, &u);
+		}
+		r = u;				/* joined, and tried against the rest again */
+		s->r[i] = s->r[--s->n];
+	}
+}
+
 /* ---------------------------------------------------------------- pixels */
 
 /*
- * A pixel of a window's own surface. The row is as long as a row of the
- * screen, and the offset is measured from this window's corner.
+ * A window's own surface: its rows as long as the screen's, each pixel
+ * found from the window's corner (compose.c reads it so).
  */
-LOCAL UW *win_pixel( CONST WMWIN *w, INT sx, INT sy )
-{
-	INT	x = sx - w->outer.left;
-	INT	y = sy - w->outer.top;
-
-	return (UW *)(w->pixels + (UBINT)y * wm_spec.pitch + (UBINT)x * 4);
-}
 
 LOCAL UD win_pages( CONST T_DPRECT *outer )
 {
@@ -507,7 +614,385 @@ LOCAL void z_close_gap( INT gone )
 	}
 }
 
+/* ---------------------------------------------------------------- the look */
+
+/*
+ * The windows' look as it stands (LK_LOOK..LK_OPA_WHOLE), read once for
+ * each screen built rather than for every window of it. With the look
+ * turned off every one of them reads as nothing: solid, square, no
+ * wash, no shadow, no spread, no motion.
+ */
+typedef struct {
+	UINT	opa;			/* how solid a frame is */
+	BOOL	whole;			/* the work area as well */
+	UW	wash, bar_wash;
+	UINT	wash_str, bar_str;
+	INT	round;
+	INT	dx, dy, size;
+	UINT	dark;
+	INT	blur;
+	INT	motion;
+} LOOKNOW;
+
+LOCAL INT within( INT v, INT lo, INT hi )
+{
+	return ( v < lo ) ? lo : ( v > hi ) ? hi : v;
+}
+
+LOCAL void look_now( LOOKNOW *l )
+{
+	UINT	from = (UINT)wm_num(LK_FROM, 1);
+
+	knl_memset(l, 0, sizeof(*l));
+	l->opa = 255;
+	if ( wm_num(LK_LOOK, 1) == 0 ) {
+		return;
+	}
+	l->opa = (UINT)within(wm_num(LK_OPACITY, 255), 0, 255);
+	l->whole = (BOOL)( wm_num(LK_OPA_WHOLE, 0) != 0 );
+	l->wash = (UW)wm_num(LK_WASH, 0) & 0x00FFFFFFU;
+	l->wash_str = ( ( from & 1 ) != 0 ) ? 0 : (UINT)within(wm_num(LK_WASH_STR, 0), 0, 255);
+	l->bar_wash = (UW)wm_num(LK_BAR_WASH, 0) & 0x00FFFFFFU;
+	l->bar_str = ( ( from & 2 ) != 0 ) ? 0 : (UINT)within(wm_num(LK_BAR_STR, 0), 0, 255);
+	l->round = within(wm_num(LK_ROUND, 0), 0, CP_ROUND_MAX);
+	l->dx = within(wm_num(LK_SHD_DX, 4), -32, 32);
+	l->dy = within(wm_num(LK_SHD_DY, 4), -32, 32);
+	l->size = within(wm_num(LK_SHD_SIZE, 2), 0, 32);
+	l->dark = (UINT)within(wm_num(LK_SHD_DARK, 0), 0, 255);
+	l->blur = within(wm_num(LK_BLUR, 0), 0, CP_BLUR_MAX);
+	l->motion = within(wm_num(LK_MOTION, 0), 0, 2000);
+}
+
+/*
+ * A window as the stages lay it (compose.c). The look is on the windows
+ * with a frame: a menu or a list that pops up has none, draws its own
+ * shadow and stays as it drew itself. The program's own opacity and
+ * tint are on every window, as they always were.
+ */
+LOCAL void cp_of( CONST LOOKNOW *l, CONST T_DPRECT *outer, CONST T_DPRECT *work,
+		  UINT attr, CONST UB *pixels, UINT opacity, UW tint, UINT tint_str,
+		  T_CPWIN *cp )
+{
+	BOOL	fx = (BOOL)( ( attr & ( WM_ATTR_FRAME | WM_ATTR_TITLE ) ) != 0 );
+	UINT	a = ( opacity > 255 ) ? 255 : opacity;
+
+	knl_memset(cp, 0, sizeof(*cp));
+	cp->outer = *outer;
+	cp->work = *work;
+	cp->band = *outer;
+	cp->band.bottom = ( ( attr & WM_ATTR_TITLE ) != 0 ) ? work->top : outer->top;
+	cp->pixels = pixels;
+	cp->pitch = wm_spec.pitch;
+	if ( fx ) {
+		a = a * l->opa / 255U;
+	}
+	cp->a_frame = a;
+	cp->a_work = ( fx && l->whole ) ? a : 255;
+	cp->keyed = (BOOL)( ( attr & WM_ATTR_POPUP ) != 0 );
+	cp->tint = tint;
+	cp->tint_str = tint_str;
+	if ( fx ) {
+		cp->round = l->round;
+		cp->wash = l->wash;
+		cp->wash_str = l->wash_str;
+		cp->bar_wash = l->bar_wash;
+		cp->bar_str = l->bar_str;
+		cp->blur = l->blur;
+		cp->shd_dx = l->dx;
+		cp->shd_dy = l->dy;
+		cp->shd_size = l->size;
+		cp->shd_dark = l->dark;
+	}
+	cp->shown = *outer;
+	cp->fade = 255;
+}
+
+/* ---------------------------------------------------------------- opening and closing */
+
+/*
+ * A window that opens comes from a little smaller and fainter, and one
+ * that closes goes the same way out, over LK_MOTION milliseconds. How
+ * far it has come is worked out from the clock whenever the screen is
+ * built, so a machine that cannot keep up shows fewer steps rather than
+ * a slower motion. A task of this file builds the part of the screen
+ * the motion covers until it is over.
+ *
+ * A window that closes lets go of everything at once but its pixels,
+ * which stay as a ghost laid over the screen until its motion is over.
+ */
+#define MO_SCALE0	236		/* how large it starts or ends, of 256 */
+#define MO_FADE0	72		/* how much of it shows then */
+#define MO_TICK		16		/* ms between the steps */
+#define MO_PRI		21		/* behind the desktop's own work */
+#define GHOST_MAX	8
+
+typedef struct {
+	BOOL		used;
+	UB		*pixels;
+	UD		pages;
+	T_DPRECT	outer, work;
+	UINT		attr;
+	UINT		opacity;
+	UW		tint;
+	UINT		tint_str;
+	UD		t0;
+	UINT		dur;
+} GHOST;
+
+LOCAL GHOST	wm_ghost[GHOST_MAX];
+LOCAL ID	wm_mo_tsk = 0;
+
+LOCAL UD now_ms( void )
+{
+	SYSTIM	t;
+
+	(void)tk_get_otm(&t);
+	return ( (UD)(UW)t.hi << 32 ) | (UW)t.lo;
+}
+
+/* How far a motion has come, 0..255: quickly at first, settling at the end */
+LOCAL UINT mo_part( UD t0, UINT dur, UD now )
+{
+	UD	gone = ( now > t0 ) ? now - t0 : 0;
+	UINT	p, q;
+
+	if ( dur == 0 || gone >= dur ) {
+		return 255;
+	}
+	p = (UINT)( gone * 255U / dur );
+	q = 255U - p;
+	return 255U - q * q / 255U * q / 255U;
+}
+
+LOCAL void mo_place( T_CPWIN *cp, UINT e, BOOL closing )
+{
+	INT	w = cp->outer.right - cp->outer.left, h = cp->outer.bottom - cp->outer.top;
+	INT	s = closing ? 256 - ( 256 - MO_SCALE0 ) * (INT)e / 255
+			    : MO_SCALE0 + ( 256 - MO_SCALE0 ) * (INT)e / 255;
+	INT	nw = w * s / 256, nh = h * s / 256;
+
+	cp->shown.left = cp->outer.left + ( w - nw ) / 2;
+	cp->shown.top = cp->outer.top + ( h - nh ) / 2;
+	cp->shown.right = cp->shown.left + nw;
+	cp->shown.bottom = cp->shown.top + nh;
+	cp->fade = closing ? 255U - ( 255U - MO_FADE0 ) * e / 255U
+			   : MO_FADE0 + ( 255U - MO_FADE0 ) * e / 255U;
+}
+
+/* A window as the stages lay it now, its own outline and its motion with it */
+LOCAL void win_cp( CONST WMWIN *w, CONST LOOKNOW *l, UD now, T_CPWIN *cp )
+{
+	cp_of(l, &w->outer, &w->work, w->attr, w->pixels, w->opacity, w->tint, w->tint_str, cp);
+	if ( w->own != NULL ) {
+		cp->shape = w->shape;
+		cp->round = 0;
+	}
+	if ( w->mo_dur != 0 ) {
+		mo_place(cp, mo_part(w->mo_t0, w->mo_dur, now), FALSE);
+	}
+}
+
+LOCAL void ghost_cp( CONST GHOST *g, CONST LOOKNOW *l, UD now, T_CPWIN *cp )
+{
+	cp_of(l, &g->outer, &g->work, g->attr, g->pixels, g->opacity, g->tint, g->tint_str, cp);
+	mo_place(cp, mo_part(g->t0, g->dur, now), TRUE);
+}
+
+/* How far a window reaches on the screen, its shadow with it */
+LOCAL void reach_of( CONST WMWIN *w, T_DPRECT *r )
+{
+	LOOKNOW		l;
+	T_CPWIN		cp;
+	T_DPRECT	s;
+
+	look_now(&l);
+	cp_of(&l, &w->outer, &w->work, w->attr, w->pixels, w->opacity, 0, 0, &cp);
+	*r = w->outer;
+	if ( cp_shadow_extent(&cp, &s) ) {
+		if ( s.left < r->left )     r->left = s.left;
+		if ( s.top < r->top )       r->top = s.top;
+		if ( s.right > r->right )   r->right = s.right;
+		if ( s.bottom > r->bottom ) r->bottom = s.bottom;
+	}
+}
+
+LOCAL void spread_add( PARTS *p, CONST T_DPRECT *r, CONST LOOKNOW *look, UD now );
+LOCAL ER   compose_parts( CONST PARTS *ask );
+LOCAL UW   ask( UINT what, CONST PARTS *parts );
+
+/*
+ * The windows on their way in or out carried a step on: the screen
+ * under them built again, a window that has arrived left as it is and a
+ * ghost that has gone let go of. Whether any are still on their way.
+ */
+LOCAL BOOL mo_step( void )
+{
+	T_DPRECT	r;
+	PARTS		p;
+	LOOKNOW		look;
+	UB		*drop[GHOST_MAX];
+	UD		drop_pages[GHOST_MAX];
+	BOOL		more = FALSE;
+	UD		now = now_ms();
+	INT		i, nd = 0;
+
+	p.n = 0;
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	look_now(&look);
+	for ( i = 0; i < WM_MAX_WIN; i++ ) {
+		WMWIN	*w = &wm_win[i];
+
+		if ( !w->used || w->mo_dur == 0 ) {
+			continue;
+		}
+		reach_of(w, &r);
+		if ( now >= w->mo_t0 + w->mo_dur ) {
+			w->mo_dur = 0;		/* arrived: laid as itself from now on */
+		} else {
+			more = TRUE;
+		}
+		spread_add(&p, &r, &look, now);
+	}
+	for ( i = 0; i < GHOST_MAX; i++ ) {
+		GHOST	*g = &wm_ghost[i];
+
+		if ( !g->used ) {
+			continue;
+		}
+		r = g->outer;
+		if ( now >= g->t0 + g->dur ) {
+			g->used = FALSE;
+			drop[nd] = g->pixels;
+			drop_pages[nd++] = g->pages;
+		} else {
+			more = TRUE;
+		}
+		spread_add(&p, &r, &look, now);
+	}
+	tk_unl_mtx(wm_mtxid);
+
+	if ( p.n > 0 ) {
+		(void)ask(0, &p);		/* the compositor builds it; nothing waits */
+	}
+	for ( i = 0; i < nd; i++ ) {
+		knl_vunmap(drop[i], drop_pages[i]);
+	}
+	return more;
+}
+
+LOCAL void mo_task( INT stacd, void *exinf )
+{
+	for ( ;; ) {
+		(void)tk_slp_tsk(TMO_FEVR);
+		while ( mo_step() ) {
+			(void)tk_dly_tsk(MO_TICK);
+		}
+	}
+}
+
+LOCAL void mo_wake( void )
+{
+	if ( wm_mo_tsk > 0 ) {
+		(void)tk_wup_tsk(wm_mo_tsk);
+	}
+}
+
+/*
+ * A window that closes kept as a ghost, its pixels taken from it: TRUE
+ * when it was, and the pixels are the ghost's to let go of. Called with
+ * the lock held.
+ */
+LOCAL BOOL ghost_of( WMWIN *w )
+{
+	LOOKNOW	l;
+	INT	i;
+
+	look_now(&l);
+	if ( l.motion <= 0 || wm_mo_tsk <= 0 || !w->visible || w->pixels == NULL
+	  || ( w->attr & ( WM_ATTR_FRAME | WM_ATTR_TITLE ) ) == 0 ) {
+		return FALSE;
+	}
+	for ( i = 0; i < GHOST_MAX && wm_ghost[i].used; i++ ) ;
+	if ( i == GHOST_MAX ) {
+		return FALSE;
+	}
+	wm_ghost[i].pixels = w->pixels;
+	wm_ghost[i].pages = w->pix_pages;
+	wm_ghost[i].outer = w->outer;
+	wm_ghost[i].work = w->work;
+	wm_ghost[i].attr = w->attr;
+	wm_ghost[i].opacity = w->opacity;
+	wm_ghost[i].tint = w->tint;
+	wm_ghost[i].tint_str = w->tint_str;
+	wm_ghost[i].t0 = now_ms();
+	wm_ghost[i].dur = (UINT)l.motion;
+	wm_ghost[i].used = TRUE;
+	w->pixels = NULL;
+	w->pix_pages = 0;
+
+	return TRUE;
+}
+
+/* Every ghost let go of at once: the screen they were laid on is gone */
+LOCAL void ghosts_drop( void )
+{
+	INT	i;
+
+	for ( i = 0; i < GHOST_MAX; i++ ) {
+		if ( wm_ghost[i].used ) {
+			wm_ghost[i].used = FALSE;
+			knl_vunmap(wm_ghost[i].pixels, wm_ghost[i].pages);
+		}
+	}
+}
+
+/* ---------------------------------------------------------------- surfaces of processes */
+
+/*
+ * The surface of a window, taken from it with the lock held and let go
+ * of after: putting the page of nothing in the process's place waits for
+ * the process table, which is not taken while this lock is held.
+ */
+LOCAL INT	wm_surf_n = 0;		/* surfaces there are; under the lock */
+LOCAL UD	wm_surf_pg = 0;		/* and their pages */
+LOCAL UW	wm_surf_serial = 0;
+
+LOCAL void surf_take( WMWIN *w, WMSURF *out )
+{
+	*out = w->surf;
+	if ( w->surf.kva != NULL ) {
+		wm_surf_n--;
+		wm_surf_pg -= w->surf.pages;
+	}
+	w->surf.kva = NULL;
+}
+
+/*
+ * The process's addresses first, then the pages: a write the process
+ * still makes there after this goes to the page of nothing, never into
+ * pages given to something else.
+ */
+LOCAL void surf_drop( CONST WMSURF *s )
+{
+	if ( s->kva == NULL ) {
+		return;
+	}
+	(void)knl_prc_sink_shared(s->pid, s->uva, s->pages * PAGE_SIZE);
+	knl_vunmap(s->kva, s->pages);
+}
+
+LOCAL void surf_tell( CONST WMSURF *s, T_WMSURF *out )
+{
+	out->addr = (void *)s->uva;
+	out->width = s->w;
+	out->height = s->h;
+	out->pitch = s->w * (INT)sizeof(UW);
+	out->serial = s->serial;
+}
+
 /* ---------------------------------------------------------------- windows */
+
+LOCAL void floats_front( void );
 
 EXPORT INT wm_open( CONST T_DPRECT *outer, UINT attr, CONST char *title )
 {
@@ -539,6 +1024,7 @@ EXPORT INT wm_open( CONST T_DPRECT *outer, UINT attr, CONST char *title )
 	}
 	w = &wm_win[i];
 	knl_memset(w, 0, sizeof(*w));
+	w->serial = ++wm_win_serial;
 
 	w->attr = attr;
 	w->outer = *outer;
@@ -546,9 +1032,15 @@ EXPORT INT wm_open( CONST T_DPRECT *outer, UINT attr, CONST char *title )
 	w->shape = NULL;
 	w->own = NULL;
 	shape_of(w);
-	w->opacity = (UINT)wm_num(WM_SET_OPACITY, 255);
+	w->opacity = 255;			/* the look's own comes on top, as it is set */
 	w->tint = 0;
 	w->tint_str = 0;
+	w->mo_dur = 0;
+	if ( wm_num(LK_LOOK, 1) != 0 && wm_num(LK_MOTION, 0) > 0 && wm_mo_tsk > 0
+	  && ( attr & ( WM_ATTR_FRAME | WM_ATTR_TITLE ) ) != 0 ) {
+		w->mo_t0 = now_ms();
+		w->mo_dur = (UINT)within(wm_num(LK_MOTION, 0), 0, 2000);
+	}
 
 	pages = win_pages(outer);
 	w->pixels = (UB *)knl_vmap(pages, 0);
@@ -561,11 +1053,12 @@ EXPORT INT wm_open( CONST T_DPRECT *outer, UINT attr, CONST char *title )
 
 	w->pict = 0;
 	w->owner = 0;
+	w->mktsk = tk_get_tid();
 	for ( k = 0; k < WM_TITLE_MAX - 1 && title != NULL && title[k] != '\0'; k++ ) {
 		w->title[k] = title[k];
 	}
 
-	/* it comes up in front of everything else */
+	/* it comes up in front of everything else (of the windows that do not float, when it does not) */
 	for ( k = 0; k < WM_MAX_WIN; k++ ) {
 		if ( wm_win[k].used ) {
 			wm_win[k].z++;
@@ -575,6 +1068,9 @@ EXPORT INT wm_open( CONST T_DPRECT *outer, UINT attr, CONST char *title )
 	w->used = TRUE;
 	w->visible = TRUE;
 	wm_nwin++;
+	if ( ( attr & ( WM_ATTR_POPUP | WM_ATTR_FLOAT ) ) == 0 ) {
+		floats_front();
+	}
 
 	/*
 	 * The environment that draws into this window. Its origin is the
@@ -582,6 +1078,9 @@ EXPORT INT wm_open( CONST T_DPRECT *outer, UINT attr, CONST char *title )
 	 * program draws in its own coordinates and can reach nothing else.
 	 */
 	w->gid = dp_open();
+	if ( w->gid > 0 ) {
+		(void)dp_set_watch(w->gid, TRUE);	/* what is drawn in it is built again */
+	}
 	if ( w->gid < 0 ) {
 		knl_vunmap(w->pixels, pages);
 		w->used = FALSE;
@@ -638,6 +1137,9 @@ EXPORT INT wm_open( CONST T_DPRECT *outer, UINT attr, CONST char *title )
 		dp_set_visible(w->gid, &v);
 	}
 	knl_wmobj_open(i + 1);			/* it is an object from now on */
+	if ( w->mo_dur != 0 ) {
+		mo_wake();			/* it comes in step by step */
+	}
 
 	return i + 1;
 }
@@ -649,26 +1151,37 @@ EXPORT INT wm_open( CONST T_DPRECT *outer, UINT attr, CONST char *title )
  * changed, not what it holds), and a frame drawn again when the input
  * moved (the frame is outside the work area the damage speaks of).
  */
-LOCAL T_DPRECT	wm_gone;
-LOCAL BOOL	wm_gone_any = FALSE;
+LOCAL PARTS	wm_gone;
 
 LOCAL void gone_add( CONST T_DPRECT *r )
 {
-	if ( !wm_gone_any ) {
-		wm_gone = *r;
-		wm_gone_any = TRUE;
-		return;
-	}
-	if ( r->left < wm_gone.left )     wm_gone.left = r->left;
-	if ( r->top < wm_gone.top )       wm_gone.top = r->top;
-	if ( r->right > wm_gone.right )   wm_gone.right = r->right;
-	if ( r->bottom > wm_gone.bottom ) wm_gone.bottom = r->bottom;
+	parts_add(&wm_gone, r);
+}
+
+/* A window's place laid again, with the shadow it throws */
+LOCAL void gone_win( CONST WMWIN *w )
+{
+	T_DPRECT	r;
+
+	reach_of(w, &r);
+	gone_add(&r);
+}
+
+/* All of the screen laid again: the look, the scheme or the ground changed */
+LOCAL void gone_all( void )
+{
+	T_DPRECT	r;
+
+	r.left = 0;  r.top = 0;
+	r.right = (INT)wm_spec.width;
+	r.bottom = (INT)wm_spec.height;
+	gone_add(&r);
 }
 
 /*
  * The window nearest the viewer that a person works in: shown, with a
- * name band, and not a menu, panel or other pop-up. 0 when there is
- * none. Called with the lock held.
+ * name band, and not a menu, panel or other pop-up, nor a window that
+ * never has the keys. 0 when there is none. Called with the lock held.
  */
 LOCAL INT front_window( INT but )
 {
@@ -678,7 +1191,8 @@ LOCAL INT front_window( INT but )
 		WMWIN	*w = win_of(i);
 
 		if ( w == NULL || i == but || !w->visible
-		  || ( w->attr & WM_ATTR_POPUP ) != 0 || ( w->attr & WM_ATTR_TITLE ) == 0 ) {
+		  || ( w->attr & ( WM_ATTR_POPUP | WM_ATTR_NOFOCUS ) ) != 0
+		  || ( w->attr & WM_ATTR_TITLE ) == 0 ) {
 			continue;
 		}
 		if ( best == 0 || w->z < bz ) {
@@ -692,24 +1206,32 @@ LOCAL INT front_window( INT but )
 EXPORT ER wm_close( INT wid )
 {
 	WMWIN	*w;
+	WMSURF	surf;
 	INT	z;
+	BOOL	ghost;
 
+	knl_hid_repeat_cut();		/* a key held for the window repeats into no other */
 	tk_loc_mtx(wm_mtxid, TMO_FEVR);
 	w = win_of(wid);
 	if ( w == NULL ) {
 		tk_unl_mtx(wm_mtxid);
 		return E_ID;
 	}
+	surf_take(w, &surf);
 	z = w->z;
 	if ( w->visible ) {
-		gone_add(&w->outer);
+		gone_win(w);
 	}
 	if ( w->gid > 0 ) {
 		dp_close(w->gid);
 	}
+	/* nothing draws in its pixels now: they go out as a ghost, or go */
+	ghost = ghost_of(w);
 	if ( w->pixels != NULL ) {
 		knl_vunmap(w->pixels, w->pix_pages);
 	}
+	w->pixels = NULL;
+	w->mo_dur = 0;
 	dp_rgn_free(w->shape);
 	w->shape = NULL;
 	dp_rgn_free(w->own);
@@ -737,7 +1259,11 @@ EXPORT ER wm_close( INT wid )
 		}
 	}
 	tk_unl_mtx(wm_mtxid);
+	surf_drop(&surf);
 	knl_wmobj_close(wid);
+	if ( ghost ) {
+		mo_wake();			/* it goes out step by step */
+	}
 
 	return E_OK;
 }
@@ -845,10 +1371,48 @@ EXPORT ER wm_convert( INT wid, UINT from, UINT to, CONST T_DPRECT *in,
 	return E_OK;
 }
 
+/*
+ * The subordinate windows of a window that was carried by (dx, dy)
+ * carried with it, so that a tool panel stays where it was against the
+ * window it works; one that would go above the screen stops at its top.
+ */
+#define SUBS_MAX	8
+
+LOCAL void subs_follow( INT wid, INT dx, INT dy )
+{
+	INT		subs[SUBS_MAX], n = 0, i;
+	T_DPRECT	o[SUBS_MAX];
+
+	if ( dx == 0 && dy == 0 ) {
+		return;
+	}
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	for ( i = 0; i < WM_MAX_WIN && n < SUBS_MAX; i++ ) {
+		if ( wm_win[i].used && wm_win[i].parent == wid && i + 1 != wid ) {
+			subs[n] = i + 1;
+			o[n] = wm_win[i].outer;
+			n++;
+		}
+	}
+	tk_unl_mtx(wm_mtxid);
+	for ( i = 0; i < n; i++ ) {
+		INT	ddy = dy;
+
+		if ( o[i].top + ddy < 0 ) {
+			ddy = -o[i].top;
+		}
+		o[i].left += dx;
+		o[i].right += dx;
+		o[i].top += ddy;
+		o[i].bottom += ddy;
+		(void)wm_move(subs[i], &o[i]);
+	}
+}
+
 EXPORT ER wm_move( INT wid, CONST T_DPRECT *outer )
 {
 	WMWIN		*w;
-	T_DPRECT	v;
+	T_DPRECT	v, was;
 	UD		pages, oldpages = 0;
 	UB		*pixels, *old;
 	BOOL		resized;
@@ -895,13 +1459,21 @@ EXPORT ER wm_move( INT wid, CONST T_DPRECT *outer )
 	}
 	resized = ( outer->right - outer->left != w->outer.right - w->outer.left
 		 || outer->bottom - outer->top != w->outer.bottom - w->outer.top );
+	if ( w->visible ) {
+		gone_win(w);			/* where it stood, and its shadow */
+	}
+	w->mo_dur = 0;				/* a window moved has arrived */
 	v = w->work;
+	was = w->outer;
 	w->outer = *outer;
 	work_of(outer, w->attr, &w->work);
 	/* the same outside with a frame measured anew is a new work area too */
 	resized = (BOOL)( resized || v.right - v.left != w->work.right - w->work.left
 			  || v.bottom - v.top != w->work.bottom - w->work.top );
 	shape_of(w);				/* a new size is a new shape */
+	if ( w->visible ) {
+		gone_win(w);			/* and where it stands now */
+	}
 	w->dirty = TRUE;
 	w->damage.left = 0;
 	w->damage.top = 0;
@@ -924,6 +1496,7 @@ EXPORT ER wm_move( INT wid, CONST T_DPRECT *outer )
 
 	draw_frame(w);				/* the frame moved with it */
 	knl_wmobj_moved(wid, resized);
+	subs_follow(wid, outer->left - was.left, outer->top - was.top);
 
 	return E_OK;
 }
@@ -973,19 +1546,18 @@ EXPORT void wm_relayout( void )
 }
 
 /*
- * The popups put back in front of everything, in the order they stood
- * among themselves: a window brought forward comes up behind them, as
- * a menu's lists stay over the window they were opened from.
+ * The windows that have 'attr' put back in front of everything, in the
+ * order they stood among themselves
  */
-LOCAL void popups_front( void )
+LOCAL void attr_front( UINT attr )
 {
 	INT	i, k, best;
 
 	for ( k = 0; k < wm_nwin; k++ ) {
 		best = -1;
-		/* the popup furthest back that is not yet in front */
+		/* the one furthest back that is not yet in front */
 		for ( i = 0; i < WM_MAX_WIN; i++ ) {
-			if ( wm_win[i].used && ( wm_win[i].attr & WM_ATTR_POPUP ) != 0
+			if ( wm_win[i].used && ( wm_win[i].attr & attr ) != 0
 			  && wm_win[i].z >= k
 			  && ( best < 0 || wm_win[i].z > wm_win[best].z ) ) {
 				best = i;
@@ -1005,6 +1577,23 @@ LOCAL void popups_front( void )
 			wm_win[best].z = 0;
 		}
 	}
+}
+
+/*
+ * The popups put back in front of everything: a window brought forward
+ * comes up behind them, as a menu's lists stay over the window they were
+ * opened from
+ */
+LOCAL void popups_front( void )
+{
+	attr_front(WM_ATTR_POPUP);
+}
+
+/* The floating windows put back in front of the others, then the popups in front of them */
+LOCAL void floats_front( void )
+{
+	attr_front(WM_ATTR_FLOAT);
+	popups_front();
 }
 
 /*
@@ -1084,7 +1673,7 @@ LOCAL void sub_place( WMWIN *s, WMWIN *p )
 	}
 	s->z = pz;
 	if ( s->visible ) {
-		gone_add(&s->outer);
+		gone_win(s);
 	}
 }
 
@@ -1121,7 +1710,7 @@ EXPORT ER wm_set_parent( INT wid, INT parent )
 	}
 	w->parent = parent;
 	subs_front();
-	popups_front();
+	floats_front();
 	tk_unl_mtx(wm_mtxid);
 
 	return E_OK;
@@ -1138,6 +1727,10 @@ EXPORT ER wm_raise( INT wid )
 		tk_unl_mtx(wm_mtxid);
 		return E_ID;
 	}
+	/* a subordinate window comes forward with its window, just in front of it */
+	if ( w->parent > 0 && win_of(w->parent) != NULL && win_of(w->parent) != w ) {
+		w = win_of(w->parent);
+	}
 	old = w->z;
 	for ( i = 0; i < WM_MAX_WIN; i++ ) {
 		if ( wm_win[i].used && wm_win[i].z < old ) {
@@ -1147,10 +1740,14 @@ EXPORT ER wm_raise( INT wid )
 	w->z = 0;
 	subs_front();
 	if ( ( w->attr & WM_ATTR_POPUP ) == 0 ) {
-		popups_front();
+		if ( ( w->attr & WM_ATTR_FLOAT ) == 0 ) {
+			floats_front();
+		} else {
+			popups_front();
+		}
 	}
 	if ( old != w->z && w->visible ) {
-		gone_add(&w->outer);		/* it now covers what covered it */
+		gone_win(w);		/* it now covers what covered it */
 	}
 	tk_unl_mtx(wm_mtxid);
 
@@ -1177,7 +1774,7 @@ EXPORT ER wm_lower( INT wid )
 	w->z = wm_nwin - 1;
 	subs_front();
 	if ( old != w->z && w->visible ) {
-		gone_add(&w->outer);		/* what it covered shows now */
+		gone_win(w);		/* what it covered shows now */
 	}
 	tk_unl_mtx(wm_mtxid);
 
@@ -1191,6 +1788,9 @@ EXPORT ER wm_show( INT wid, BOOL on )
 	tk_loc_mtx(wm_mtxid, TMO_FEVR);
 	w = win_of(wid);
 	if ( w != NULL ) {
+		if ( w->visible != on ) {
+			gone_win(w);		/* it shows, or what it covered does */
+		}
 		w->visible = on;
 	}
 	tk_unl_mtx(wm_mtxid);
@@ -1567,6 +2167,9 @@ LOCAL void draw_bar( INT gid, CONST WMWIN *w, UINT which, BOOL active )
  * scaled to the box's height, the pixels the icon leaves clear left as
  * the band is under them.
  */
+LOCAL UW	*wm_def_icon = NULL;	/* what a window with no icon shows (wm_set_icon_default) */
+LOCAL INT	wm_def_w, wm_def_h;
+
 LOCAL void draw_icon( INT gid, CONST T_DPRECT *box, CONST UW *px, INT w, INT h )
 {
 	UW	*sq;
@@ -1606,6 +2209,8 @@ LOCAL void draw_title( INT gid, CONST WMWIN *w, INT fw )
 		box.bottom = box.top + th + 4;
 		if ( box.right < fw - 2 && w->icon != NULL ) {
 			draw_icon(gid, &box, w->icon, w->icon_w, w->icon_h);
+		} else if ( box.right < fw - 2 && wm_def_icon != NULL ) {
+			draw_icon(gid, &box, wm_def_icon, wm_def_w, wm_def_h);
 		} else if ( box.right < fw - 2
 		  && wm_pict_draw(gid, w->pict, w->owner, &box,
 				  wm_look(WM_LOOK_TITLE_TEXT)) < E_OK ) {
@@ -1748,16 +2353,19 @@ LOCAL void draw_frame( CONST WMWIN *w )
 /* ------------------------------------------------------------ scroll bars */
 
 /*
- * The shape a window is laid down in. A square window has none and is
- * laid as a rectangle; a rounded one is the region of a rounded box,
- * worked out once here rather than tested corner by corner for every
- * pixel of every screen.
+ * The shape a window is found in. A square window has none; one with
+ * round corners (LK_ROUND, a window with a frame while the look is on)
+ * is the rows its corners cover at least half of each pixel of, from
+ * the same cover the corners are laid with (compose.c), so that where
+ * a press finds the window is where it shows. It is worked out once
+ * here, when the size or the corners change, not at every press.
  */
 LOCAL void shape_of( WMWIN *w )
 {
 	T_DPRECT	r;
-	INT		rad = wm_num(WM_SET_ROUND, 0);
 	T_DPRGN		*rgn = NULL;
+	CONST UB	*cov;
+	INT		rad, y, *x0;
 
 	dp_rgn_free(w->shape);
 	w->shape = NULL;
@@ -1767,15 +2375,36 @@ LOCAL void shape_of( WMWIN *w )
 		}
 		return;
 	}
-	if ( rad <= 0 ) {
+	if ( wm_num(LK_LOOK, 1) == 0 || ( w->attr & ( WM_ATTR_FRAME | WM_ATTR_TITLE ) ) == 0 ) {
 		return;
 	}
 	r.left = 0;  r.top = 0;
 	r.right = w->outer.right - w->outer.left;
 	r.bottom = w->outer.bottom - w->outer.top;
-	if ( dp_rgn_round(&r, rad, rad, &rgn) >= E_OK ) {
+	rad = cp_round_of(&r, wm_num(LK_ROUND, 0));
+	cov = cp_corner_cov(rad);
+	if ( cov == NULL ) {
+		return;
+	}
+	x0 = (INT *)Kmalloc((SZ)r.bottom * 2 * sizeof(INT));
+	if ( x0 == NULL ) {
+		return;
+	}
+	for ( y = 0; y < r.bottom; y++ ) {
+		INT	ey = ( y < r.bottom - 1 - y ) ? y : r.bottom - 1 - y, ex = 0;
+
+		if ( ey < rad ) {
+			while ( ex < rad && cov[ey * rad + ex] < 128 ) {
+				ex++;
+			}
+		}
+		x0[y] = ex;
+		x0[r.bottom + y] = r.right - ex;
+	}
+	if ( dp_rgn_from_rows(0, r.bottom, x0, x0 + r.bottom, &rgn) >= E_OK ) {
 		w->shape = rgn;
 	}
+	Kfree(x0);
 }
 
 
@@ -1797,7 +2426,7 @@ EXPORT ER wm_set_shape( INT wid, CONST T_DPRGN *rgn )
 	dp_rgn_free(w->own);
 	w->own = copy;
 	shape_of(w);
-	gone_add(&w->outer);			/* what showed round it shows again */
+	gone_win(w);			/* what showed round it shows again */
 	w->dirty = TRUE;
 	tk_unl_mtx(wm_mtxid);
 
@@ -1846,9 +2475,49 @@ EXPORT ER wm_set_icon( INT wid, CONST UW *px, INT w, INT h )
 	win->icon_w = ( copy != NULL ) ? w : 0;
 	win->icon_h = ( copy != NULL ) ? h : 0;
 	draw_frame(win);
+	if ( win->visible ) gone_add(&win->outer);
 	tk_unl_mtx(wm_mtxid);
 	if ( old != NULL ) Kfree(old);
-	wm_composite();
+	(void)wm_update();
+
+	return E_OK;
+}
+
+/*
+ * The icon a window with none of its own shows in its band, in colour,
+ * in place of the plain pictogram drawn in the band's text colour: the
+ * pixels are copied. Until it is given (early in the start) the plain
+ * pictogram stands.
+ */
+EXPORT ER wm_set_icon_default( CONST UW *px, INT w, INT h )
+{
+	UW	*copy, *old;
+	WMWIN	*win;
+	INT	z;
+
+	if ( px == NULL || w <= 0 || h <= 0 ) {
+		return E_PAR;
+	}
+	copy = (UW *)Kmalloc((SZ)w * h * sizeof(UW));
+	if ( copy == NULL ) {
+		return E_NOMEM;
+	}
+	knl_memcpy(copy, px, (INT)( (SZ)w * h * sizeof(UW) ));
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	old = wm_def_icon;
+	wm_def_icon = copy;
+	wm_def_w = w;
+	wm_def_h = h;
+	for ( z = 0; z < wm_nwin; z++ ) {
+		win = win_at_z(z);
+		if ( win != NULL && win->icon == NULL ) {
+			draw_frame(win);
+			if ( win->visible ) gone_add(&win->outer);
+		}
+	}
+	tk_unl_mtx(wm_mtxid);
+	if ( old != NULL ) Kfree(old);
+	(void)wm_update();
 
 	return E_OK;
 }
@@ -1866,6 +2535,7 @@ EXPORT ER wm_set_pict( INT wid, INT num, ID owner )
 	w->pict = num;
 	w->owner = owner;
 	draw_frame(w);
+	if ( w->visible ) gone_add(&w->outer);
 	tk_unl_mtx(wm_mtxid);
 
 	return E_OK;
@@ -1895,6 +2565,7 @@ EXPORT ER wm_set_title( INT wid, CONST char *title )
 	}
 	w->title[k] = '\0';
 	draw_frame(w);
+	if ( w->visible ) gone_add(&w->outer);
 	tk_unl_mtx(wm_mtxid);
 
 	return E_OK;
@@ -1914,6 +2585,7 @@ EXPORT ER wm_set_opacity( INT wid, UINT opacity )
 		return E_ID;
 	}
 	w->opacity = opacity;
+	if ( w->visible ) gone_win(w);		/* and what shows through it */
 	tk_unl_mtx(wm_mtxid);
 
 	return E_OK;
@@ -1953,6 +2625,7 @@ EXPORT ER wm_set_tint( INT wid, UW colour, UINT strength )
 	}
 	w->tint = colour;
 	w->tint_str = strength;
+	if ( w->visible ) gone_add(&w->outer);
 	tk_unl_mtx(wm_mtxid);
 
 	return E_OK;
@@ -1971,8 +2644,14 @@ EXPORT ER wm_set_bar( INT wid, UINT which, CONST T_WMBAR *b )
 		tk_unl_mtx(wm_mtxid);
 		return E_ID;
 	}
+	if ( w->bar[which].lo == b->lo && w->bar[which].hi == b->hi
+	  && w->bar[which].clo == b->clo && w->bar[which].chi == b->chi ) {
+		tk_unl_mtx(wm_mtxid);
+		return E_OK;			/* as it was: nothing to draw or build */
+	}
 	w->bar[which] = *b;
 	draw_frame(w);
+	if ( w->visible ) gone_add(&w->outer);	/* the frame goes to the screen too */
 	tk_unl_mtx(wm_mtxid);
 
 	return E_OK;
@@ -2132,6 +2811,206 @@ EXPORT ER wm_take_damage( INT wid, T_DPRECT *r )
 	} else {
 		*r = w->damage;
 		w->dirty = FALSE;
+		er = E_OK;
+	}
+	tk_unl_mtx(wm_mtxid);
+
+	return er;
+}
+
+LOCAL void touched( CONST T_DPRECT *r );
+
+/*
+ * A surface as large as the work area is now: the one the window has
+ * when it is the process's and of that size, else a new one in place of
+ * whatever it had. The pages are cleared before the process sees them.
+ * They are made and mapped with the lock let go of (mapping waits for
+ * the process table), so the window is looked for again after, by its
+ * serial: its number may have been closed and opened again meanwhile.
+ */
+EXPORT ER wm_surf_get( INT wid, ID pid, T_WMSURF *s )
+{
+	WMWIN	*w;
+	WMSURF	nw, old;
+	INT	ww, wh;
+	UW	serial;
+	ER	er;
+
+	if ( s == NULL || pid <= 0 ) {
+		return E_PAR;
+	}
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	w = win_of(wid);
+	if ( w == NULL ) {
+		tk_unl_mtx(wm_mtxid);
+		return E_ID;
+	}
+	ww = w->work.right - w->work.left;
+	wh = w->work.bottom - w->work.top;
+	serial = w->serial;
+	if ( w->surf.kva != NULL && w->surf.pid == pid && w->surf.w == ww && w->surf.h == wh ) {
+		surf_tell(&w->surf, s);
+		tk_unl_mtx(wm_mtxid);
+		return E_OK;
+	}
+	tk_unl_mtx(wm_mtxid);
+	if ( ww <= 0 || wh <= 0 ) {
+		return E_OBJ;
+	}
+
+	knl_memset(&nw, 0, sizeof(nw));
+	nw.pages = ( (UD)ww * (UD)wh * sizeof(UW) + PAGE_SIZE - 1 ) / PAGE_SIZE;
+	nw.kva = (UB *)knl_vmap(nw.pages, 0);
+	if ( nw.kva == NULL ) {
+		return E_NOMEM;
+	}
+	knl_memset(nw.kva, 0, (SZ)( nw.pages * PAGE_SIZE ));
+	er = knl_prc_map_kernel(pid, nw.kva, nw.pages * PAGE_SIZE, &nw.uva);
+	if ( er < E_OK ) {
+		knl_vunmap(nw.kva, nw.pages);
+		return er;
+	}
+	nw.pid = pid;
+	nw.w = ww;
+	nw.h = wh;
+
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	w = win_of(wid);
+	if ( w == NULL || w->serial != serial ) {
+		tk_unl_mtx(wm_mtxid);
+		surf_drop(&nw);
+		return E_ID;
+	}
+	surf_take(w, &old);
+	nw.serial = ++wm_surf_serial;
+	w->surf = nw;
+	wm_surf_n++;
+	wm_surf_pg += nw.pages;
+	surf_tell(&w->surf, s);
+	tk_unl_mtx(wm_mtxid);
+	surf_drop(&old);
+
+	return E_OK;
+}
+
+/* A row of pixels, a word at a time: the two rows need not lie alike against eight bytes */
+LOCAL void row_copy( UW *d, CONST UW *s, INT n )
+{
+	for ( ; n >= 4; n -= 4, d += 4, s += 4 ) {
+		d[0] = s[0];
+		d[1] = s[1];
+		d[2] = s[2];
+		d[3] = s[3];
+	}
+	for ( ; n > 0; n-- ) {
+		*d++ = *s++;
+	}
+}
+
+/*
+ * Rectangles of the surface (work area coordinates) into the window's
+ * own pixels, as far as both reach, and noted as drawn by the calling
+ * task: its next wm_update builds them. The copy is made with the lock
+ * held, which the compositor holds while it builds, so no build reads
+ * the window half written.
+ */
+EXPORT ER wm_surf_put( INT wid, ID pid, CONST T_DPRECT *r, INT n )
+{
+	WMWIN		*w;
+	T_DPRECT	c, lim, s;
+	INT		i, y, ox, oy;
+
+	if ( r == NULL || n <= 0 || n > WM_PUT_MAX ) {
+		return E_PAR;
+	}
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	w = win_of(wid);
+	if ( w == NULL ) {
+		tk_unl_mtx(wm_mtxid);
+		return E_ID;
+	}
+	if ( w->surf.kva == NULL || w->surf.pid != pid || w->pixels == NULL ) {
+		tk_unl_mtx(wm_mtxid);
+		return E_OBJ;			/* no surface of this process's */
+	}
+	lim.left = 0;
+	lim.top = 0;
+	lim.right = w->work.right - w->work.left;
+	lim.bottom = w->work.bottom - w->work.top;
+	if ( lim.right > w->surf.w )  lim.right = w->surf.w;
+	if ( lim.bottom > w->surf.h ) lim.bottom = w->surf.h;
+	ox = w->work.left - w->outer.left;
+	oy = w->work.top - w->outer.top;
+	for ( i = 0; i < n; i++ ) {
+		c = r[i];
+		if ( !rect_cut(&c, &lim) ) {
+			continue;
+		}
+		for ( y = c.top; y < c.bottom; y++ ) {
+			row_copy((UW *)( w->pixels + (UD)( oy + y ) * wm_spec.pitch ) + ox + c.left,
+				 (CONST UW *)w->surf.kva + (UD)y * (UD)w->surf.w + c.left, c.right - c.left);
+		}
+		s.left = c.left + w->work.left;
+		s.top = c.top + w->work.top;
+		s.right = c.right + w->work.left;
+		s.bottom = c.bottom + w->work.top;
+		touched(&s);
+	}
+	tk_unl_mtx(wm_mtxid);
+
+	return E_OK;
+}
+
+EXPORT void knl_wm_surf_prc_end( ID pid )
+{
+	WMSURF	gone[16];
+	INT	i, n;
+
+	if ( pid <= 0 || wm_mtxid <= 0 ) {
+		return;
+	}
+	do {
+		n = 0;
+		tk_loc_mtx(wm_mtxid, TMO_FEVR);
+		for ( i = 0; i < WM_MAX_WIN && n < 16; i++ ) {
+			if ( wm_win[i].used && wm_win[i].surf.kva != NULL && wm_win[i].surf.pid == pid ) {
+				surf_take(&wm_win[i], &gone[n++]);
+			}
+		}
+		tk_unl_mtx(wm_mtxid);
+		for ( i = 0; i < n; i++ ) {
+			surf_drop(&gone[i]);
+		}
+	} while ( n == 16 );
+}
+
+EXPORT INT knl_wm_surf_count( UD *p_pages )
+{
+	INT	n;
+
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	n = wm_surf_n;
+	if ( p_pages != NULL ) {
+		*p_pages = wm_surf_pg;
+	}
+	tk_unl_mtx(wm_mtxid);
+
+	return n;
+}
+
+EXPORT ER knl_wm_surf_ref( INT wid, ID *p_pid, UBINT *p_va, UD *p_pages )
+{
+	WMWIN	*w;
+	ER	er = E_NOEXS;
+
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	w = win_of(wid);
+	if ( w == NULL ) {
+		er = E_ID;
+	} else if ( w->surf.kva != NULL ) {
+		if ( p_pid != NULL )   *p_pid = w->surf.pid;
+		if ( p_va != NULL )    *p_va = w->surf.uva;
+		if ( p_pages != NULL ) *p_pages = w->surf.pages;
 		er = E_OK;
 	}
 	tk_unl_mtx(wm_mtxid);
@@ -2318,6 +3197,10 @@ EXPORT ER wm_focus( INT wid )
 			tk_unl_mtx(wm_mtxid);
 			return E_ID;
 		}
+		if ( ( w->attr & WM_ATTR_NOFOCUS ) != 0 ) {
+			tk_unl_mtx(wm_mtxid);
+			return E_OBJ;		/* a screen keyboard: the keys stay where they are */
+		}
 		wm_focus_wid = wid;
 	}
 	/*
@@ -2355,11 +3238,7 @@ EXPORT INT wm_focused( void )
 	return wid;
 }
 
-/* ---------------------------------------------------------------- Shift+Pause */
-
-#define KEY_PAUSE	0x48
-
-LOCAL BOOL	wm_pause_down = FALSE;	/* Shift+Pause held: its repeats do nothing more */
+/* ---------------------------------------------------------------- 強制終了 */
 
 /* The window nearest the viewer that is not a popup, 0 none. Called with the lock held. */
 LOCAL INT front_any( void )
@@ -2377,66 +3256,115 @@ LOCAL INT front_any( void )
 }
 
 /*
- * Shift+Pause: the process that made the window in front -- the one
- * with the input, or else the one nearest the viewer -- is ended as
- * ts_ter_prc ends it (knl_prc_force_end), its windows closing with it,
- * and the message line says so. A window of the system's own (the
- * desktop, the cabinets, the editors, which are kernel tasks) has no
- * process to end, and a process the system needs is not ended.
+ * For 強制終了 (fquit.c): the window a person works in -- the one with
+ * the keys, or else the one nearest the viewer that is not a popup -- in
+ * *p_wid (0 none), and the popups shown in front of it, nearest first:
+ * a panel the desktop shows for a program stands there. E_TMOUT when
+ * the lock of the windows is not had within tmo: a task that holds it
+ * and does not let it go must not stop the keyboard's last resort.
  */
-LOCAL void force_quit( void )
+EXPORT ER knl_wm_front_pick( TMO tmo, INT *p_wid, INT *pops, INT max, INT *p_npop )
 {
-	UB	name[OB_NAME_MAX + 1];
-	char	msg[OB_NAME_MAX + 96];
-	CONST char *fmt;
-	INT	wid = wm_focused();
-	ID	pid;
-	ER	er;
+	WMWIN	*f, *w;
+	INT	wid, z, n = 0;
 
+	*p_wid = 0;
+	*p_npop = 0;
+	if ( !wm_ready ) {
+		return E_NOEXS;
+	}
+	if ( tk_loc_mtx(wm_mtxid, tmo) < E_OK ) {
+		return E_TMOUT;
+	}
+	wid = wm_focus_wid;
+	if ( wid != 0 && win_of(wid) == NULL ) {
+		wid = 0;
+	}
 	if ( wid == 0 ) {
-		tk_loc_mtx(wm_mtxid, TMO_FEVR);
 		wid = front_any();
-		tk_unl_mtx(wm_mtxid);
 	}
-	pid = ( wid > 0 ) ? knl_wmobj_maker(wid) : 0;
-	if ( pid <= 0 ) {
-		(void)wm_msg_put("強制終了できるプロセスがありません");
-		return;
+	f = win_of(wid);
+	for ( z = 0; z < wm_nwin && n < max; z++ ) {
+		w = win_at_z(z);
+		if ( w == NULL ) {
+			continue;
+		}
+		if ( f != NULL && w->z >= f->z ) {
+			break;
+		}
+		if ( w->visible && ( w->attr & WM_ATTR_POPUP ) != 0 ) {
+			pops[n++] = (INT)( w - wm_win ) + 1;
+		}
 	}
-	(void)knl_prc_name(pid, name, sizeof(name));
-	er = knl_prc_force_end(pid);
-	fmt = ( er >= E_OK )   ? "%s(pid %d)を強制終了しました"
-	    : ( er == E_OACV ) ? "%s(pid %d)はシステムのプロセスなので強制終了できません"
-	    : ( er == E_OBJ )  ? "%s(pid %d)は終了の途中です"
-	    :                    "%s(pid %d)を強制終了できませんでした";
-	(void)tm_sprintf((UB *)msg, (CONST UB *)fmt, name, pid);
-	(void)wm_msg_put(msg);
+	tk_unl_mtx(wm_mtxid);
+	*p_wid = wid;
+	*p_npop = n;
+
+	return E_OK;
 }
 
 /*
- * Whether h is Shift+Pause or the let go of it, which are taken here
- * and go to no window. A key held repeats its press: only the first
- * press ends anything.
+ * For 強制終了: the window nearest the viewer that is not a popup, in
+ * *p_wid (0 none), whether it has the keys or not. E_TMOUT as above.
  */
-LOCAL BOOL pause_key( CONST T_HIDEV *h )
+EXPORT ER knl_wm_front_any( TMO tmo, INT *p_wid )
 {
-	BOOL	was = wm_pause_down;
+	*p_wid = 0;
+	if ( !wm_ready ) {
+		return E_NOEXS;
+	}
+	if ( tk_loc_mtx(wm_mtxid, tmo) < E_OK ) {
+		return E_TMOUT;
+	}
+	*p_wid = front_any();
+	tk_unl_mtx(wm_mtxid);
 
-	if ( ( h->type != HID_EV_KEY_DOWN && h->type != HID_EV_KEY_UP ) || h->code != KEY_PAUSE ) {
-		return FALSE;
+	return E_OK;
+}
+
+/*
+ * The windows the tasks tids opened, closed with the panels and menus
+ * standing in them, and what those tasks may have left laid over the
+ * screen -- outlines being carried, the loupe, the pointer's shape --
+ * put back: the desktop's tasks were stopped, and it starts again
+ * (fquit.c). Answers how many windows were closed.
+ */
+EXPORT INT knl_wm_tsk_end( CONST ID *tids, INT ntid )
+{
+	INT	*wids, n = 0, i, k;
+
+	if ( !wm_ready || ntid <= 0 ) {
+		return 0;
 	}
-	if ( h->type == HID_EV_KEY_UP ) {
-		wm_pause_down = FALSE;
-		return was;
+	wids = (INT *)Kmalloc(sizeof(INT) * WM_MAX_WIN);
+	if ( wids == NULL ) {
+		return E_NOMEM;
 	}
-	if ( ( h->mods & ( HID_MOD_LSHIFT | HID_MOD_RSHIFT ) ) == 0 ) {
-		return FALSE;
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	for ( i = 0; i < WM_MAX_WIN; i++ ) {
+		if ( !wm_win[i].used ) {
+			continue;
+		}
+		for ( k = 0; k < ntid; k++ ) {
+			if ( wm_win[i].mktsk == tids[k] ) {
+				wids[n++] = i + 1;
+				break;
+			}
+		}
 	}
-	wm_pause_down = TRUE;
-	if ( !was ) {
-		force_quit();
+	tk_unl_mtx(wm_mtxid);
+	knl_pn_wins_gone(wids, n);
+	for ( i = 0; i < n; i++ ) {
+		(void)wm_close(wids[i]);	/* E_ID for one a panel took with it */
 	}
-	return TRUE;
+	Kfree(wids);
+	(void)wm_set_drag(NULL, 0);
+	(void)wm_set_loupe(NULL, 0, 0, 0, 0);
+	(void)wm_set_pointer(WM_PT_SELECT);
+	(void)wm_show_pointer(TRUE);
+	wm_update();
+
+	return n;
 }
 
 /*
@@ -2445,8 +3373,11 @@ LOCAL BOOL pause_key( CONST T_HIDEV *h )
  * place, whatever has the input. The place is then measured from that
  * window's work area, because that is what its program draws in.
  *
- * Shift+Pause is not addressed to anyone: it ends the process in front
- * (pause_key) and the next thing that happens is read instead.
+ * Shift+Pause never comes here: the input layer hands it to 強制終了
+ * as the keyboard reports it (fquit.c, design 5.5.1). While the reader
+ * waits for something to happen, the watch on the desktop's loop counts
+ * it as come round (knl_wdog_idle): waiting for a person is not being
+ * stuck.
  *
  * Nothing here changes the order. Pressing a button does not bring a
  * window forward: the press is carried, and coming forward is something
@@ -2475,17 +3406,28 @@ EXPORT ER wm_read_event( T_WMEV *ev, TMO tmout )
 			tmout = ( left > 0 ) ? left : 1;
 		}
 	}
-	do {
-		er = ts_hid_read(&h, tmout);
-		knl_msg_tick();
-		knl_menu_tick();	/* a row stayed on: its list opens */
-		knl_pn_tick();		/* the caret of a panel's box blinks */
-		if ( er < E_OK ) {
-			return er;
-		}
-	} while ( pause_key(&h) );
+	knl_wdog_idle(TRUE);
+	er = ts_hid_read(&h, tmout);
+	knl_wdog_idle(FALSE);
+	knl_msg_tick();
+	knl_menu_tick();	/* a row stayed on: its list opens */
+	knl_pn_tick();		/* the caret of a panel's box blinks */
+	if ( er < E_OK ) {
+		return er;
+	}
 	if ( h.type == HID_EV_BTN_DOWN ) {
 		knl_msg_press(h.x, h.y);
+	}
+	/* every key as it came, to the screen keyboards that asked (OB_N_KEYSEEN) */
+	if ( h.type == HID_EV_KEY_DOWN || h.type == HID_EV_KEY_UP ) {
+		T_WMEV	seen;
+
+		knl_memset(&seen, 0, sizeof(seen));
+		seen.type = h.type;
+		seen.code = h.code;
+		seen.mods = h.mods;
+		seen.when = h.when;
+		knl_wmobj_key_seen(&seen);
 	}
 	/* the clicks a person asked for (ユーザ環境設定〈音属性〉) */
 	if ( ( h.type == HID_EV_KEY_DOWN && h.code < 0xE0 && wm_num(LK_CLK_KEY, 0) != 0 )
@@ -2558,235 +3500,354 @@ EXPORT ER wm_read_event( T_WMEV *ev, TMO tmout )
 /* ---------------------------------------------------------------- screen */
 
 /*
- * Lay the windows onto the back buffer. They go down from the back
- * forwards, so what is in front is written last. A window that some
- * single window in front of it covers entirely is not laid down at all,
- * which is what the order is for.
+ * The part of a window nothing behind it shows through, which a window
+ * behind it may be left out under: the whole of it when it is solid,
+ * its work area when only its frame is seen through, less the rows of
+ * its round corners; none when it is seen through all over, is on its
+ * way in, has an outline of its own or pops up (a menu draws round
+ * itself what it does not cover). FALSE for none.
  */
-/*
- * The screen, or a part of it, built afresh.
- *
- * 'area' is what is to be built; NULL means the whole screen. Building
- * only part of it is what makes the pointer cheap to move: the two
- * small rectangles it left and arrived at are laid again, and the rest
- * of the screen is not touched. The same is true of anything else that
- * changes a corner of the screen.
- *
- * What is laid down is the same in either case -- the ground, then the
- * windows from the back forward -- because a screen built two different
- * ways is two different screens.
- */
-EXPORT ER wm_composite_at( CONST T_DPRECT *area )
+LOCAL BOOL solid_of( CONST WMWIN *f, CONST LOOKNOW *l, UD now, T_DPRECT *r )
 {
-	WMWIN		*w, *front;
-	BOOL		keyed, laid;
-	T_DPRECT	vis, box;
-	INT		z, fz, x, y;
-	UB		*back;
+	T_CPWIN	cp;
+	INT	rad;
 
+	if ( !f->visible || ( f->attr & WM_ATTR_POPUP ) != 0 || f->own != NULL ) {
+		return FALSE;
+	}
+	win_cp(f, l, now, &cp);
+	if ( CP_MOVING(&cp) || cp.a_work < 255 ) {
+		return FALSE;
+	}
+	*r = ( cp.a_frame < 255 ) ? f->work : f->outer;
+	rad = cp_round_of(&f->outer, cp.round);
+	if ( r->top < f->outer.top + rad )       r->top = f->outer.top + rad;
+	if ( r->bottom > f->outer.bottom - rad ) r->bottom = f->outer.bottom - rad;
+
+	return ( r->left < r->right && r->top < r->bottom );
+}
+
+/* How many windows seen through and spread stand within 'near' of a part of the screen */
+LOCAL INT seen_through_near( CONST T_DPRECT *box, CONST LOOKNOW *l, UD now, INT near )
+{
+	T_CPWIN		cp;
+	T_DPRECT	r;
+	INT		i, n = 0;
+
+	for ( i = 0; i < WM_MAX_WIN; i++ ) {
+		CONST WMWIN	*w = &wm_win[i];
+
+		if ( !w->used || !w->visible ) {
+			continue;
+		}
+		win_cp(w, l, now, &cp);
+		if ( cp.blur <= 0 || ( cp.a_frame >= 255 && cp.a_work >= 255 ) ) {
+			continue;
+		}
+		r = w->outer;
+		r.left -= near;  r.top -= near;  r.right += near;  r.bottom += near;
+		if ( rect_cut(&r, box) ) {
+			n++;
+		}
+	}
+	return n;
+}
+
+/*
+ * What the windows' look asks of whoever builds the screen (CP_FX_*): a
+ * look beyond solid and square makes a part dearer on the processor, and
+ * a spread dearer again, differently on the GPU.
+ */
+LOCAL UINT look_fx( CONST LOOKNOW *l )
+{
+	UINT	fx = 0;
+
+	if ( l->opa < 255 || l->whole || l->wash_str != 0 || l->bar_str != 0
+	  || l->round > 0 || l->dark != 0 || l->blur > 0 ) {
+		fx |= CP_FX_LOOK;
+	}
+	if ( l->blur > 0 && ( l->opa < 255 || l->whole ) ) {
+		fx |= CP_FX_BLUR;
+	}
+	return fx;
+}
+
+/*
+ * Whether the window at place z of the order, visible and with pixels,
+ * is laid into 'abox': its description in 'cp'. Not when no part of it
+ * or its shadow is there, nor when a window in front of it covers all
+ * of that with a solid part (counted when 'count').
+ */
+LOCAL BOOL lay_test( CONST WMWIN *w, INT z, CONST LOOKNOW *look, UD now, CONST T_DPRECT *abox,
+		     T_CPWIN *cp, BOOL count )
+{
+	T_DPRECT	vis;
+	INT		fz;
+
+	win_cp(w, look, now, cp);
+
+	/* how far it reaches, with its shadow */
+	vis = cp->shown;
+	if ( !CP_MOVING(cp) ) {
+		T_DPRECT	s;
+
+		if ( cp_shadow_extent(cp, &s) ) {
+			if ( s.left < vis.left )     vis.left = s.left;
+			if ( s.top < vis.top )       vis.top = s.top;
+			if ( s.right > vis.right )   vis.right = s.right;
+			if ( s.bottom > vis.bottom ) vis.bottom = s.bottom;
+		}
+	}
+	if ( !rect_cut(&vis, abox) ) {
+		return FALSE;			/* no part of it is being built */
+	}
+
+	/* anything in front whose solid part covers the whole of that */
+	for ( fz = z - 1; fz >= 0; fz-- ) {
+		WMWIN		*f = win_at_z(fz);
+		T_DPRECT	s;
+
+		if ( f != NULL && solid_of(f, look, now, &s) && rect_covers(&s, &vis) ) {
+			if ( count ) {
+				wm_count.windows_skipped++;
+			}
+			return FALSE;
+		}
+	}
+	return TRUE;
+}
+
+/* The windows handed to the GPU, and those the processor lays together, under the lock */
+LOCAL T_CPWIN		wm_gcp[CP_GPU_MAX];
+LOCAL T_CPWIN		wm_lcp[CP_LAY_MAX];
+
+/*
+ * Over a window manager's lock, for whoever has to use the stages of
+ * compose.c beside it (the GPU's check at start-up, on scenes of its own).
+ */
+EXPORT void knl_wm_hold( BOOL hold )
+{
 	if ( !wm_ready ) {
-		return E_NOEXS;
+		return;
 	}
-	back = (UB *)ts_disp_buffer();
-	if ( back == NULL ) {
-		return E_NOEXS;
+	if ( hold ) {
+		tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	} else {
+		tk_unl_mtx(wm_mtxid);
 	}
-	ts_disp_hold();
-	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+}
 
-	box.left = 0;  box.top = 0;
-	box.right = (INT)wm_spec.width;  box.bottom = (INT)wm_spec.height;
-	if ( area != NULL ) {
-		if ( area->left > box.left )     box.left = area->left;
-		if ( area->top > box.top )       box.top = area->top;
-		if ( area->right < box.right )   box.right = area->right;
-		if ( area->bottom < box.bottom ) box.bottom = area->bottom;
-		if ( box.right <= box.left || box.bottom <= box.top ) {
-			tk_unl_mtx(wm_mtxid);
-			ts_disp_release();
-			return E_OK;		/* nothing of it is on the screen */
+/* The pointer, kept in the back buffer with what it covers (pointer.c) */
+IMPORT BOOL knl_pt_want( T_DPRECT *r );
+IMPORT BOOL knl_pt_on( T_DPRECT *r );
+IMPORT BOOL knl_pt_fresh( CONST T_DPRECT *want );
+IMPORT void knl_pt_lift( UB *back, UINT pitch, INT sw, INT sh );
+IMPORT void knl_pt_lay( UB *back, UINT pitch, INT sw, INT sh, CONST T_DPRECT *at );
+IMPORT void knl_pt_forget( void );
+IMPORT void knl_pt_under( UW *dst, INT pitch, CONST T_DPRECT *at );
+
+/*
+ * How wide a margin a part of the screen needs round it for what is
+ * spread near it: as far as a spread reaches for each window seen
+ * through and spread that stands within that of it, since what a window
+ * spreads is what the windows under it left, and theirs reaches as far
+ * again. 0 when nothing near is spread or the part is the whole screen.
+ * The same width says how far a change spreads out: a pixel of a window
+ * seen through changes when what lies within it under the window does.
+ */
+LOCAL INT spread_margin( CONST T_DPRECT *box, CONST LOOKNOW *look, UD now )
+{
+	INT	sw = (INT)wm_spec.width, sh = (INT)wm_spec.height;
+	INT	reach, n, margin = 0;
+
+	if ( look->blur <= 0
+	  || ( box->left <= 0 && box->top <= 0 && box->right >= sw && box->bottom >= sh ) ) {
+		return 0;
+	}
+	reach = cp_spread_reach(look->blur);
+	for ( n = seen_through_near(box, look, now, reach); n * reach > margin;
+	      n = seen_through_near(box, look, now, margin) ) {
+		margin = n * reach;
+	}
+	return margin;
+}
+
+/*
+ * A part of the screen whose content changed, with it as much round it
+ * as a window seen through and spread over it shows the change in: a
+ * part built alone then comes out as the whole screen built would.
+ * Called with the lock held.
+ */
+LOCAL void spread_add( PARTS *p, CONST T_DPRECT *r, CONST LOOKNOW *look, UD now )
+{
+	T_DPRECT	g = *r;
+	INT		m = spread_margin(r, look, now);
+
+	g.left -= m;   g.top -= m;
+	g.right += m;  g.bottom += m;
+	parts_add(p, &g);
+}
+
+/*
+ * One part of the screen as it is to be built: what is built and sent,
+ * that with the margin round it a spread needs (built for the spread and
+ * put back as it was), and the GPU when the GPU builds it.
+ */
+typedef struct {
+	T_DPRECT	box;
+	T_DPRECT	abox;
+	CONST T_CPGPU	*gpu;
+} PLAN;
+
+/*
+ * One part of the screen built afresh, from the ground up, with the
+ * outlines of what is carried over it. Called with the lock held, the
+ * screen held and the pointer taken up from it if it lay there.
+ */
+LOCAL void build_part( CONST PLAN *pl, UB *back, CONST LOOKNOW *look, UD now )
+{
+	WMWIN		*w;
+	BOOL		laid, kept = FALSE;
+	T_DPRECT	box = pl->box, abox = pl->abox;
+	T_CPDST		dst;
+	T_CPWIN		cp;
+	UD		t0 = 0, t1;
+	INT		z, x, y, i, gdone = -1, seen, nl;
+	INT		sw = (INT)wm_spec.width, sh = (INT)wm_spec.height;
+	CONST T_CPGPU	*gpu = pl->gpu;
+
+	if ( cp_gpu_get() != NULL ) {
+		(void)ts_get_mono(&t0);
+	}
+	if ( abox.left != box.left || abox.top != box.top
+	  || abox.right != box.right || abox.bottom != box.bottom ) {
+		kept = cp_margin_keep(back, wm_spec.pitch, &abox, &box);
+		if ( !kept ) {
+			abox = box;
 		}
 	}
 
 	/*
-	 * The screen is built from the desk up. Laying the windows over
-	 * whatever the last screen left would mix a see-through window
-	 * with the picture of itself, which is a picture that never
-	 * changes; and the desk has to be somewhere.
+	 * What was built is what has changed. Saying otherwise leaves the
+	 * ground in the back buffer and never on the screen, and what the
+	 * person then sees around the windows is whatever was in the card's
+	 * memory when the machine started.
 	 */
 	{
-		INT	sw = (INT)wm_spec.width;
-		INT	wide = box.right - box.left;
+		T_DISPRECT	all;
 
-		/*
-		 * What was built is what has changed. Saying otherwise
-		 * leaves the ground in the back buffer and never on the
-		 * screen, and what the person then sees around the windows
-		 * is whatever was in the card's memory when the machine
-		 * started.
-		 */
-		{
-			T_DISPRECT	all;
+		all.left = box.left;  all.top = box.top;
+		all.right = box.right;  all.bottom = box.bottom;
+		ts_disp_damage(&all);
+	}
 
-			all.left = box.left;  all.top = box.top;
-			all.right = box.right;  all.bottom = box.bottom;
-			ts_disp_damage(&all);
+	dst.back = back;
+	dst.pitch = wm_spec.pitch;
+	dst.box = abox;
+	dst.rows = sh;
+
+	/* the ground and the windows up to the first that pops up, on the GPU */
+	if ( gpu != NULL && wm_ground != NULL ) {
+		INT	n = 0;
+
+		for ( z = wm_nwin - 1; z >= 0 && n < CP_GPU_MAX; z-- ) {
+			w = win_at_z(z);
+			if ( w == NULL || !w->visible || w->pixels == NULL ) {
+				continue;
+			}
+			if ( ( w->attr & WM_ATTR_POPUP ) != 0 ) {
+				break;			/* the message line goes under it */
+			}
+			if ( lay_test(w, z, look, now, &abox, &wm_gcp[n], FALSE) ) {
+				n++;
+			}
 		}
-		ground_make();
+		gdone = gpu->lay(&dst, wm_ground, (UINT)sw * sizeof(UW), wm_ground_gen, wm_gcp, n);
+	}
+
+	if ( gdone < 0 ) {
+		INT	wide = abox.right - abox.left;
+
 		if ( wm_ground != NULL ) {
-			for ( y = box.top; y < box.bottom; y++ ) {
-				knl_memcpy(back + (UBINT)y * wm_spec.pitch
-					   + (SZ)box.left * sizeof(UW),
-					   wm_ground + (SZ)y * sw + box.left,
-					   (SZ)wide * sizeof(UW));
+			for ( y = abox.top; y < abox.bottom; y++ ) {
+				cp_copy((UW *)( back + (UBINT)y * wm_spec.pitch ) + abox.left,
+					wm_ground + (SZ)y * sw + abox.left, wide);
 			}
 		} else {
 			UW	desk = wm_look(WM_LOOK_DESK);
 
 			/* no room to keep it: the plain desk, laid straight */
-			for ( y = box.top; y < box.bottom; y++ ) {
+			for ( y = abox.top; y < abox.bottom; y++ ) {
 				UW	*p = (UW *)(back + (UBINT)y * wm_spec.pitch);
 
-				for ( x = box.left; x < box.right; x++ ) {
+				for ( x = abox.left; x < abox.right; x++ ) {
 					p[x] = desk;
 				}
 			}
 		}
 	}
 
+	/*
+	 * The windows up to the first that pops up are laid together, each
+	 * where those in front of it leave it to show (cp_lay); the menus
+	 * over the message line one by one
+	 */
 	laid = FALSE;
+	seen = 0;
+	nl = 0;
 	for ( z = wm_nwin - 1; z >= 0; z-- ) {
 		w = win_at_z(z);
-		if ( w == NULL || !w->visible ) {
+		if ( w == NULL || !w->visible || w->pixels == NULL ) {
 			continue;
 		}
 		if ( !laid && ( w->attr & WM_ATTR_POPUP ) != 0 ) {
 			/* the message line over the windows, under the menus */
-			knl_msg_lay(back, wm_spec.pitch, &box);
+			cp_lay(&dst, wm_lcp, nl);
+			nl = 0;
+			knl_msg_lay(back, wm_spec.pitch, &abox);
 			laid = TRUE;
 		}
-		vis = w->outer;
-		if ( !rect_cut(&vis, &box) ) {
-			continue;		/* no part of it is being built */
-		}
-
-		/* anything in front that covers the whole of it */
-		front = NULL;
-		for ( fz = z - 1; fz >= 0; fz-- ) {
-			WMWIN	*f = win_at_z(fz);
-
-			if ( f != NULL && f->visible
-			  && ( f->attr & WM_ATTR_POPUP ) == 0
-			  && rect_covers(&f->outer, &vis) ) {
-				front = f;
-				break;
-			}
-		}
-		if ( front != NULL ) {
-			wm_count.windows_skipped++;
+		if ( !lay_test(w, z, look, now, &abox, &cp, TRUE) ) {
 			continue;
 		}
-
-		/*
-		 * The shadow first, so that the window covers the part of
-		 * it that falls under itself. It darkens what is already
-		 * there, which is the windows below and the desk.
-		 */
-		if ( wm_num(WM_SET_SHADOW, 0) > 0 ) {
-			T_DPRECT	sh = w->outer;
-			INT		grow = wm_num(WM_SET_SHADOW_GROW, 2);
-
-			sh.left   += wm_num(WM_SET_SHADOW_DX, 4) - grow;
-			sh.right  += wm_num(WM_SET_SHADOW_DX, 4) + grow;
-			sh.top    += wm_num(WM_SET_SHADOW_DY, 4) - grow;
-			sh.bottom += wm_num(WM_SET_SHADOW_DY, 4) + grow;
-			{
-				T_DPRECT	screen;
-
-				screen.left = 0;  screen.top = 0;
-				screen.right = (INT)wm_spec.width;
-				screen.bottom = (INT)wm_spec.height;
-				if ( rect_cut(&sh, &screen) ) {
-					for ( y = sh.top; y < sh.bottom; y++ ) {
-						UW *d = (UW *)(back
-							+ (UBINT)y * wm_spec.pitch
-							+ (UBINT)sh.left * 4);
-
-						for ( x = sh.left; x < sh.right;
-						      x++, d++ ) {
-							*d = mix(*d, 0,
-								 (UINT)wm_num(WM_SET_SHADOW, 0));
-						}
-					}
-				}
-			}
-		}
-
-		keyed = (BOOL)( ( w->attr & WM_ATTR_POPUP ) != 0 );
-		for ( y = vis.top; y < vis.bottom; y++ ) {
-			UW	*src = win_pixel(w, vis.left, y);
-			UW	*dst = (UW *)(back + (UBINT)y * wm_spec.pitch
-					      + (UBINT)vis.left * 4);
-			BOOL	in_work = ( y >= w->work.top && y < w->work.bottom );
-			CONST INT *sp = NULL;
-			INT	ns = 0;
-
-			if ( w->shape != NULL ) {
-				ns = dp_rgn_row(w->shape, y - w->outer.top, &sp);
-				if ( ns == 0 ) {
-					continue;	/* this row is past the corner */
-				}
-			}
-
-			for ( x = vis.left; x < vis.right; x++, src++, dst++ ) {
-				UW	c = *src;
-
-				if ( ns > 0 && !in_span(sp, ns,
-							x - w->outer.left) ) {
-					continue;	/* outside the shape */
-				}
-
-				/*
-				 * The work area is laid down as it is. Only
-				 * the strip of frame around it is mixed with
-				 * what is behind, which is what keeps this
-				 * affordable: the cost is the strip, not the
-				 * screen.
-				 */
-				if ( in_work && x >= w->work.left
-				  && x < w->work.right ) {
-					if ( keyed && ( c >> 24 ) == 0xFF ) {
-						continue;	/* see-through */
-					}
-					*dst = c;
-					continue;
-				}
-				if ( w->tint_str > 0 ) {
-					c = mix(c, w->tint, w->tint_str);
-				}
-				*dst = ( w->opacity >= 255 )
-				       ? c : mix(*dst, c, w->opacity);
-			}
-		}
 		wm_count.windows_drawn++;
+		if ( seen++ < gdone ) {
+			continue;			/* the GPU laid it */
+		}
+		if ( laid ) {
+			cp_window(&dst, &cp);
+			continue;
+		}
+		if ( nl >= CP_LAY_MAX ) {
+			cp_lay(&dst, wm_lcp, nl);
+			nl = 0;
+		}
+		wm_lcp[nl++] = cp;
+	}
+	cp_lay(&dst, wm_lcp, nl);
 
-		{
-			T_DISPRECT	d;
-
-			d.left = vis.left;  d.top = vis.top;
-			d.right = vis.right;  d.bottom = vis.bottom;
-			ts_disp_damage(&d);
+	/* the windows that have closed, on their way out over the rest */
+	for ( i = 0; i < GHOST_MAX; i++ ) {
+		if ( wm_ghost[i].used ) {
+			ghost_cp(&wm_ghost[i], look, now, &cp);
+			cp_moving(&dst, &cp);
 		}
 	}
 	if ( !laid ) {
-		knl_msg_lay(back, wm_spec.pitch, &box);
+		knl_msg_lay(back, wm_spec.pitch, &abox);
 	}
+	if ( kept ) {
+		cp_margin_put(back, wm_spec.pitch, &abox, &box);
+	}
+
 	/*
 	 * What is being carried, over every window: the outline of each
 	 * thing, drawn by turning each pixel on its edge to its opposite.
 	 * It belongs to no window -- it goes wherever the hand takes it,
 	 * across windows and the ground between them -- so it is laid on
 	 * the screen, like the pointer, and not into any window's pixels.
+	 * Only inside the part, which was built afresh: a pixel turned
+	 * there is turned once whatever other part also holds it.
 	 */
 	{
 		INT	k;
@@ -2818,73 +3879,909 @@ EXPORT ER wm_composite_at( CONST T_DPRECT *area )
 		}
 	}
 
-	/*
-	 * The pointer goes on last, over the windows. Nothing under it is
-	 * kept: the next screen is built from the ground up, so what it
-	 * covered is drawn again anyway.
-	 *
-	 * The system's drawing environment is pointed back at the screen
-	 * first. It spends the rest of its life aimed at one window's
-	 * pixels or another's, and the pointer belongs to no window.
-	 */
-	if ( wm_sys_gid >= 0 ) {
-		T_DPRECT	screen;
+	/* the picture over every window, after the outlines, as it was given */
+	if ( wm_loupe_on ) {
+		T_DPRECT	e = wm_loupe_at;
+		INT		lw = wm_loupe_at.right - wm_loupe_at.left;
 
-		screen.left = 0;  screen.top = 0;
-		screen.right = (INT)wm_spec.width;
-		screen.bottom = (INT)wm_spec.height;
-		sys_lock();
-		dp_set_target(wm_sys_gid, NULL, wm_spec.pitch, 0, 0);
-		dp_set_origin(wm_sys_gid, 0, 0);
-		dp_set_frame(wm_sys_gid, &screen);
-		dp_set_visible(wm_sys_gid, &screen);
-		wm_draw_pointer(wm_sys_gid);
-		sys_unlock();
+		if ( rect_cut(&e, &box) ) {
+			for ( y = e.top; y < e.bottom; y++ ) {
+				UW	*p = (UW *)(back + (UBINT)y * wm_spec.pitch);
+				CONST UW *s = wm_loupe + (UBINT)( y - wm_loupe_at.top ) * lw - wm_loupe_at.left;
+
+				for ( x = e.left; x < e.right; x++ ) {
+					p[x] = s[x];
+				}
+			}
+		}
 	}
 
-	wm_count.composites++;
+	wm_count.parts++;
+	wm_count.pixels += part_area(&abox);
+	if ( cp_gpu_get() != NULL ) {
+		(void)ts_get_mono(&t1);
+		cp_gpu_get()->note(gdone >= 0, &box, ( t1 - t0 ) / 1000);
+	}
+}
+
+/*
+ * The counts written to the console now and then while the screen is
+ * being built, as so much a second: what was built, what was sent, and
+ * how often the pointer moved with nothing built for it.
+ */
+#define WM_STATS_MS	60000
+
+LOCAL UD		wm_st_t0 = 0;
+LOCAL T_WMSTAT		wm_st_was;
+LOCAL T_DISPSTAT	wm_st_dwas;
+
+/*
+ * Whether it is time the counts were written, and what they came to
+ * since they last were: taken with the lock held, written after it is
+ * let go of, since writing to the console is slow.
+ */
+typedef struct {
+	UD		secs;
+	T_WMSTAT	w;
+	T_DISPSTAT	d;
+	UD		hidden;		/* pixels of windows left out under others */
+} WMSTATS;
+
+LOCAL UD		wm_st_hid;
+
+LOCAL BOOL stats_take( UD now, WMSTATS *o )
+{
+	T_DISPSTAT	ds;
+
+	if ( wm_st_t0 == 0 ) {
+		wm_st_t0 = now;
+		wm_st_was = wm_count;
+		wm_st_hid = cp_hidden();
+		(void)ts_disp_stat(&wm_st_dwas);
+		return FALSE;
+	}
+	if ( now - wm_st_t0 < WM_STATS_MS ) {
+		return FALSE;
+	}
+	(void)ts_disp_stat(&ds);
+	o->secs = ( now - wm_st_t0 ) / 1000;
+	o->w.composites = wm_count.composites - wm_st_was.composites;
+	o->w.parts = wm_count.parts - wm_st_was.parts;
+	o->w.pixels = wm_count.pixels - wm_st_was.pixels;
+	o->w.ptr_moves = wm_count.ptr_moves - wm_st_was.ptr_moves;
+	o->w.ptr_built = wm_count.ptr_built - wm_st_was.ptr_built;
+	o->d.sends = ds.sends - wm_st_dwas.sends;
+	o->d.rects = ds.rects - wm_st_dwas.rects;
+	o->d.pixels = ds.pixels - wm_st_dwas.pixels;
+	o->d.send_us = ds.send_us - wm_st_dwas.send_us;
+	o->d.flips = ds.flips - wm_st_dwas.flips;
+	o->d.waits = ds.waits - wm_st_dwas.waits;
+	o->d.wait_us = ds.wait_us - wm_st_dwas.wait_us;
+	o->hidden = cp_hidden() - wm_st_hid;
+	wm_st_t0 = now;
+	wm_st_was = wm_count;
+	wm_st_hid = cp_hidden();
+	wm_st_dwas = ds;
+	return ( o->w.composites != 0 || o->w.ptr_moves != 0 );
+}
+
+LOCAL void stats_print( CONST WMSTATS *o )
+{
+	UD	s = ( o->secs != 0 ) ? o->secs : 1;
+	UD	ns = ( o->d.sends != 0 ) ? o->d.sends : 1;
+	UD	nw = ( o->d.waits != 0 ) ? o->d.waits : 1;
+
+	tm_printf((UB *)"wm: in %ld s: %ld builds (%ld parts), %ld kpx built, %ld kpx/s, "
+		  "%ld kpx of windows hidden and left out; "
+		  "%ld rects sent, %ld kpx, %ld kpx/s; pointer moved %ld times, %ld with something built; "
+		  "%ld sends of %ld us each, %ld flips, %ld waited for a flip, %ld us each\n",
+		  o->secs, o->w.composites, o->w.parts, o->w.pixels / 1000, o->w.pixels / 1000 / s,
+		  o->hidden / 1000,
+		  o->d.rects, o->d.pixels / 1000, o->d.pixels / 1000 / s, o->w.ptr_moves, o->w.ptr_built,
+		  o->d.sends, o->d.send_us / ns, o->d.flips, o->d.waits, o->d.wait_us / nw);
+}
+
+/*
+ * How the builds and the flips kept to the refresh (T_WMFRAMES,
+ * T_DISPFRAME), written every WM_FRAMES_MS while the screen is built at
+ * least WM_FRAMES_MIN times a second: something moving, or a program
+ * putting frame after frame. Two lines, "wm: frames:" and "disp:
+ * frames:", of what the counts came to in that time (design 10.4.5).
+ */
+#define WM_FRAMES_MS	10000
+#define WM_FRAMES_MIN	20
+#define WM_FRAME_US	16667		/* a refresh at 60 Hz: the least time between two builds where the sends do not keep it */
+
+LOCAL T_WMFRAMES	wm_fr;
+LOCAL UD		wm_fr_t0 = 0;
+LOCAL T_WMFRAMES	wm_fr_was;
+LOCAL T_DISPFRAME	wm_fr_dwas;
+
+typedef struct {
+	UD		ms;
+	T_WMFRAMES	w;
+	T_DISPFRAME	d;
+} WMFRAMES;
+
+EXPORT ER wm_frames( T_WMFRAMES *st )
+{
+	if ( st == NULL ) {
+		return E_PAR;
+	}
+	*st = wm_fr;
+	return E_OK;
+}
+
+/* Whether it is time the counts were written, and what they came to since */
+LOCAL BOOL frames_take( UD now, WMFRAMES *o )
+{
+	T_DISPFRAME	ds;
+	INT		i;
+
+	knl_memset(&ds, 0, sizeof(ds));
+	(void)ts_disp_frames(&ds);
+	if ( wm_fr_t0 == 0 || now < wm_fr_t0 ) {
+		wm_fr_t0 = now;
+		wm_fr_was = wm_fr;
+		wm_fr_dwas = ds;
+		return FALSE;
+	}
+	if ( now - wm_fr_t0 < WM_FRAMES_MS ) {
+		return FALSE;
+	}
+	o->ms = now - wm_fr_t0;
+	o->w.builds = wm_fr.builds - wm_fr_was.builds;
+	o->w.apart = wm_fr.apart - wm_fr_was.apart;
+	o->w.apart_us = wm_fr.apart_us - wm_fr_was.apart_us;
+	o->w.late = wm_fr.late - wm_fr_was.late;
+	o->w.lay_us = wm_fr.lay_us - wm_fr_was.lay_us;
+	o->w.send_us = wm_fr.send_us - wm_fr_was.send_us;
+	o->w.paced_us = wm_fr.paced_us - wm_fr_was.paced_us;
+	o->w.waits = wm_fr.waits - wm_fr_was.waits;
+	o->w.wait_us = wm_fr.wait_us - wm_fr_was.wait_us;
+	/* the most of each since it was last written */
+	o->w.apart_max = wm_fr.apart_max;
+	o->w.lay_max = wm_fr.lay_max;
+	o->w.send_max = wm_fr.send_max;
+	o->w.wait_max = wm_fr.wait_max;
+	wm_fr.apart_max = wm_fr.lay_max = wm_fr.send_max = wm_fr.wait_max = 0;
+	o->d = ds;
+	o->d.flips = ds.flips - wm_fr_dwas.flips;
+	for ( i = 0; i < 5; i++ ) o->d.apart[i] = ds.apart[i] - wm_fr_dwas.apart[i];
+	for ( i = 0; i < 4; i++ ) o->d.phase[i] = ds.phase[i] - wm_fr_dwas.phase[i];
+	o->d.due = ds.due - wm_fr_dwas.due;
+	o->d.taken = ds.taken - wm_fr_dwas.taken;
+	o->d.waited = ds.waited - wm_fr_dwas.waited;
+	o->d.spin_us = ds.spin_us - wm_fr_dwas.spin_us;
+	o->d.sleep_us = ds.sleep_us - wm_fr_dwas.sleep_us;
+	o->d.off = ds.off - wm_fr_dwas.off;
+	wm_fr_t0 = now;
+	wm_fr_was = wm_fr;
+	wm_fr_dwas = ds;
+	return ( o->w.builds * 1000 >= (UD)WM_FRAMES_MIN * o->ms );
+}
+
+/* A build's laying and sending counted, us */
+LOCAL void frames_lay( UD lay, UD send )
+{
+	wm_fr.lay_us += lay;
+	if ( lay > wm_fr.lay_max ) wm_fr.lay_max = lay;
+	wm_fr.send_us += send;
+	if ( send > wm_fr.send_max ) wm_fr.send_max = send;
+}
+
+LOCAL void frames_print( CONST WMFRAMES *o )
+{
+	UD	ms = ( o->ms != 0 ) ? o->ms : 1;
+	UD	nb = ( o->w.builds != 0 ) ? o->w.builds : 1;
+	UD	na = ( o->w.apart != 0 ) ? o->w.apart : 1;
+	UD	nw = ( o->w.waits != 0 ) ? o->w.waits : 1;
+	UD	nd = ( o->d.waited != 0 ) ? o->d.waited : 1;
+
+	tm_printf((UB *)"wm: frames: in %ld ms %ld builds, %ld.%ld a second; %ld us apart (most %ld), "
+		  "%ld over a refresh and a half; laying %ld us (most %ld), sending %ld us (most %ld), "
+		  "asleep for the pace %ld us, a build each; %ld waits for a build, %ld us (most %ld)\n",
+		  o->ms, o->w.builds, o->w.builds * 1000 / ms, o->w.builds * 10000 / ms % 10,
+		  o->w.apart_us / na, o->w.apart_max, o->w.late,
+		  o->w.lay_us / nb, o->w.lay_max, o->w.send_us / nb, o->w.send_max,
+		  o->w.paced_us / nb, o->w.waits, o->w.wait_us / nw, o->w.wait_max);
+	if ( o->d.flips == 0 ) {
+		return;				/* one page: nothing of flips to say */
+	}
+	tm_printf((UB *)"disp: frames: refresh %ld us%s; %ld flips, refreshes apart 0:%ld 1:%ld 2:%ld 3:%ld 4+:%ld; "
+		  "quarter after the blank %ld/%ld/%ld/%ld; %ld sends during a flip: %ld taken by the clock, "
+		  "%ld waited (watching %ld us, asleep %ld us each), %ld blanks off the clock\n",
+		  ( o->d.frame_ns != 0 ) ? o->d.frame_ns / 1000 : (UD)WM_FRAME_US,
+		  ( o->d.frame_ns != 0 ) ? "" : " (taken to be)", o->d.flips,
+		  o->d.apart[0], o->d.apart[1], o->d.apart[2], o->d.apart[3], o->d.apart[4],
+		  o->d.phase[0], o->d.phase[1], o->d.phase[2], o->d.phase[3],
+		  o->d.due, o->d.taken, o->d.waited, o->d.spin_us / nd, o->d.sleep_us / nd, o->d.off);
+}
+
+/*
+ * How far in from each edge of each corner the lines run parallel to
+ * it, for bending them round the corners: the whole corner where the
+ * edge is plain -- the frame's strip and whatever is drawn inside it
+ * along the edge, such as the thick border a panel draws round its
+ * work area, which the cut of the corner would otherwise break -- but
+ * where a scroll bar fills the strip or the title band lies along the
+ * top only the outline and the line inside it (the bar and the band are
+ * not lines, and the band carries the pictogram).
+ */
+LOCAL void frame_lines( CONST WMWIN *w, T_CPLINES *ln )
+{
+	INT	l = CP_ROUND_MAX, r = CP_ROUND_MAX, t = CP_ROUND_MAX, b = CP_ROUND_MAX;
+
+	if ( ( w->attr & WM_ATTR_LBAR ) != 0 ) l = 2;
+	if ( ( w->attr & WM_ATTR_RBAR ) != 0 ) r = 2;
+	if ( ( w->attr & WM_ATTR_TITLE ) != 0 ) t = 2;
+	if ( ( w->attr & WM_ATTR_BBAR ) != 0 ) b = 2;
+	ln->side[0] = l;  ln->end[0] = t;
+	ln->side[1] = r;  ln->end[1] = t;
+	ln->side[2] = l;  ln->end[2] = b;
+	ln->side[3] = r;  ln->end[3] = b;
+}
+
+/*
+ * The parts of the screen asked for built afresh, each by itself, and
+ * the pointer brought to where it is now.
+ *
+ * Each part is laid the same way -- the ground, then the windows from
+ * the back forward -- because a screen built two different ways is two
+ * different screens. Each window goes down in the stages of compose.c:
+ * its shadow, what shows through it spread, its pixels mixed over that
+ * and its frame washed. A window that some single window in front of
+ * it covers with a solid part, its shadow and all, is not laid down at
+ * all, which is what the order is for; of the rest, each is laid only
+ * where the windows in front of it do not lay their pixels solid over
+ * it (compose.c cp_lay).
+ *
+ * Where a GPU composites (compose.h T_CPGPU), each part is put to it on
+ * its own: one large enough to be worth it is widened to the GPU's step
+ * and the GPU lays the ground and the windows up to the first that pops
+ * up, the stages here the rest over them; a small one is built here.
+ * A spread needs what lies round what it spreads, so when a window seen
+ * through stands near a part, a margin as wide as the spread reaches is
+ * built round it as well, from the ground up like the rest, and what
+ * the back buffer held there is put back afterwards.
+ *
+ * The pointer lies in the back buffer with what it covers kept
+ * (pointer.c). It is taken up first when a part to be built (with its
+ * margin) touches it, or when it is to be laid elsewhere, in another
+ * shape or not at all; it is laid again last, over the outlines of
+ * what is carried. With no part asked for this moves the pointer and
+ * nothing else: two small squares sent and no window laid.
+ */
+LOCAL ER compose_parts( CONST PARTS *ask )
+{
+	PLAN		plan[WM_PARTS];
+	T_DPRECT	box, was, want;
+	LOOKNOW		look;
+	UD		now;
+	UB		*back;
+	CONST T_CPGPU	*gpu;
+	BOOL		on, wanted, lift, moved, print, fprint;
+	INT		i, z, np = 0, sw, sh, margin;
+	WMSTATS		st;
+	WMFRAMES	fs;
+	UD		t0, t1, t2;
+
+	if ( !wm_ready ) {
+		return E_NOEXS;
+	}
+	back = (UB *)ts_disp_buffer();
+	if ( back == NULL ) {
+		return E_NOEXS;
+	}
+	(void)ts_get_mono(&t0);
+	ts_disp_hold();
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	sw = (INT)wm_spec.width;
+	sh = (INT)wm_spec.height;
+	look_now(&look);
+	now = now_ms();
+
+	gpu = cp_gpu_get();
+	if ( gpu != NULL && wm_num(LK_GPU, 1) == 0 ) {
+		gpu = NULL;
+	}
+	for ( i = 0; i < ask->n; i++ ) {
+		PLAN	*pl = &plan[np];
+
+		box = ask->r[i];
+		if ( box.left < 0 )    box.left = 0;
+		if ( box.top < 0 )     box.top = 0;
+		if ( box.right > sw )  box.right = sw;
+		if ( box.bottom > sh ) box.bottom = sh;
+		if ( box.right <= box.left || box.bottom <= box.top ) {
+			continue;			/* nothing of it is on the screen */
+		}
+		np++;
+
+		/*
+		 * What the GPU builds starts on a whole number of its steps,
+		 * so a part it builds is widened to that: a part built wider
+		 * is the same screen, and goes to the screen with the rest.
+		 */
+		pl->gpu = ( gpu != NULL && gpu->wants(&box, look_fx(&look)) ) ? gpu : NULL;
+		if ( pl->gpu != NULL && pl->gpu->align > 1 ) {
+			INT	a = (INT)pl->gpu->align;
+
+			box.left -= box.left % a;
+			box.right += ( a - box.right % a ) % a;
+			if ( box.right > sw ) box.right = sw;
+		}
+		pl->box = box;
+		pl->abox = box;
+		margin = spread_margin(&box, &look, now);
+		if ( margin > 0 ) {
+			pl->abox.left -= margin;    pl->abox.top -= margin;
+			pl->abox.right += margin;   pl->abox.bottom += margin;
+			if ( pl->abox.left < 0 )    pl->abox.left = 0;
+			if ( pl->abox.top < 0 )     pl->abox.top = 0;
+			if ( pl->abox.right > sw )  pl->abox.right = sw;
+			if ( pl->abox.bottom > sh ) pl->abox.bottom = sh;
+			if ( pl->gpu != NULL && pl->gpu->align > 1 ) {
+				pl->abox.left -= pl->abox.left % (INT)pl->gpu->align;
+			}
+		}
+	}
+
+	/* the pointer: where it lies, where it is to lie, and whether it is in the way */
+	on = knl_pt_on(&was);
+	wanted = knl_pt_want(&want);
+	lift = ( on && !( wanted && knl_pt_fresh(&want) ) );
+	for ( i = 0; on && !lift && i < np; i++ ) {
+		lift = rect_meets(&was, &plan[i].abox);
+	}
+	if ( np == 0 && !lift && ( on || !wanted ) ) {
+		tk_unl_mtx(wm_mtxid);
+		ts_disp_release();
+		return E_OK;			/* nothing changed at all */
+	}
+	moved = ( wanted && ( !on || was.left != want.left || was.top != want.top
+			      || was.right != want.right ) );
+	if ( lift ) {
+		T_DISPRECT	d;
+
+		knl_pt_lift(back, wm_spec.pitch, sw, sh);
+		d.left = was.left;  d.top = was.top;
+		d.right = was.right;  d.bottom = was.bottom;
+		ts_disp_damage(&d);
+	}
+
+	if ( np > 0 ) {
+		ground_make();
+
+		/*
+		 * The frames' lines bent round the corners, in the windows' own
+		 * pixels, before anything reads them: what a program drew into
+		 * a corner since is put right, and the GPU and the processor
+		 * read the same pixels
+		 */
+		if ( look.round > 0 ) {
+			for ( z = 0; z < wm_nwin; z++ ) {
+				WMWIN	*w = win_at_z(z);
+
+				if ( w == NULL || !w->visible || w->pixels == NULL || w->own != NULL
+				  || ( w->attr & ( WM_ATTR_FRAME | WM_ATTR_TITLE ) ) == 0 ) {
+					continue;
+				}
+				for ( i = 0; i < np; i++ ) {
+					if ( rect_meets(&w->outer, &plan[i].abox) ) {
+						T_CPLINES	ln;
+
+						frame_lines(w, &ln);
+						cp_corner_lines(w->pixels, wm_spec.pitch, &w->outer, look.round, &ln);
+						break;
+					}
+				}
+			}
+		}
+		for ( i = 0; i < np; i++ ) {
+			build_part(&plan[i], back, &look, now);
+		}
+		wm_count.composites++;
+	}
+
+	/* the pointer goes on last, over everything */
+	if ( wanted && !knl_pt_on(NULL) ) {
+		T_DISPRECT	d;
+
+		knl_pt_lay(back, wm_spec.pitch, sw, sh, &want);
+		d.left = want.left;  d.top = want.top;
+		d.right = want.right;  d.bottom = want.bottom;
+		ts_disp_damage(&d);
+	}
+	if ( moved ) {
+		wm_count.ptr_moves++;
+		if ( np > 0 ) {
+			wm_count.ptr_built++;
+		}
+	}
+	print = stats_take(now, &st);
+	fprint = frames_take(now, &fs);
 	tk_unl_mtx(wm_mtxid);
+	(void)ts_get_mono(&t1);
 	ts_disp_release();
+	(void)ts_get_mono(&t2);
+	frames_lay(( t1 - t0 ) / 1000, ( t2 - t1 ) / 1000);
+	if ( print ) {
+		stats_print(&st);
+	}
+	if ( fprint ) {
+		frames_print(&fs);
+	}
 
 	return E_OK;
 }
 
-EXPORT ER wm_composite( void )
-{
-	wm_gone_any = FALSE;		/* all of it is built */
+/* ---------------------------------------------------------------- the compositor */
 
-	return wm_composite_at(NULL);
+/*
+ * The screen is built by one task of its own, the compositor, and by no
+ * one else. Whoever changes something says so -- a part of the screen
+ * to be built (wm_composite_at), the whole of it (wm_composite), or
+ * whatever has changed (wm_update) -- and the compositor builds what has
+ * been asked for since it last built, all of it at once, at most once a
+ * refresh of the screen. Ten changes made in the time the screen takes
+ * to show one are built once. Where the screen flips and says when a
+ * flip was taken, the send of a build waits for the flip before, and
+ * that keeps the pace in step with the screen; elsewhere the builds keep
+ * to places WM_FRAME_US apart. A build begins at once when none has
+ * been made for a refresh; the asks that come while one is being made,
+ * or before a refresh is over, wait for the next.
+ *
+ * What has changed is gathered when the build begins, not when it is
+ * asked for: the damage the windows were given (wm_damage), the places
+ * windows left or changed (wm_gone), and the rectangles drawn into
+ * windows' pixels through their environments (dp_watch), each with as
+ * much round it as a spread over it shows of the change. What a task
+ * draws is kept apart, its own, until that task asks for a build: a
+ * build another asks for, or the pointer moving, does not show a window
+ * half drawn -- its page cleared and its letters not yet on it.
+ *
+ * wm_update, wm_composite and wm_composite_at return once what they asked
+ * for is on the screen: what a caller draws next cannot be caught half
+ * drawn, and a test reads the back buffer as the call left it. wm_post
+ * asks for whatever has changed and returns at once, for one that does
+ * not draw again straight away (a window coming in step by step);
+ * wm_flush waits for everything asked so far. The pointer is laid at
+ * each build where the input says it is; a move of it only wakes
+ * the compositor (wm_pointer_moved, and the input layer itself through
+ * knl_wm_pointer_hint), so the pointer follows the hand whatever the
+ * program that moves it is doing.
+ *
+ * The compositor owns the FP/SIMD registers (TA_FPU), so the stages use
+ * the vector unit there (compose_simd.c). Its priority is below the
+ * input and the GPU, which it waits for, and above every program.
+ */
+#define WM_CP_PRI	10		/* below the input (8) and the GPU (9), above the programs */
+#define WM_CP_STACK	( 64 * 1024 )
+#define WM_WAITERS	16		/* callers waiting at once for a build, each with a semaphore */
+
+#define ASK_UPD		0x01		/* whatever has changed */
+#define ASK_ALL		0x02		/* the whole screen */
+
+LOCAL PARTS	wm_ask;			/* the parts asked for, not yet built */
+LOCAL UINT	wm_ask_what = 0;	/* and ASK_* */
+LOCAL UW	wm_ask_seq = 0;		/* asks made; under the lock */
+LOCAL UW	wm_built_seq = 0;	/* of those, built */
+LOCAL ID	wm_cp_tsk = 0;
+LOCAL UD	wm_cp_due = 0;		/* the earliest the next build may begin, ns */
+LOCAL UD	wm_cp_began = 0;	/* when the last build began, ns */
+LOCAL UW	wm_ptr_hint = 0;	/* the pointer moved since the compositor last looked */
+
+/*
+ * What was drawn into windows' pixels, each task's apart (a task with no
+ * place of its own shares the last), under a lock of its own taken last
+ * of all; and what the tasks that asked had drawn, to be built.
+ */
+#define WM_DRAWERS	16
+
+typedef struct {
+	ID	tid;			/* 0: free */
+	PARTS	p;
+} DRAWN;
+
+LOCAL DRAWN	wm_drawn[WM_DRAWERS];
+LOCAL PARTS	wm_drawn_any;
+LOCAL ID	wm_touch_mtx = 0;
+LOCAL PARTS	wm_ask_chg;		/* drawn and asked for; under the lock */
+
+typedef struct {
+	BOOL	used;
+	BOOL	told;
+	UW	seq;			/* waiting for this ask to be built */
+	ID	sem;
+} WMWAIT;
+
+LOCAL WMWAIT	wm_wait[WM_WAITERS];
+
+LOCAL BOOL seq_reached( UW done, UW seq )
+{
+	return (BOOL)( (INT)( done - seq ) >= 0 );
 }
 
-/* Round a set of rectangles, into what is given; FALSE for none */
-LOCAL BOOL drag_bound( CONST T_DPRECT *r, INT n, T_DPRECT *out )
+/*
+ * A rectangle drawn into a window's pixels (dp_watch). One that lies
+ * inside one kept already, which is most of them -- the letters of a
+ * line, the parts of a frame -- changes nothing.
+ */
+LOCAL void touched( CONST T_DPRECT *r )
 {
+	PARTS	*p = &wm_drawn_any;
+	ID	tid = tk_get_tid();
+	INT	i, k, spare = -1;
+
+	if ( wm_touch_mtx <= 0 || r->right <= r->left || r->bottom <= r->top ) {
+		return;
+	}
+	tk_loc_mtx(wm_touch_mtx, TMO_FEVR);
+	for ( k = 0; k < WM_DRAWERS; k++ ) {
+		if ( wm_drawn[k].tid == tid ) {
+			break;
+		}
+		if ( wm_drawn[k].tid == 0 && spare < 0 ) {
+			spare = k;
+		}
+	}
+	if ( k < WM_DRAWERS ) {
+		p = &wm_drawn[k].p;
+	} else if ( spare >= 0 ) {
+		wm_drawn[spare].tid = tid;
+		wm_drawn[spare].p.n = 0;
+		p = &wm_drawn[spare].p;
+	}
+	for ( i = p->n - 1; i >= 0; i-- ) {
+		if ( rect_covers(&p->r[i], r) ) {
+			break;
+		}
+	}
+	if ( i < 0 ) {
+		parts_add(p, r);
+	}
+	tk_unl_mtx(wm_touch_mtx);
+}
+
+/*
+ * What the task asking has drawn, and what tasks with no place of their
+ * own have, given over to be built. Called with the lock held.
+ */
+LOCAL void drawn_give( void )
+{
+	ID	tid = tk_get_tid();
+	INT	i, k;
+
+	if ( wm_touch_mtx <= 0 ) {
+		return;
+	}
+	tk_loc_mtx(wm_touch_mtx, TMO_FEVR);
+	for ( k = 0; k < WM_DRAWERS; k++ ) {
+		if ( wm_drawn[k].tid == tid ) {
+			for ( i = 0; i < wm_drawn[k].p.n; i++ ) {
+				parts_add(&wm_ask_chg, &wm_drawn[k].p.r[i]);
+			}
+			wm_drawn[k].p.n = 0;
+			wm_drawn[k].tid = 0;
+		}
+	}
+	for ( i = 0; i < wm_drawn_any.n; i++ ) {
+		parts_add(&wm_ask_chg, &wm_drawn_any.r[i]);
+	}
+	wm_drawn_any.n = 0;
+	tk_unl_mtx(wm_touch_mtx);
+}
+
+/*
+ * What is to be built now, taken from what was asked: the number of the
+ * last ask it answers. Called with the lock held.
+ */
+LOCAL UW take_asks( PARTS *p )
+{
+	LOOKNOW		look;
+	T_DPRECT	r;
+	UD		now;
+	UINT		what = wm_ask_what;
+	INT		i;
+
+	p->n = 0;
+	look_now(&look);
+	now = now_ms();
+	if ( ( what & ASK_ALL ) != 0
+	  || ( wm_ask_seq != wm_built_seq && !wm_pointer_last(NULL, NULL, NULL) ) ) {
+		/* all of it (the pointer never laid: everything is laid) */
+		r.left = 0;  r.top = 0;
+		r.right = (INT)wm_spec.width;
+		r.bottom = (INT)wm_spec.height;
+		parts_add(p, &r);
+		wm_gone.n = 0;
+	} else {
+		for ( i = 0; i < wm_ask.n; i++ ) {
+			parts_add(p, &wm_ask.r[i]);
+		}
+	}
+	if ( ( what & ASK_UPD ) != 0 ) {
+		for ( i = 0; i < WM_MAX_WIN; i++ ) {
+			WMWIN	*w = &wm_win[i];
+
+			if ( !w->used || !w->dirty ) {
+				continue;
+			}
+			w->dirty = FALSE;
+			if ( !w->visible ) {
+				continue;
+			}
+			r.left   = w->work.left + w->damage.left;
+			r.top    = w->work.top + w->damage.top;
+			r.right  = w->work.left + w->damage.right;
+			r.bottom = w->work.top + w->damage.bottom;
+			spread_add(p, &r, &look, now);
+		}
+		for ( i = 0; i < wm_gone.n; i++ ) {
+			spread_add(p, &wm_gone.r[i], &look, now);
+		}
+		wm_gone.n = 0;
+	}
+
+	/* what the tasks that asked had drawn into the windows */
+	for ( i = 0; i < wm_ask_chg.n; i++ ) {
+		spread_add(p, &wm_ask_chg.r[i], &look, now);
+	}
+
+	wm_ask_chg.n = 0;
+	wm_ask.n = 0;
+	wm_ask_what = 0;
+	return wm_ask_seq;
+}
+
+/* One build of what was asked, and those who waited for it told */
+LOCAL void build_asked( void )
+{
+	PARTS	p;
+	UW	seq;
+	INT	i;
+	UD	t, d, frame;
+
+	/* how far from the one before it began */
+	(void)ts_get_mono(&t);
+	wm_fr.builds++;
+	if ( wm_cp_began != 0 && t > wm_cp_began && t - wm_cp_began < (UD)WM_APART_MS * 1000000 ) {
+		d = ( t - wm_cp_began ) / 1000;
+		frame = ts_disp_paced();
+		if ( frame == 0 ) frame = WM_FRAME_US;
+		wm_fr.apart++;
+		wm_fr.apart_us += d;
+		if ( d > wm_fr.apart_max ) wm_fr.apart_max = d;
+		if ( d * 2 > frame * 3 ) wm_fr.late++;
+	}
+	wm_cp_began = t;
+
+	(void)__atomic_exchange_n(&wm_ptr_hint, 0, __ATOMIC_ACQ_REL);
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	seq = take_asks(&p);
+	tk_unl_mtx(wm_mtxid);
+
+	(void)compose_parts(&p);
+
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	if ( seq_reached(seq, wm_built_seq) ) {
+		wm_built_seq = seq;
+	}
+	for ( i = 0; i < WM_WAITERS; i++ ) {
+		WMWAIT	*k = &wm_wait[i];
+
+		if ( k->used && !k->told && seq_reached(wm_built_seq, k->seq) ) {
+			k->told = TRUE;
+			(void)tk_sig_sem(k->sem, 1);
+		}
+	}
+	tk_unl_mtx(wm_mtxid);
+}
+
+LOCAL void cp_task( INT stacd, void *exinf )
+{
+	UD	t, t2, gap;
+	BOOL	more;
+
+	(void)stacd;
+	(void)exinf;
+	for ( ;; ) {
+		(void)tk_slp_tsk(TMO_FEVR);
+		for ( ;; ) {
+			tk_loc_mtx(wm_mtxid, TMO_FEVR);
+			more = (BOOL)( wm_ask_seq != wm_built_seq );
+			tk_unl_mtx(wm_mtxid);
+			if ( !more && __atomic_load_n(&wm_ptr_hint, __ATOMIC_ACQUIRE) == 0 ) {
+				break;
+			}
+
+			/*
+			 * At most one build a refresh: what comes meanwhile is
+			 * built with the next. Where the sends wait for the flip
+			 * before (ts_disp_paced), they keep that pace themselves,
+			 * in step with the screen, and a build begins as soon as
+			 * it is asked for; a pace kept here as well would put a
+			 * wait of its own before theirs. Else the builds keep to
+			 * places a refresh apart, each from where the last was
+			 * due rather than from when it began, slept for to the
+			 * microsecond, so that they come sixty times a second and
+			 * not fewer.
+			 */
+			(void)ts_get_mono(&t);
+			gap = ( ts_disp_paced() != 0 ) ? 0 : (UD)WM_FRAME_US * 1000;
+			if ( gap != 0 && wm_cp_due != 0 && t < wm_cp_due ) {
+				(void)tk_dly_tsk_u((RELTIM_U)( ( wm_cp_due - t + 999 ) / 1000 ));
+				(void)ts_get_mono(&t2);
+				wm_fr.paced_us += ( t2 - t ) / 1000;
+				t = t2;
+			}
+			if ( gap != 0 && wm_cp_due != 0 && t < wm_cp_due + gap ) {
+				/* in its place: the next a refresh on, but never within half of one */
+				wm_cp_due += gap;
+				if ( wm_cp_due < t + gap / 2 ) wm_cp_due = t + gap / 2;
+			} else {
+				wm_cp_due = t + gap;
+			}
+			build_asked();
+		}
+	}
+}
+
+LOCAL void cp_wake( void )
+{
+	if ( wm_cp_tsk > 0 ) {
+		(void)tk_wup_tsk(wm_cp_tsk);
+	}
+}
+
+/* An ask put in: its number, the compositor woken */
+LOCAL UW ask( UINT what, CONST PARTS *parts )
+{
+	UW	seq;
 	INT	i;
 
-	if ( n <= 0 ) {
-		return FALSE;
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	wm_ask_what |= what;
+	for ( i = 0; parts != NULL && i < parts->n; i++ ) {
+		parts_add(&wm_ask, &parts->r[i]);
 	}
-	*out = r[0];
-	for ( i = 1; i < n; i++ ) {
-		if ( r[i].left < out->left )     out->left = r[i].left;
-		if ( r[i].top < out->top )       out->top = r[i].top;
-		if ( r[i].right > out->right )   out->right = r[i].right;
-		if ( r[i].bottom > out->bottom ) out->bottom = r[i].bottom;
-	}
+	drawn_give();
+	seq = ++wm_ask_seq;
+	tk_unl_mtx(wm_mtxid);
+	cp_wake();
 
-	return TRUE;
+	return seq;
+}
+
+/*
+ * Until the ask 'seq' is built. With no compositor -- before it is made,
+ * or when it could not be -- and in the compositor itself, the caller
+ * builds it, as everyone did before there was one.
+ */
+LOCAL void wait_built( UW seq )
+{
+	WMWAIT	*k = NULL;
+	INT	i;
+	UD	t0, t1, d;
+
+	if ( wm_cp_tsk <= 0 || tk_get_tid() == wm_cp_tsk ) {
+		build_asked();
+		return;
+	}
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	if ( seq_reached(wm_built_seq, seq) ) {
+		tk_unl_mtx(wm_mtxid);
+		return;
+	}
+	for ( i = 0; i < WM_WAITERS; i++ ) {
+		if ( !wm_wait[i].used && wm_wait[i].sem > 0 ) {
+			k = &wm_wait[i];
+			k->used = TRUE;
+			k->told = FALSE;
+			k->seq = seq;
+			break;
+		}
+	}
+	tk_unl_mtx(wm_mtxid);
+
+	if ( k == NULL ) {
+		/* more waiting than there are places: looked at each millisecond */
+		for ( ;; ) {
+			BOOL	done;
+
+			tk_loc_mtx(wm_mtxid, TMO_FEVR);
+			done = seq_reached(wm_built_seq, seq);
+			tk_unl_mtx(wm_mtxid);
+			if ( done ) {
+				return;
+			}
+			cp_wake();
+			(void)tk_dly_tsk(1);
+		}
+	}
+	(void)ts_get_mono(&t0);
+	(void)tk_wai_sem(k->sem, 1, TMO_FEVR);
+	(void)ts_get_mono(&t1);
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	k->used = FALSE;
+	d = ( t1 - t0 ) / 1000;
+	wm_fr.waits++;
+	wm_fr.wait_us += d;
+	if ( d > wm_fr.wait_max ) wm_fr.wait_max = d;
+	tk_unl_mtx(wm_mtxid);
+}
+
+/*
+ * The screen, or a part of it, built afresh: 'area' is what is to be
+ * built, NULL the whole screen. Building only part of it is what keeps
+ * a change to a corner of the screen cheap; the rest is not touched.
+ * Returns once it is built.
+ */
+EXPORT ER wm_composite_at( CONST T_DPRECT *area )
+{
+	PARTS	p;
+
+	if ( !wm_ready ) {
+		return E_NOEXS;
+	}
+	if ( area == NULL ) {
+		wait_built(ask(ASK_ALL, NULL));
+		return E_OK;
+	}
+	p.n = 0;
+	parts_add(&p, area);
+	wait_built(ask(0, &p));
+
+	return E_OK;
+}
+
+/*
+ * The whole screen built afresh, for what changes all of it: the look,
+ * the scheme, the wallpaper, the screen's size. Returns once it is built.
+ */
+EXPORT ER wm_composite( void )
+{
+	if ( !wm_ready ) {
+		return E_NOEXS;
+	}
+	wait_built(ask(ASK_ALL, NULL));
+
+	return E_OK;
+}
+
+/* The four edges of each outline, as parts of the screen */
+LOCAL void drag_parts( PARTS *p, CONST T_DPRECT *r, INT n )
+{
+	T_DPRECT	e;
+	INT		i;
+
+	for ( i = 0; i < n; i++ ) {
+		e = r[i];
+		e.bottom = e.top + 1;
+		parts_add(p, &e);
+		e = r[i];
+		e.top = e.bottom - 1;
+		parts_add(p, &e);
+		e = r[i];
+		e.right = e.left + 1;
+		parts_add(p, &e);
+		e = r[i];
+		e.left = e.right - 1;
+		parts_add(p, &e);
+	}
 }
 
 /*
  * The outlines of what is being carried, in screen coordinates, or none
- * (n 0). Where they were and where they are now are built again, and
- * nothing else.
+ * (n 0). The edges where they were and where they are now are built
+ * again, and nothing else: what lies inside an outline is not touched
+ * by it. Returns once they are on the screen.
  */
 EXPORT ER wm_set_drag( CONST T_DPRECT *r, INT n )
 {
-	T_DPRECT	was, now, all;
-	BOOL		had, has;
-	INT		i;
+	PARTS	p;
+	INT	i;
 
 	if ( !wm_ready ) {
 		return E_NOEXS;
@@ -2892,172 +4789,223 @@ EXPORT ER wm_set_drag( CONST T_DPRECT *r, INT n )
 	if ( n < 0 || n > WM_DRAG_MAX || ( n > 0 && r == NULL ) ) {
 		return E_PAR;
 	}
+	p.n = 0;
 	tk_loc_mtx(wm_mtxid, TMO_FEVR);
-	had = drag_bound(wm_drag, wm_ndrag, &was);
+	drag_parts(&p, wm_drag, wm_ndrag);
 	for ( i = 0; i < n; i++ ) {
 		wm_drag[i] = r[i];
 	}
 	wm_ndrag = n;
-	has = drag_bound(wm_drag, wm_ndrag, &now);
+	drag_parts(&p, wm_drag, wm_ndrag);
 	tk_unl_mtx(wm_mtxid);
 
-	if ( !had && !has ) {
+	if ( p.n == 0 ) {
 		return E_OK;
 	}
-	all = had ? was : now;
-	if ( had && has ) {
-		if ( now.left < all.left )     all.left = now.left;
-		if ( now.top < all.top )       all.top = now.top;
-		if ( now.right > all.right )   all.right = now.right;
-		if ( now.bottom > all.bottom ) all.bottom = now.bottom;
-	}
+	wait_built(ask(0, &p));
 
-	return wm_composite_at(&all);
+	return E_OK;
 }
 
 /*
- * The pointer moved: the place it left and the place it has arrived at
- * are built again, and nothing else is.
- *
- * A screen is a megapixel and the pointer is a few hundred, so the
- * difference between this and building the screen is the difference
- * between a pointer that follows the hand and one that catches up
- * afterwards. The two rectangles are grown by a couple of pixels
- * because a pointer's shape carries an outline a pixel outside itself.
+ * A picture of w by h pixels laid on the screen with its corner at
+ * (x, y), over every window and the outlines, or none (px NULL). Where
+ * it was and where it is now are built again. Returns once it is on the
+ * screen.
  */
-EXPORT ER wm_pointer_moved( INT to_x, INT to_y )
+EXPORT ER wm_set_loupe( CONST UW *px, INT w, INT h, INT x, INT y )
 {
-	T_DPRECT	r, to;
-	INT		from_x = 0, from_y = 0, from_side = WM_POINTER_SIDE;
+	PARTS	p;
+	INT	i;
 
 	if ( !wm_ready ) {
 		return E_NOEXS;
 	}
-	/*
-	 * Where it is coming from is known here, not by the caller: this
-	 * layer is what drew it. Before it has been drawn at all there is
-	 * nothing to repair but everything to lay, so the whole screen is
-	 * built.
-	 */
-	if ( !wm_pointer_last(&from_x, &from_y, &from_side) ) {
-		return wm_composite();
+	if ( px != NULL && ( w <= 0 || h <= 0 || w > WM_LOUPE_MAX || h > WM_LOUPE_MAX ) ) {
+		return E_PAR;
 	}
-	/*
-	 * One rectangle around both places rather than two. They are
-	 * nearly always a few pixels apart, so one covers little more
-	 * than the two would and costs one pass instead of two; a pointer
-	 * that has jumped across the screen is rare enough to pay for.
-	 * Where it was laid is its corner; where it goes is its point.
-	 */
-	wm_pointer_box(to_x, to_y, &to);
-	if ( from_x == to.left && from_y == to.top && from_side == to.right - to.left ) {
+	if ( px != NULL && wm_loupe == NULL ) {
+		wm_loupe = (UW *)Kmalloc((SZ)WM_LOUPE_MAX * WM_LOUPE_MAX * sizeof(UW));
+		if ( wm_loupe == NULL ) {
+			return E_NOMEM;
+		}
+	}
+	p.n = 0;
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	if ( wm_loupe_on ) {
+		parts_add(&p, &wm_loupe_at);
+	}
+	wm_loupe_on = (BOOL)( px != NULL );
+	if ( px != NULL ) {
+		for ( i = 0; i < w * h; i++ ) {
+			wm_loupe[i] = px[i];
+		}
+		wm_loupe_at.left = x;
+		wm_loupe_at.top = y;
+		wm_loupe_at.right = x + w;
+		wm_loupe_at.bottom = y + h;
+		parts_add(&p, &wm_loupe_at);
+	}
+	tk_unl_mtx(wm_mtxid);
+
+	if ( p.n == 0 ) {
 		return E_OK;
 	}
-	/* the old square as large as it was laid, the new one as large as it is now */
-	r.left   = ( from_x < to.left ) ? from_x : to.left;
-	r.top    = ( from_y < to.top ) ? from_y : to.top;
-	r.right  = from_x + from_side;
-	r.bottom = from_y + from_side;
-	if ( to.right > r.right )   r.right = to.right;
-	if ( to.bottom > r.bottom ) r.bottom = to.bottom;
+	wait_built(ask(0, &p));
 
-	return wm_composite_at(&r);
+	return E_OK;
+}
+
+/*
+ * The pointer moved: what it covered where it was is put back, and it
+ * is laid where it is now, what it covers there kept first. No window
+ * is laid again, and the two squares are all that goes to the screen.
+ *
+ * A screen is a megapixel and the pointer is a few hundred, so the
+ * difference between this and building the screen is the difference
+ * between a pointer that follows the hand and one that catches up
+ * afterwards. It is laid where the input layer says it is when the
+ * compositor gets to it, which is where the hand has got to by then, so
+ * to_x and to_y only say that it moved. Returns at once; wm_flush waits
+ * until it is laid.
+ */
+EXPORT ER wm_pointer_moved( INT to_x, INT to_y )
+{
+	(void)to_x;
+	(void)to_y;
+	if ( !wm_ready ) {
+		return E_NOEXS;
+	}
+	(void)ask(0, NULL);
+
+	return E_OK;
+}
+
+/*
+ * The input layer saw the pointer move. Called from its task, which is
+ * not to wait for anything here: no lock is taken, the compositor is
+ * only woken.
+ */
+EXPORT void knl_wm_pointer_hint( void )
+{
+	if ( !wm_ready || wm_cp_tsk <= 0 ) {
+		return;
+	}
+	__atomic_store_n(&wm_ptr_hint, 1, __ATOMIC_RELEASE);
+	cp_wake();
 }
 
 /*
  * Whatever has changed since the screen was last built, built again,
- * and only that: the parts of windows that were drawn in and said so,
- * and the pointer's old and new places. A menu whose lit row follows
- * the pointer changes a row at a time, and building a megapixel for
- * each row is what makes a menu fall seconds behind the hand.
+ * and only that: the parts of windows that were drawn in, and the places
+ * windows left or changed (wm_gone), each with as much round it as a
+ * window spread over it shows of the change; and the pointer moved. A
+ * menu whose lit row follows the pointer changes a row at a time, and
+ * building a megapixel for each row is what makes a menu fall seconds
+ * behind the hand. Returns once it is built.
  */
 EXPORT ER wm_update( void )
 {
-	T_DPRECT	all, r;
-	BOOL		any = FALSE;
-	INT		i, px = 0, py = 0, lx = 0, ly = 0, lside = WM_POINTER_SIDE;
-	UINT		btn = 0;
+	if ( !wm_ready ) {
+		return E_NOEXS;
+	}
+	wait_built(ask(ASK_UPD, NULL));
+
+	return E_OK;
+}
+
+/* The same, without waiting for it */
+EXPORT ER wm_post( void )
+{
+	if ( !wm_ready ) {
+		return E_NOEXS;
+	}
+	if ( wm_cp_tsk <= 0 ) {
+		return wm_update();
+	}
+	(void)ask(ASK_UPD, NULL);
+
+	return E_OK;
+}
+
+/* Until everything asked for so far is on the screen */
+EXPORT ER wm_flush( void )
+{
+	UW	seq;
 
 	if ( !wm_ready ) {
 		return E_NOEXS;
 	}
 	tk_loc_mtx(wm_mtxid, TMO_FEVR);
-	for ( i = 0; i < WM_MAX_WIN; i++ ) {
-		WMWIN	*w = &wm_win[i];
-
-		if ( !w->used || !w->dirty ) {
-			continue;
-		}
-		w->dirty = FALSE;
-		if ( !w->visible ) {
-			continue;
-		}
-		r.left   = w->work.left + w->damage.left;
-		r.top    = w->work.top + w->damage.top;
-		r.right  = w->work.left + w->damage.right;
-		r.bottom = w->work.top + w->damage.bottom;
-		if ( !any ) {
-			all = r;
-			any = TRUE;
-		} else {
-			if ( r.left < all.left )     all.left = r.left;
-			if ( r.top < all.top )       all.top = r.top;
-			if ( r.right > all.right )   all.right = r.right;
-			if ( r.bottom > all.bottom ) all.bottom = r.bottom;
-		}
-	}
-	if ( wm_gone_any ) {
-		if ( !any ) {
-			all = wm_gone;
-			any = TRUE;
-		} else {
-			if ( wm_gone.left < all.left )     all.left = wm_gone.left;
-			if ( wm_gone.top < all.top )       all.top = wm_gone.top;
-			if ( wm_gone.right > all.right )   all.right = wm_gone.right;
-			if ( wm_gone.bottom > all.bottom ) all.bottom = wm_gone.bottom;
-		}
-		wm_gone_any = FALSE;
-	}
+	seq = wm_ask_seq;
 	tk_unl_mtx(wm_mtxid);
-
-	if ( !wm_pointer_last(&lx, &ly, &lside) ) {
-		return wm_composite();		/* never laid: lay everything */
+	if ( wm_cp_tsk > 0 && tk_get_tid() != wm_cp_tsk ) {
+		wait_built(seq);
+	} else if ( !seq_reached(wm_built_seq, seq) ) {
+		build_asked();
 	}
-	{
-		T_DPRECT	to;
+	return E_OK;
+}
 
-		if ( ts_hid_pointer(&px, &py, &btn) >= E_OK ) {
-			wm_pointer_box(px, py, &to);
-		} else {
-			to.left = lx;  to.top = ly;
-			to.right = lx + lside;
-			to.bottom = ly + lside;
-		}
-		r.left = ( lx < to.left ) ? lx : to.left;
-		r.top  = ( ly < to.top ) ? ly : to.top;
-		r.right  = lx + lside;
-		r.bottom = ly + lside;
-		if ( to.right > r.right )   r.right = to.right;
-		if ( to.bottom > r.bottom ) r.bottom = to.bottom;
-		px = to.left;
-		py = to.top;
-		if ( to.right - to.left != lside ) {
-			px = lx - 1;		/* the same place at another size is a change */
+/*
+ * The compositor, made once the windows are: its own task, owning the
+ * FP/SIMD registers, and the semaphores its callers wait on. Without it
+ * every caller builds for itself.
+ */
+LOCAL void cp_start( void )
+{
+	T_CTSK	ct;
+	T_CSEM	cs;
+	T_CMTX	cm;
+	INT	i;
+	ID	tid;
+
+	cm.exinf = NULL;
+	cm.mtxatr = TA_TFIFO;
+	wm_touch_mtx = tk_cre_mtx(&cm);
+	if ( wm_touch_mtx <= 0 ) {
+		wm_touch_mtx = 0;
+		return;
+	}
+	knl_memset(wm_drawn, 0, sizeof(wm_drawn));
+	wm_drawn_any.n = 0;
+	wm_ask_chg.n = 0;
+	dp_watch(touched);
+
+	knl_memset(&cs, 0, sizeof(cs));
+	cs.sematr = TA_TFIFO | TA_FIRST;
+	cs.isemcnt = 0;
+	cs.maxsem = 1;
+	for ( i = 0; i < WM_WAITERS; i++ ) {
+		wm_wait[i].used = FALSE;
+		wm_wait[i].sem = tk_cre_sem(&cs);
+		if ( wm_wait[i].sem < 0 ) {
+			wm_wait[i].sem = 0;
 		}
 	}
-	if ( !any ) {
-		if ( lx == px && ly == py ) {
-			return E_OK;		/* nothing changed at all */
-		}
-		all = r;
-	} else {
-		if ( r.left < all.left )     all.left = r.left;
-		if ( r.top < all.top )       all.top = r.top;
-		if ( r.right > all.right )   all.right = r.right;
-		if ( r.bottom > all.bottom ) all.bottom = r.bottom;
-	}
 
-	return wm_composite_at(&all);
+	knl_memset(&ct, 0, sizeof(ct));
+	ct.tskatr = TA_HLNG | TA_RNG0 | TA_FPU;
+	ct.task = (FP)cp_task;
+	ct.itskpri = WM_CP_PRI;
+	ct.stksz = WM_CP_STACK;
+	tid = tk_cre_tsk(&ct);
+	if ( tid <= 0 ) {
+		return;
+	}
+	cp_simd_allow(tid, TRUE);
+	wm_cp_tsk = tid;
+	if ( tk_sta_tsk(tid, 0) < E_OK ) {
+		wm_cp_tsk = 0;
+		cp_simd_allow(tid, FALSE);
+		(void)tk_del_tsk(tid);
+	}
+}
+
+/* The compositor's task, for a test that needs to know what it does */
+EXPORT ID knl_wm_compositor( void )
+{
+	return wm_cp_tsk;
 }
 
 /* ---------------------------------------------------------------- checking */
@@ -3143,6 +5091,85 @@ EXPORT ER wm_copy_screen( UW *dst, INT pitch )
 	return E_OK;
 }
 
+/*
+ * A rectangle of the screen as last built, copied under the same lock as
+ * wm_copy_screen. Without the pointer, the pixels it lies on are those it
+ * covers, kept as it was laid (knl_pt_under), so the copy is what the
+ * screen shows with the pointer taken away.
+ */
+EXPORT ER wm_grab_screen( UW *dst, INT pitch, CONST T_DPRECT *r, BOOL pointer )
+{
+	UB	*back;
+	INT	y, w;
+
+	if ( !wm_ready || dst == NULL || r == NULL
+	  || r->left < 0 || r->top < 0 || r->right > (INT)wm_spec.width || r->bottom > (INT)wm_spec.height
+	  || r->left >= r->right || r->top >= r->bottom || pitch < r->right - r->left ) {
+		return E_PAR;
+	}
+	back = (UB *)ts_disp_buffer();
+	if ( back == NULL ) {
+		return E_NOEXS;
+	}
+	w = r->right - r->left;
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	for ( y = r->top; y < r->bottom; y++ ) {
+		knl_memcpy(dst + (SZ)( y - r->top ) * pitch,
+			   back + (UBINT)y * wm_spec.pitch + (UBINT)r->left * sizeof(UW), (SZ)w * sizeof(UW));
+	}
+	if ( !pointer ) {
+		knl_pt_under(dst, pitch, r);
+	}
+	tk_unl_mtx(wm_mtxid);
+
+	return E_OK;
+}
+
+/*
+ * The window in front and those that belong with it: the nearest window
+ * with a name band (front_window), taken back to the window it is
+ * subordinate to, and every shown window subordinate to that one, at any
+ * depth. The first is the one they belong to. 0 when there is none.
+ */
+EXPORT INT wm_front_group( INT *wids, INT max )
+{
+	INT	root, i, p, guard, n = 0;
+	WMWIN	*w;
+
+	if ( wids == NULL || max <= 0 || !wm_ready ) {
+		return 0;
+	}
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	root = front_window(0);
+	for ( guard = 0; root != 0 && guard < WM_MAX_WIN; guard++ ) {
+		w = win_of(root);
+		if ( w == NULL || w->parent == 0 || win_of(w->parent) == NULL ) {
+			break;
+		}
+		root = w->parent;
+	}
+	if ( root != 0 ) {
+		wids[n++] = root;
+		for ( i = 1; i <= WM_MAX_WIN && n < max; i++ ) {
+			w = win_of(i);
+			if ( w == NULL || i == root || !w->visible ) {
+				continue;
+			}
+			for ( p = w->parent, guard = 0; p != 0 && p != root && guard < WM_MAX_WIN; guard++ ) {
+				WMWIN	*q = win_of(p);
+
+				p = ( q != NULL ) ? q->parent : 0;
+			}
+			if ( p == root ) {
+				wids[n++] = i;
+			}
+		}
+	}
+	tk_unl_mtx(wm_mtxid);
+
+	return n;
+}
+
 EXPORT ER wm_stat( T_WMSTAT *st )
 {
 	if ( !wm_ready || st == NULL ) {
@@ -3161,6 +5188,8 @@ EXPORT void knl_wm_screen_changed( void )
 	}
 	tk_loc_mtx(wm_mtxid, TMO_FEVR);
 	(void)ts_disp_ref(&wm_spec);
+	ghosts_drop();				/* their rows were the old screen's */
+	knl_pt_forget();			/* and what the pointer covered */
 	tk_unl_mtx(wm_mtxid);
 	wm_composite();
 }
@@ -3203,7 +5232,29 @@ EXPORT INT knl_wm_init( void )
 		wm_mtxid = 0;
 		return E_LIMIT;
 	}
+	(void)dp_set_watch(wm_sys_gid, TRUE);	/* the frames drawn are built again */
 	wm_ready = TRUE;
+	cp_start();				/* the compositor (without it each caller builds) */
+
+	/* the task that carries the windows opening and closing; without it they just appear */
+	{
+		T_CTSK	ct;
+
+		knl_memset(&ct, 0, sizeof(ct));
+		ct.tskatr = TA_HLNG | TA_RNG0;
+		ct.task = (FP)mo_task;
+		ct.itskpri = MO_PRI;
+		ct.stksz = 32 * 1024;
+		wm_mo_tsk = tk_cre_tsk(&ct);
+		if ( wm_mo_tsk > 0 && tk_sta_tsk(wm_mo_tsk, 0) < E_OK ) {
+			(void)tk_del_tsk(wm_mo_tsk);
+			wm_mo_tsk = 0;
+		}
+		if ( wm_mo_tsk < 0 ) {
+			wm_mo_tsk = 0;
+		}
+	}
+	(void)knl_fq_init();			/* 強制終了: Shift+Pause and its window */
 
 	return 1;
 }

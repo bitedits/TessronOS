@@ -103,6 +103,49 @@ typedef struct {
 IMPORT void cf_net_read( CONST UB *text, INT len, T_CFNET *net );
 IMPORT INT  cf_net_write( UB *text, INT len, INT max, CONST T_CFNET *net );
 
+/*
+ * IPv6 of the network's record, on lines of their own:
+ *
+ *	$$IPV6		<on|off> <auto|fixed|none> [temp]
+ *	$$IPV6ADDR	<address>/<prefix length>
+ *	$$IPV6GW	<address>
+ *	$$IPV6DNS	<address>
+ *	$$IPV6DNS	<address>
+ *
+ * "auto" takes addresses from the routers' advertisements, "fixed" the
+ * one of $$IPV6ADDR with $$IPV6GW as the default router, "none" only
+ * the link-local address; "temp" makes temporary addresses as well
+ * (auto). A line that is only its key has no address. With no $$IPV6
+ * line IPv6 is on and automatic.
+ */
+#define CF_IP6_AUTO	0
+#define CF_IP6_FIXED	1
+#define CF_IP6_NONE	2
+
+typedef struct {
+	BOOL	on;			/* IPv6 used on the card's interface */
+	INT	how;			/* CF_IP6_ */
+	BOOL	temp;			/* temporary addresses (RFC 8981) */
+	UB	addr[16];		/* fixed: the address, in the order sent */
+	INT	plen;			/* and its prefix length */
+	UB	gw[16];			/* fixed: the default router, all zero none */
+	UB	dns[2][16];		/* name servers, all zero none */
+} T_CFNET6;
+
+IMPORT void cf_net6_read( CONST UB *text, INT len, T_CFNET6 *net );
+IMPORT INT  cf_net6_write( UB *text, INT len, INT max, CONST T_CFNET6 *net );
+
+/*
+ * An IPv6 address as text ("2001:db8::1", or with a dotted IPv4 end);
+ * FALSE when the text is not one. cf_ip6str writes the shortest form
+ * (RFC 5952) into room for CF_IP6_STRLEN bytes; cf_ip6zero says the
+ * address is all zero.
+ */
+#define CF_IP6_STRLEN	46
+IMPORT BOOL cf_ip6( CONST char *s, UB *addr );
+IMPORT void cf_ip6str( CONST UB *addr, char *out );
+IMPORT BOOL cf_ip6zero( CONST UB *addr );
+
 /* ------------------------------------------------------------ the person */
 
 /*
@@ -125,6 +168,18 @@ IMPORT CONST CF_ITEM *cf_user_look( UINT look );
 
 #define CF_USER_NAME	"USER_NAME"
 #define CF_NAME_MAX	12		/* letters of a person's name */
+
+/* ------------------------------------------------------------ the windows' look */
+
+/*
+ * What システム環境設定〈ウィンドウ〉 sets (LK_LOOK..LK_OPA_WHOLE), each
+ * a line of the machine's settings (SYSDEF_CONF_DEV) and an entry of
+ * the look table, in the same form as the person's.
+ */
+IMPORT CONST CF_ITEM	cf_look_items[];
+IMPORT CONST INT	cf_look_nitem;
+
+IMPORT CONST CF_ITEM *cf_look_look( UINT look );
 
 #ifdef __cplusplus
 }

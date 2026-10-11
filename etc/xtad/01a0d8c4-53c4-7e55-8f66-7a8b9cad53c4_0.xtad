@@ -1,0 +1,11 @@
+<tad version="1.0" encoding="UTF-8" filename="手帳用紙">
+<document>
+<paper type="doc" length="842" width="595" binding="0" imposition="0" top="57" bottom="57" left="57" right="57"/>
+<docmargin top="57" bottom="57" left="57" right="57"/>
+<p><tab-format R="0" P="0" left="0" right="0" indent="0" ntabs="1" tabs="112"/></p>
+<p><tab-format R="0" P="0" left="0" right="0" indent="0" ntabs="1" tabs="112"/></p>
+<p><tab-format R="0" P="0" left="0" right="0" indent="0" ntabs="1" tabs="112"/>日</p>
+<p>祝日<tab/>国民の祝日、振替休日、国民の休日</p>
+<p><tab-format R="0" P="0" left="0" right="0" indent="0" ntabs="1" tabs="112"/></p>
+</document>
+</tad>

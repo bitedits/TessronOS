@@ -508,7 +508,9 @@ LOCAL void relink( CONV *c, const char *x, INT n, BPKBUF *b )
 
 			for ( s = i; s > 0 && x[s] != '<'; s-- ) ;
 			if ( strncmp(x + s, "<link", 5) != 0 ) continue;
-			memcpy(us, x + i + 4, 36);
+			q = i + 4 + ts_lnk_split((const UB *)x + i + 4, n - i - 4, NULL, NULL);	/* past a volume it names */
+			if ( q + 36 > n ) continue;
+			memcpy(us, x + q, 36);
 			us[36] = 0;
 			if ( !bk_uuid_parse(us, &u) || ob_ref_obj(&u, &ref) >= E_OK ) continue;
 			e = elem_end(x, n, i);
@@ -552,7 +554,7 @@ LOCAL ER count_links( const char *xml )
 	for ( p = xml; ( p = strstr(p, "<link id=\"") ) != NULL; p++ ) {
 		TS_UUID	u;
 
-		if ( !bk_uuid_parse(p + 10, &u) ) continue;
+		if ( !bk_uuid_parse(p + 10 + ts_lnk_split((const UB *)p + 10, (INT)strlen(p + 10), NULL, NULL), &u) ) continue;
 		er = ob_lnk_obj(&u);
 		if ( er < E_OK ) return er;
 	}
@@ -696,6 +698,23 @@ LOCAL void exec_of( ID k, INT rec, const char **p_id, const char **p_name, char 
 	}
 }
 
+/* Whether the object holds a マイクロカード実身's format record */
+LOCAL BOOL is_mcard( ID k )
+{
+	T_OBREC	r[32];
+	INT	cnt = 0, i;
+
+	if ( ob_lst_rec(k, r, 32, &cnt) < E_OK ) return FALSE;
+	for ( i = 0; i < cnt && i < 32; i++ ) {
+		UB	h[8];
+		SZ	asz = 0;
+
+		if ( r[i].sub != BPK_MC_FORMAT || ( r[i].rt != BPK_RT_MCARD && r[i].rt != OB_RT_SYSDATA ) ) continue;
+		if ( ob_rea_rec(k, r[i].recno, 0, h, sizeof(h), &asz) >= E_OK && bpk_mc_format(h, (UINT)asz) ) return TRUE;
+	}
+	return FALSE;
+}
+
 /* An object BTRON saved: record 0 from its first TAD, the rest of its TAD after */
 LOCAL ER finish_btron( BKJOB *j, CONV *c, BPKBUF *xml, BPKCONV *cv )
 {
@@ -707,6 +726,15 @@ LOCAL ER finish_btron( BKJOB *j, CONV *c, BPKBUF *xml, BPKCONV *cv )
 	ER		er = E_OK;
 
 	exec_of(c->key, o->execrec, &app, &appname, win, sizeof(win));
+	if ( app == NULL && is_mcard(c->key) ) {
+		/* マイクロカード実身: record 0 names the link records' objects in their order */
+		bpk_mc_xml(xml, o->name, o->nlink, cv->hook);
+		bpk_buf_init(&m);
+		meta_btron(&m, o, BPK_MC_PROG, BPK_MC_NAME, win[0] ? win : NULL);
+		er = m.fail ? E_NOMEM : ob_set_atr(c->key, (const UB *)m.s, m.n);
+		bpk_buf_free(&m);
+		return er;
+	}
 	if ( app == NULL ) {
 		app = ( o->st.f_atype == 6 ) ? "virtual-object-list"
 		    : ( o->st.f_atype == 2 ) ? "basic-figure-editor" : "basic-text-editor";
@@ -794,7 +822,7 @@ EXPORT ER bk_rest_end( BKJOB *j )
 			break;
 		}
 		c.o = o;
-		c.key = ob_opn_obj(&o->uuid, OB_OP_ALL);
+		c.key = ob_opn_obj(&o->uuid, OB_OP_R | OB_OP_W | OB_OP_PROT);
 		if ( c.key <= 0 ) {
 			er = ( c.key < 0 ) ? c.key : E_NOEXS;
 			seterr(j, "作った実身を開けません", er);

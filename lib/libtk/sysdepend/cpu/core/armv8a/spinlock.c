@@ -28,31 +28,136 @@ EXPORT void InitSpinLock( T_SPLOCK *lock )
 	lock->owner = 0;
 }
 
-EXPORT void SpinLock( T_SPLOCK *lock )
+/*
+ * The locks each processor holds, a few deep, with the place each was
+ * taken from and when: what the lockup report (lockup.c) says a
+ * processor that stopped is holding. A lock taken deeper than the table
+ * goes is held all the same, only not shown. The processor is the one
+ * TPIDR_EL1 names; before the per-processor data is set up it names
+ * none, and nothing is kept.
+ */
+EXPORT T_SPHELD	knl_spin_held[SPIN_HELD_PRC][SPIN_HELD_N];
+
+/*
+ * A waiter that has not had the lock for knl_spin_stall_cycles of the
+ * system counter calls knl_spin_stall_hook (lockup.c), which says so on
+ * the console straight away, and goes on waiting; it is called again
+ * each time as long again has passed, and once more with 'waited' 0
+ * when the lock comes at last. 0 cycles: never. The generic timer's
+ * event stream wakes a waiter from WFE now and then, so that it gets to
+ * look at the time while nobody lets go of the lock.
+ */
+EXPORT UD	knl_spin_stall_cycles = 0;
+EXPORT void	(*knl_spin_stall_hook)( T_SPLOCK *lock, UBINT pc, UD waited ) = NULL;
+
+Inline INT spin_prc( void )
+{
+	UD	p;
+
+	Asm("mrs %0, tpidr_el1" : "=r"(p));
+	return ( p != 0 ) ? *(ID *)p - 1 : -1;		/* T_PCPU starts with its prcid */
+}
+
+Inline UD spin_now( void )
+{
+	UD	t;
+
+	Asm("mrs %0, cntpct_el0" : "=r"(t) :: "memory");
+	return t;
+}
+
+LOCAL void spin_note( T_SPLOCK *lock, UBINT pc )
+{
+	INT	c = spin_prc(), i;
+
+	if ( c < 0 || c >= SPIN_HELD_PRC ) {
+		return;
+	}
+	for ( i = 0; i < SPIN_HELD_N; i++ ) {
+		if ( knl_spin_held[c][i].lock == NULL ) {
+			knl_spin_held[c][i].pc = pc;
+			knl_spin_held[c][i].since = spin_now();
+			knl_spin_held[c][i].lock = lock;
+			return;
+		}
+	}
+}
+
+/* Let go of where it was taken: as a rule here, else on the processor that took it */
+LOCAL void spin_forget( T_SPLOCK *lock )
+{
+	INT	c = spin_prc(), i, k;
+
+	if ( c < 0 || c >= SPIN_HELD_PRC ) {
+		return;
+	}
+	for ( k = 0; k < SPIN_HELD_PRC; k++, c = ( c + 1 ) % SPIN_HELD_PRC ) {
+		for ( i = SPIN_HELD_N - 1; i >= 0; i-- ) {
+			if ( knl_spin_held[c][i].lock == lock ) {
+				knl_spin_held[c][i].lock = NULL;
+				return;
+			}
+		}
+	}
+}
+
+LOCAL void spin_acquire( T_SPLOCK *lock, UBINT pc )
 {
 	UW	ticket = __atomic_fetch_add(&lock->next, 1, __ATOMIC_RELAXED);
 	UW	cur;
+	UD	t0 = 0, last = 0, lim = knl_spin_stall_cycles, now;
+	BOOL	told = FALSE;
 
 	for (;;) {
 		Asm("ldaxr %w0, [%1]" : "=r"(cur) : "r"(&lock->owner) : "memory");
 		if ( cur == ticket ) break;
+		if ( lim != 0 ) {
+			now = spin_now();
+			if ( t0 == 0 ) {
+				t0 = last = now;
+			} else if ( now - last >= lim && knl_spin_stall_hook != NULL ) {
+				last = now;
+				told = TRUE;
+				(*knl_spin_stall_hook)(lock, pc, now - t0);
+				continue;	/* the exclusive monitor is armed again first */
+			}
+		}
 		Asm("wfe" ::: "memory");
 	}
+	if ( told && knl_spin_stall_hook != NULL ) {
+		(*knl_spin_stall_hook)(lock, pc, 0);
+	}
+	spin_note(lock, pc);
 }
 
-EXPORT BOOL SpinTryLock( T_SPLOCK *lock )
+EXPORT void SpinLock( T_SPLOCK *lock )
+{
+	spin_acquire(lock, (UBINT)__builtin_return_address(0));
+}
+
+LOCAL BOOL spin_try( T_SPLOCK *lock, UBINT pc )
 {
 	UW	n = __atomic_load_n(&lock->next, __ATOMIC_RELAXED);
 
 	if ( __atomic_load_n(&lock->owner, __ATOMIC_ACQUIRE) != n ) {
 		return FALSE;
 	}
-	return __atomic_compare_exchange_n(&lock->next, &n, n + 1, FALSE,
-					   __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
+	if ( !__atomic_compare_exchange_n(&lock->next, &n, n + 1, FALSE,
+					  __ATOMIC_ACQUIRE, __ATOMIC_RELAXED) ) {
+		return FALSE;
+	}
+	spin_note(lock, pc);
+	return TRUE;
+}
+
+EXPORT BOOL SpinTryLock( T_SPLOCK *lock )
+{
+	return spin_try(lock, (UBINT)__builtin_return_address(0));
 }
 
 EXPORT void SpinUnlock( T_SPLOCK *lock )
 {
+	spin_forget(lock);
 	__atomic_store_n(&lock->owner, lock->owner + 1, __ATOMIC_RELEASE);
 	Asm("dsb ish\n\tsev" ::: "memory");
 }
@@ -60,13 +165,13 @@ EXPORT void SpinUnlock( T_SPLOCK *lock )
 EXPORT void ISpinLock( T_SPLOCK *lock, UINT *intsts )
 {
 	*intsts = disint();
-	SpinLock(lock);
+	spin_acquire(lock, (UBINT)__builtin_return_address(0));
 }
 
 EXPORT BOOL ISpinTryLock( T_SPLOCK *lock, UINT *intsts )
 {
 	*intsts = disint();
-	if ( SpinTryLock(lock) ) {
+	if ( spin_try(lock, (UBINT)__builtin_return_address(0)) ) {
 		return TRUE;
 	}
 	enaint(*intsts);

@@ -64,6 +64,9 @@ typedef struct {
 	BOOL	icon_tried;
 	UW	*icon;
 	INT	icon_w, icon_h;
+	/* the volume it is on, and the volumes' number when that was looked for (0 not yet) */
+	ID	vol;
+	UW	volser;
 } STENT;
 
 LOCAL STENT	st_tab[ST_MAX];
@@ -130,6 +133,7 @@ LOCAL INT slot_of( CONST TS_UUID *id, INT recno )
 	st_tab[free].described = FALSE;
 	st_tab[free].icon_tried = FALSE;
 	st_tab[free].icon      = NULL;
+	st_tab[free].volser    = 0;
 
 	return free;
 }
@@ -253,6 +257,20 @@ LOCAL INT store_name( CONST T_VOBJ *v, UB *buf, INT max, void *arg )
 	SZ	size = 0;
 	INT	i, n = 0, slot;
 
+	if ( max < TAD_NAME_MAX ) {
+		/* what is kept is the whole name, whatever room this caller has */
+		UB	full[TAD_NAME_MAX];
+
+		n = store_name(v, full, TAD_NAME_MAX, arg);
+		if ( n < 0 ) {
+			return n;
+		}
+		for ( i = 0; i < n && i < max - 1; i++ ) {
+			buf[i] = full[i];
+		}
+		buf[i] = 0;
+		return i;
+	}
 	slot = slot_of(&v->target, -1);
 	if ( slot >= 0 && st_tab[slot].named ) {
 		if ( !st_tab[slot].has_name ) {
@@ -350,6 +368,17 @@ LOCAL void store_shut( T_TAD *doc, void *arg )
  * name that could not be read or decoded is remembered as such, so that
  * a missing picture is looked for once and not on every screen.
  */
+LOCAL TS_UUID	st_self;
+LOCAL BOOL	st_has_self = FALSE;
+
+EXPORT void om_store_self( CONST TS_UUID *id )
+{
+	st_has_self = (BOOL)( id != NULL );
+	if ( id != NULL ) {
+		st_self = *id;
+	}
+}
+
 LOCAL ER store_picture( CONST UB *href, CONST UW **p_px, INT *p_w, INT *p_h,
 			void *arg )
 {
@@ -359,9 +388,21 @@ LOCAL ER store_picture( CONST UB *href, CONST UW **p_px, INT *p_w, INT *p_h,
 	STPIC	*pc;
 	TS_UUID	id;
 	CONST UB *name;
+	UB	whole[PIC_NAME];
 
 	if ( href == NULL || href[0] == 0 ) {
 		return E_PAR;
+	}
+	/* "{realId}_0_1.png": a resource of the object being drawn */
+	if ( st_has_self && href[0] == '{' && href[1] == 'r' && href[2] == 'e' && href[3] == 'a'
+	  && href[4] == 'l' && href[5] == 'I' && href[6] == 'd' && href[7] == '}' ) {
+		if ( ts_uuid_to_str(&st_self, (char *)whole, sizeof(whole)) >= E_OK ) {
+			for ( k = TS_UUID_STRLEN, i = 8; k < PIC_NAME - 1 && href[i] != 0; ) {
+				whole[k++] = href[i++];
+			}
+			whole[k] = 0;
+			href = whole;
+		}
 	}
 	for ( i = 0; i < PIC_MAX; i++ ) {
 		if ( !st_pic[i].used ) {
@@ -424,10 +465,87 @@ LOCAL ER store_picture( CONST UB *href, CONST UW **p_px, INT *p_w, INT *p_h,
 
 LOCAL INT store_label( CONST T_VOBJ *v, UB *buf, INT max, void *arg );
 LOCAL ER store_icon( CONST T_VOBJ *v, CONST UW **p_px, INT *p_w, INT *p_h, void *arg );
+LOCAL UINT store_state( CONST T_VOBJ *v, void *arg );
 
 LOCAL CONST T_TVSRC	om_files = { store_name, store_open, store_shut,
 				     store_paper, store_picture, store_label,
-				     store_icon };
+				     store_icon, store_state };
+
+/*
+ * The volume an object is on, remembered with the rest of it and looked
+ * for again when the volumes attached have changed (0: on none).
+ */
+LOCAL ID store_vol( CONST TS_UUID *id )
+{
+	UW	ser = knl_obfile_serial() + 1;
+	INT	slot = slot_of(id, -1);
+	ID	vol;
+
+	if ( slot >= 0 && st_tab[slot].volser == ser ) {
+		return st_tab[slot].vol;
+	}
+	vol = knl_obfile_vol_of(id);
+	if ( vol < 0 ) {
+		vol = 0;
+	}
+	if ( slot >= 0 ) {
+		st_tab[slot].vol = vol;
+		st_tab[slot].volser = ser;
+	}
+	return vol;
+}
+
+/*
+ * A link whose object cannot be found is a 虚身; one in a window whose
+ * object is on another volume than its own is marked so.
+ */
+LOCAL UINT store_state( CONST T_VOBJ *v, void *arg )
+{
+	UB	nm[8];
+	TS_UUID	host;
+	UINT	st = 0;
+	ID	vt;
+
+	(void)arg;
+	if ( store_name(v, nm, sizeof(nm), NULL) < 0 ) {
+		return TV_ST_GONE;
+	}
+	if ( tv_host_of(&host) && ( vt = store_vol(&v->target) ) > 0 ) {
+		ID	vh = store_vol(&host);
+
+		if ( vh > 0 && vh != vt ) {
+			st |= TV_ST_OTHER;
+		}
+	}
+	return st;
+}
+
+/*
+ * What is remembered of objects that cannot be found now let go of --
+ * the disk they were on went -- and of those remembered as not found,
+ * which may be found now that a disk came. For when the volumes
+ * attached change; the windows of what went are closed first.
+ */
+EXPORT void om_store_recheck( void )
+{
+	T_OBREF	*r = (T_OBREF *)Kmalloc(sizeof(T_OBREF));
+	INT	i;
+
+	for ( i = 0; i < ST_MAX; i++ ) {
+		BOOL	absent;
+
+		if ( !st_tab[i].used ) {
+			continue;
+		}
+		absent = (BOOL)( ( st_tab[i].named && !st_tab[i].has_name )
+				 || ( r != NULL && ob_ref_obj(&st_tab[i].id, r) == E_NOEXS ) );
+		st_tab[i].volser = 0;
+		if ( absent ) {
+			om_store_forget(&st_tab[i].id);
+		}
+	}
+	if ( r != NULL ) Kfree(r);
+}
 
 /* A picture beside the records: its pixels, the store's, not to be freed */
 EXPORT ER om_store_picture( CONST UB *href, CONST UW **p_px, INT *p_w, INT *p_h )
@@ -1969,6 +2087,44 @@ EXPORT T_TAD *om_store_get( CONST TS_UUID *id, INT recno )
  * what was remembered of its metadata. For an object that is thrown
  * away, so that nothing of it is drawn from memory afterwards.
  */
+/*
+ * The links of a record of the object 'host' made to say where their
+ * objects are (design 8.3), as om_link_fix does to the text: no volume
+ * for an object of host's own volume, that volume's UUID for one of
+ * another; one whose object is on no volume attached, or on another
+ * machine, as it is.
+ */
+LOCAL void links_fix_doc( T_TAD *doc, CONST TS_UUID *host )
+{
+	T_VOBJ	*v;
+	TS_UUID	hv, tv, mine, zero;
+	INT	i, n;
+
+	if ( doc == NULL || knl_obfile_vuuid_of(host, &hv) < E_OK
+	  || ( v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ)) ) == NULL ) {
+		return;
+	}
+	knl_memset(&zero, 0, sizeof(zero));
+	if ( knl_obfile_machine(&mine) < E_OK ) mine = zero;
+	n = tad_lnk_count(doc);
+	for ( i = 0; i < n; i++ ) {
+		BOOL	same;
+
+		if ( tad_lnk_get(doc, i, v) < E_OK || ts_uuid_cmp(&v->vobjid, &zero) == 0 ) continue;
+		if ( ts_uuid_cmp(&v->tmach, &zero) != 0 && ts_uuid_cmp(&v->tmach, &mine) != 0 ) continue;
+		if ( knl_obfile_vuuid_of(&v->target, &tv) < E_OK ) continue;
+		same = (BOOL)( ts_uuid_cmp(&tv, &hv) == 0 || ts_uuid_cmp(&tv, &zero) == 0 );
+		if ( ( same && ts_uuid_cmp(&v->tvol, &zero) == 0 && ts_uuid_cmp(&v->tmach, &zero) == 0 )
+		  || ( !same && ts_uuid_cmp(&v->tvol, &tv) == 0 && ts_uuid_cmp(&v->tmach, &zero) == 0 ) ) {
+			continue;			/* says it already */
+		}
+		v->tvol = same ? zero : tv;
+		v->tmach = zero;
+		(void)tad_lnk_set(doc, v);
+	}
+	Kfree(v);
+}
+
 EXPORT void om_store_forget( CONST TS_UUID *id )
 {
 	INT	i;
@@ -2018,6 +2174,9 @@ EXPORT ER om_store_save( CONST TS_UUID *id, INT recno )
 	if ( slot < 0 || st_tab[slot].doc == NULL ) {
 		return E_NOEXS;			/* nothing of it was read */
 	}
+	/* each link says on which volume its object is, in the record read as well as in what is written */
+	links_fix_doc(st_tab[slot].doc, id);
+
 	/* how large it comes to, then that much room */
 	er = tad_write_mem(st_tab[slot].doc, NULL, 0, &size);
 	if ( er < E_OK && size == 0 ) {
@@ -2033,11 +2192,13 @@ EXPORT ER om_store_save( CONST TS_UUID *id, INT recno )
 		Kfree(buf);
 		return er;
 	}
+	/* each link says on which volume its object is, as seen from this one */
+	(void)om_link_fix(&buf, &size, id);
 	was = om_obj_record(id, recno, &was_len);
 	er = om_obj_record_put(id, recno, OB_RT_TAD, 0, buf, size);
 	meta_forget(id);			/* its date of change has moved */
 	if ( er >= E_OK && !om_store_counts(id) ) {
-		om_store_relink(was, was_len, buf, size);
+		om_store_relink(id, was, was_len, buf, size);
 	}
 	if ( was != NULL ) {
 		Kfree(was);

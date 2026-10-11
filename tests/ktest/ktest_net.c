@@ -53,7 +53,7 @@ LOCAL void test_mac( void )
 		my_mac[0], my_mac[1], my_mac[2], my_mac[3], my_mac[4], my_mac[5]);
 }
 
-#ifndef RPI5
+#if !KT_BOARD
 /* the card takes a frame and counts it */
 LOCAL void test_send( void )
 {
@@ -134,7 +134,7 @@ LOCAL void test_recv( void )
 	}
 	KT_ASSERT(saw_arp_reply);
 }
-#endif /* RPI5 */
+#endif /* KT_BOARD */
 
 /* the same card answers as the device "neta" (design 10.4, 12.6) */
 LOCAL void test_device( void )
@@ -163,7 +163,7 @@ LOCAL void test_device( void )
 	KT_ASSERT_EQ(mtu, 1500);
 
 	KT_ASSERT_ER(tk_srea_dev(dd, TDN_NETLINK, &link, sizeof(link), &asize), E_OK);
-#ifdef RPI5
+#if KT_BOARD
 	tm_printf((UB *)"  link %s\n", link ? "up" : "down");	/* the cable is the user's */
 #else
 	KT_ASSERT(link);
@@ -174,7 +174,7 @@ LOCAL void test_device( void )
 
 	/* a frame written to the device reaches the card; not on the
 	   Raspberry Pi 5, whose network is the user's */
-#ifndef RPI5
+#if !KT_BOARD
 	{
 		UB		frame[NET_FRAME_MIN];
 		T_NETSTAT	after;

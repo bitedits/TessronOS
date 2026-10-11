@@ -274,6 +274,11 @@ def fat32_format(img, start, nsect, extra=()):
 
     def alloc_chain(nclus):
         first = next_free[0]
+        if first + nclus > clusters + 2:
+            # past the data area the files would run into what follows the partition
+            raise SystemExit("mkfat: the files do not fit in the %d MB partition (%d MB more is needed)"
+                             % (nsect * SECTOR // (1024 * 1024),
+                                -(-(first + nclus - clusters - 2) * spc * SECTOR // (1024 * 1024))))
         for i in range(nclus):
             c = first + i
             set_fat(c, 0x0FFFFFFF if i == nclus - 1 else c + 1)
@@ -369,12 +374,8 @@ def fat32_format(img, start, nsect, extra=()):
             out += e
         return bytes(out)
 
-    # files named on the command line, placed in the root
-    taken = set()
-    for path in extra:
-        with open(path, "rb") as f:
-            content = f.read()
-        base = os.path.basename(path)
+    def short_name(base, taken):
+        """The 8.3 name of a file in one directory, made unique there."""
         upper = base.upper()
         stem, _, ext = upper.partition(".")
         keep = "".join(c if (c.isalnum() or c in "-_") else "_" for c in stem)
@@ -385,13 +386,54 @@ def fat32_format(img, start, nsect, extra=()):
             name83 = ((keep[:8 - len(tail)] + tail).ljust(8) + ext[:3].ljust(3))
             n += 1
         taken.add(name83)
-        nclus = max(1, -(-len(content) // (spc * SECTOR)))
-        c = alloc_chain(nclus)
-        write_clusters(c, content)
+        return name83
+
+    def place(base, content, taken, attr=0x20, clus=None):
+        """Write a file's clusters and answer its directory entries."""
+        name83 = short_name(base, taken)
+        if clus is None:
+            nclus = max(1, -(-len(content) // (spc * SECTOR)))
+            clus = alloc_chain(nclus)
+            write_clusters(clus, content)
+        out = b""
         if base.upper() != (name83[:8].strip() + "." + name83[8:].strip()):
-            root += lfn_entries(base, name83)
-        root += dirent(name83, 0x20, c, len(content))
-        print("  %s -> %s (%d bytes)" % (base, name83, len(content)))
+            out += lfn_entries(base, name83)
+        out += dirent(name83, attr, clus, len(content))
+        return name83, out
+
+    # files named on the command line, placed in the root. "DEST=SOURCE"
+    # gives a file another name, and a DEST of "dir/name" puts it in a
+    # directory of the root (the Raspberry Pi firmware's overlays/)
+    taken = set()
+    subdirs = {}
+    for path in extra:
+        if "=" in path:
+            dest, path = path.split("=", 1)
+        else:
+            dest = os.path.basename(path)
+        with open(path, "rb") as f:
+            content = f.read()
+        if "/" in dest:
+            d, base = dest.split("/", 1)
+            subdirs.setdefault(d, []).append((base, content))
+            continue
+        name83, ents = place(dest, content, taken)
+        root += ents
+        print("  %s -> %s (%d bytes)" % (dest, name83, len(content)))
+    for d, items in subdirs.items():
+        sub_taken = set()
+        body = b""
+        for base, content in items:
+            name83, ents = place(base, content, sub_taken)
+            body += ents
+            print("  %s/%s -> %s (%d bytes)" % (d, base, name83, len(content)))
+        csize = spc * SECTOR
+        nclus = max(1, -(-(64 + len(body)) // csize))
+        c_dir = alloc_chain(nclus)
+        write_clusters(c_dir, dirent(".          ", 0x10, c_dir, 0)
+                       + dirent("..         ", 0x10, 0, 0) + body)
+        _, ents = place(d, b"", taken, attr=0x10, clus=c_dir)
+        root += ents
 
     """
     The root directory is a chain like any other file's on FAT32, and it

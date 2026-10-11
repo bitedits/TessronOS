@@ -156,6 +156,7 @@ struct linger {
 #define IP_MULTICAST_IF		6
 #define IP_MULTICAST_LOOP	7
 #define IP_PKTINFO		8
+#define IP_RECVTOS		9		/* int; so_recvtos gives the type of service of what is received */
 
 typedef struct ip_mreq {
 	struct in_addr	imr_multiaddr;
@@ -174,6 +175,16 @@ struct in_pktinfo {
 #define IPV6_LEAVE_GROUP	13
 #define IPV6_DROP_MEMBERSHIP	IPV6_LEAVE_GROUP
 #define IPV6_V6ONLY		27
+#define IPV6_UNICAST_HOPS	4		/* int */
+#define IPV6_MULTICAST_IF	9		/* unsigned int, an interface's index */
+#define IPV6_MULTICAST_HOPS	10		/* int */
+#define IPV6_MULTICAST_LOOP	11		/* unsigned int */
+#define IPV6_RECVHOPLIMIT	37		/* int; the hop limit comes with what is received */
+#define IPV6_RECVTCLASS		57		/* int; so_recvtos gives the traffic class of what is received */
+#define IPV6_TCLASS		61		/* int; the traffic class of what is sent */
+
+/* level IPPROTO_ICMPV6 */
+#define ICMP6_FILTER		18		/* eight 32 bit words, a bit for each type let through */
 
 /* so_send / so_recv */
 #define MSG_PEEK	0x01

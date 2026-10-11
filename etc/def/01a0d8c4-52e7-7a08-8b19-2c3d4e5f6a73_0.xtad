@@ -1,0 +1,42 @@
+<tad version="1.0" encoding="UTF-8" filename="基本表計算のデータボックス">
+<document>
+<p>基本表計算のデータボックス</p>
+<p>基本表計算の検索/置換、用紙設定、閉じるときに保存を尋ねるパネルの定義。操作パネルは基本表計算が自分で描く。</p>
+</document>
+<databox>
+<panel num="2" rect="0,0,420,196" title="検索/置換">
+<text x="16" y="40">検索：</text>
+<box num="11" rect="80,20,404,50" max="200" jp="true"/>
+<text x="16" y="80">置換：</text>
+<box num="12" rect="80,60,404,90" max="200" jp="true"/>
+<switch num="13" rect="80,98,300,122">正規表現</switch>
+<text num="14" x="16" y="146"> </text>
+<button num="101" rect="16,158,104,184" emph="true">次を検索</button>
+<button num="102" rect="110,158,178,184">置換</button>
+<button num="103" rect="184,158,284,184">すべて置換</button>
+<button num="104" rect="316,158,404,184" answer="cancel">閉じる</button>
+</panel>
+<panel num="3" rect="0,0,380,232" title="用紙設定">
+<text x="16" y="40">用紙：</text>
+<select num="11" rect="88,20,364,54" across="true" value="2"><name>A3</name><name>A4</name><name>A5</name><name>B4</name><name>B5</name><name>レター</name></select>
+<text x="16" y="82">向き：</text>
+<select num="12" rect="88,62,232,96" across="true" value="1"><name>縦</name><name>横</name></select>
+<text x="16" y="124">余白(mm)　上</text>
+<serial num="13" rect="132,104,188,134"><f w="3" lo="0" hi="200" value="20"/></serial>
+<text x="200" y="124">下</text>
+<serial num="14" rect="222,104,278,134"><f w="3" lo="0" hi="200" value="20"/></serial>
+<text x="96" y="164">左</text>
+<serial num="15" rect="132,144,188,174"><f w="3" lo="0" hi="200" value="20"/></serial>
+<text x="200" y="164">右</text>
+<serial num="16" rect="222,144,278,174"><f w="3" lo="0" hi="200" value="20"/></serial>
+<button num="101" rect="180,194,268,220" answer="cancel">取消</button>
+<button num="102" rect="276,194,364,220" answer="ok" emph="true">設定</button>
+</panel>
+<panel num="4" rect="0,0,340,112" title="基本表計算">
+<text x="20" y="40">変更を保存してから閉じますか？</text>
+<button num="101" rect="16,72,92,98" answer="cancel">取消</button>
+<button num="103" rect="100,72,212,98">保存しない</button>
+<button num="102" rect="220,72,324,98" emph="true">保存</button>
+</panel>
+</databox>
+</tad>

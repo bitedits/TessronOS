@@ -1,0 +1,11 @@
+<tad version="1.0" encoding="UTF-8" filename="基本表計算の配置">
+<document>
+<p>基本表計算の配置</p>
+<p>基本表計算のセルの配置。横と縦の配置の定義を取り込む。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-46f0-7a01-8b12-3c4d5e6f7c01_0.xtad" vobjid="01a0d8c3-2003-7011-9a10-c1d2e3f40b11"/></include>
+<line/>
+<include><link id="01a0d889-46f1-7b12-9c23-4d5e6f7c8d12_0.xtad" vobjid="01a0d8c3-2003-7012-9a10-c1d2e3f40b12"/></include>
+</menu>
+</tad>

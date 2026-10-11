@@ -1,0 +1,14 @@
+<tad version="1.0" encoding="UTF-8" filename="単語登録のメニュー">
+<document>
+<p>単語登録のメニュー</p>
+<p>単語登録の窓のメニュー。閉じる、読込み、書出し、クリアと、ウインドウ、小物、実行。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2010-7001-9a10-c1d2e3f41001"/></include>
+<item code="import">読込み（トレーから）</item>
+<item code="export">書出し（トレーへ）</item>
+<line/>
+<item code="clear">クリア</item>
+<include><link id="01a0d889-46bd-7f9c-8bad-e3f4a5b6c789_0.xtad" vobjid="01a0d8c3-2010-7002-9a10-c1d2e3f41002"/></include>
+</menu>
+</tad>

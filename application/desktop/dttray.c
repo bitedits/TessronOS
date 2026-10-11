@@ -16,13 +16,22 @@
  *	cabinet, a <document> of paragraphs from a text. Whatever window
  *	takes from the tray reads the fragment of the set in hand back and
  *	takes what it can use of it.
+ *
+ *	A fragment may stand for a picture the set carries beside it: an
+ *	element whose href is "tray:N" names the PNG in record N of the set
+ *	(TR_PNG), so that a picture can be in the tray without an object to
+ *	hold it. Whatever pastes such a fragment into a figure writes each
+ *	of those pictures beside its own record first (dt_tray_pictures).
  */
 
 #include <sys/machine.h>
 #include "kernel.h"
 #include <tk/tkernel.h>
+#include <tm/tmonitor.h>
 #include <ts/tad.h>
 #include <ts/tray.h>
+#include <ts/om.h>
+#include <ts/uuid.h>
 #include "desktop.h"
 
 #define FRAG_MAX	( 4 * 1024 * 1024 )	/* bytes of one fragment */
@@ -159,6 +168,97 @@ EXPORT INT dt_frag_shapes( CONST T_TAD *frag )
 		}
 	}
 	return n;
+}
+
+/* The number after the last '_' of an href of a picture beside a record ("<object>_0_<n>.png") */
+LOCAL INT pic_number( CONST UB *h )
+{
+	INT	j, v = 0, under = 0;
+
+	for ( j = 0; h != NULL && h[j] != 0 && h[j] != '.'; j++ ) {
+		if ( h[j] == '_' ) {
+			under++;
+			v = 0;
+		} else if ( under == 2 && h[j] >= '0' && h[j] <= '9' ) {
+			v = v * 10 + ( h[j] - '0' );
+		}
+	}
+	return ( under == 2 ) ? v : 0;
+}
+
+/* The highest number the pictures beside a record have, in the record and the fragment */
+LOCAL INT pic_top( CONST T_TAD *rec, CONST T_TAD *frag )
+{
+	CONST T_TAD	*docs[2];
+	T_TADNODE	*n;
+	INT		top = 0, k, v;
+
+	docs[0] = rec;
+	docs[1] = frag;
+	for ( k = 0; k < 2; k++ ) {
+		if ( docs[k] == NULL ) continue;
+		for ( n = tad_walk(docs[k], NULL); n != NULL; n = tad_walk(docs[k], n) ) {
+			if ( n->kind != TAD_ND_ELEM ) continue;
+			v = pic_number(tad_attr(n, "href"));
+			if ( v > top ) top = v;
+		}
+	}
+	return top;
+}
+
+/*
+ * The pictures a fragment from the tray names by its set ("tray:N"),
+ * written beside the record of 'id' (whose text is 'rec') under names of
+ * their own, "<id>_0_<n>.png" past every number the record and the
+ * fragment use, and the fragment's href made that name. Answers how many.
+ */
+EXPORT INT dt_tray_pictures( CONST TS_UUID *id, CONST T_TAD *rec, T_TAD *frag )
+{
+	T_TADNODE	*n;
+	T_TRINF		inf;
+	CONST UB	*h;
+	char		us[TS_UUID_STRLEN + 1];
+	UB		name[TS_UUID_STRLEN + 24], *png;
+	SZ		asz = 0;
+	INT		done = 0, rn, i, k, v;
+
+	if ( id == NULL || frag == NULL || ts_uuid_to_str(id, us, sizeof(us)) < E_OK ) {
+		return 0;
+	}
+	for ( n = tad_walk(frag, NULL); n != NULL; n = tad_walk(frag, n) ) {
+		h = ( n->kind == TAD_ND_ELEM ) ? tad_attr(n, "href") : NULL;
+		if ( h == NULL || h[0] != 't' || h[1] != 'r' || h[2] != 'a' || h[3] != 'y' || h[4] != ':' ) {
+			continue;
+		}
+		for ( rn = 0, i = 5; h[i] >= '0' && h[i] <= '9'; i++ ) rn = rn * 10 + ( h[i] - '0' );
+		if ( tr_ref_rec(TR_HAND, rn, &inf) < E_OK || inf.kind != TR_PNG || inf.size <= 0 ) {
+			continue;
+		}
+		png = (UB *)Kmalloc(inf.size);
+		if ( png == NULL ) {
+			continue;
+		}
+		if ( tr_rea_rec(TR_HAND, rn, png, inf.size, &asz) >= E_OK ) {
+			char	t[12];
+
+			for ( k = 0; us[k] != 0; k++ ) name[k] = (UB)us[k];
+			name[k++] = '_';
+			name[k++] = '0';
+			name[k++] = '_';
+			v = pic_top(rec, frag) + 1;
+			for ( i = 0; v > 0 || i == 0; v /= 10 ) t[i++] = (char)( '0' + v % 10 );
+			while ( i > 0 ) name[k++] = (UB)t[--i];
+			name[k++] = '.';  name[k++] = 'p';  name[k++] = 'n';  name[k++] = 'g';
+			name[k] = 0;
+			if ( om_obj_res_put(id, name + TS_UUID_STRLEN, png, asz) >= E_OK
+			  && tad_set_attr(frag, n, "href", name) >= E_OK ) {
+				tm_printf((UB *)"tray: picture %s\n", name);
+				done++;
+			}
+		}
+		Kfree(png);
+	}
+	return done;
 }
 
 EXPORT void dt_tray_taken( void )

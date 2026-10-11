@@ -124,6 +124,7 @@ SB_MOUNTS = 360
 SB_MOUNTTIME = 368
 SB_FSCKTIME = 376
 SB_MKFSTIME = 384
+SB_XREFUUID = 400  # the object that keeps what other volumes link to here
 SB_CRC = 4092
 
 # 1970-01-01 to 1985-01-01 in seconds: the volume counts time from 1985,
@@ -287,6 +288,7 @@ class Superblock(object):
         self.root_uuid = NIL_UUID
         self.sysbox_uuid = NIL_UUID
         self.domain_uuid = NIL_UUID
+        self.xref_uuid = NIL_UUID
         self.compat = 0
         self.ro_compat = 0
         self.incompat = 0
@@ -330,6 +332,7 @@ class Superblock(object):
         buf[SB_ROOTUUID:SB_ROOTUUID + 16] = self.root_uuid.bytes
         buf[SB_SYSUUID:SB_SYSUUID + 16] = self.sysbox_uuid.bytes
         buf[SB_DOMUUID:SB_DOMUUID + 16] = self.domain_uuid.bytes
+        buf[SB_XREFUUID:SB_XREFUUID + 16] = self.xref_uuid.bytes
         struct.pack_into("<QQQ", buf, SB_COMPAT,
                          self.compat, self.ro_compat, self.incompat)
         struct.pack_into("<IIQQQ", buf, SB_STATE, self.state, self.err_kind,
@@ -369,6 +372,7 @@ class Superblock(object):
         sb.root_uuid = uuid.UUID(bytes=buf[SB_ROOTUUID:SB_ROOTUUID + 16])
         sb.sysbox_uuid = uuid.UUID(bytes=buf[SB_SYSUUID:SB_SYSUUID + 16])
         sb.domain_uuid = uuid.UUID(bytes=buf[SB_DOMUUID:SB_DOMUUID + 16])
+        sb.xref_uuid = uuid.UUID(bytes=buf[SB_XREFUUID:SB_XREFUUID + 16])
         sb.compat, sb.ro_compat, sb.incompat = struct.unpack_from(
             "<QQQ", buf, SB_COMPAT)
         (sb.state, sb.err_kind, sb.err_first, sb.err_last,
@@ -413,7 +417,7 @@ class Superblock(object):
         """The objects the superblock names, as (field, UUID)."""
         out = []
         for name, u in (("root", self.root_uuid), ("sysbox", self.sysbox_uuid),
-                        ("domain", self.domain_uuid)):
+                        ("domain", self.domain_uuid), ("xref", self.xref_uuid)):
             if u != NIL_UUID:
                 out.append((name, u))
         return out
@@ -435,6 +439,7 @@ class Superblock(object):
             "root_uuid": str(self.root_uuid),
             "sysbox_uuid": str(self.sysbox_uuid),
             "domain_uuid": str(self.domain_uuid),
+            "xref_uuid": str(self.xref_uuid),
             "state": self.state,
             "err_kind": self.err_kind,
             "err_blk": self.err_blk,

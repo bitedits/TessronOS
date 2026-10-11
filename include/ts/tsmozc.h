@@ -147,6 +147,15 @@ int tsmozc_list(int kid, char *buf, int size, int *p_count, int *p_first,
 void tsmozc_flush(void);
 
 /*
+ * The user dictionary, whole, in place of what it held: lines of
+ * "reading<TAB>word<TAB>part of speech<LF>", UTF-8, the part as mozc's
+ * number for it (ts/udic.h). The engine keeps it as its user dictionary
+ * file and converts with it from now on. 0, or below 0 when it could
+ * not be kept.
+ */
+int tsmozc_words(const char *tsv, unsigned long size);
+
+/*
  * What the engine asks of the system (application/kconv supplies them).
  * Its C library's system calls are built on these: memory, the clock,
  * files, and where its output and its end go. Paths are as the engine

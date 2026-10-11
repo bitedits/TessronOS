@@ -28,7 +28,7 @@
  *	  hold X Y [B]		there, pressed and held (a menu opened and kept)
  *	  drag X1 Y1 X2 Y2 [B]	pressed at one place, carried in steps, let go at the other
  *	  key CODE [MODS]	a key by its usage code (hex), with the modifiers (hex)
- *	  text STRING		letters and digits typed one after another
+ *	  text STRING		letters, digits and . - / : typed one after another
  *	  wheel N		the wheel turned N notches (up is positive)
  *	  open UUID		the object opened, as a double press on a link to it opens it
  *	  run PATH [N ...]	the program file started as a process, the numbers (up
@@ -40,6 +40,11 @@
  *	  lag MS		the pointer moved to and fro for MS ms: "ok WORST MOVES LATE",
  *				the longest the screen took to show a move (ms), the moves,
  *				and how many took longer than LAG_LATE_MS
+ *	  look NUM VALUE	an entry of the look table set (LK_ROUND and the like)
+ *				and the screen built again
+ *	  stat			what was built and sent since the last stat: "ok BUILDS PARTS
+ *				KPX_BUILT MOVES MOVES_BUILT RECTS_SENT KPX_SENT", the pointer's
+ *				moves and how many of them came with something built
  */
 
 #include <sys/machine.h>
@@ -49,6 +54,7 @@
 #include <ts/hid.h>
 #include <ts/ser.h>
 #include <ts/wm.h>
+#include <ts/disp.h>
 #include <ts/ob.h>
 #include <ts/uuid.h>
 #include <ts/dtreq.h>
@@ -172,7 +178,7 @@ LOCAL BOOL word( CONST char **p, CONST char *w )
 	return TRUE;
 }
 
-/* The usage code a letter or digit is typed with, and whether with Shift */
+/* The usage code a letter, digit or sign is typed with, and whether with Shift */
 LOCAL UINT usage_of( char c, BOOL *p_shift )
 {
 	*p_shift = FALSE;
@@ -184,6 +190,35 @@ LOCAL UINT usage_of( char c, BOOL *p_shift )
 	if ( c == '.' ) return 0x37;
 	if ( c == '-' ) return 0x2D;
 	if ( c == '/' ) return 0x38;
+	if ( c == ':' ) return 0x34;		/* the Japanese keyboard's colon, unshifted */
+	if ( c == ',' ) return 0x36;
+	if ( c == ';' ) return 0x33;
+	if ( c == '[' ) return 0x30;
+	if ( c == ']' ) return 0x31;
+	if ( c == '@' ) return 0x2F;
+	if ( c == '^' ) return 0x2E;
+	{
+		/* the signs over the digits and the other keys, shifted, as the Japanese keyboard has them */
+		static CONST char	sh[] = "!\"#$%&'()";
+		INT			i;
+
+		for ( i = 0; sh[i] != 0; i++ ) {
+			if ( c == sh[i] ) {
+				*p_shift = TRUE;
+				return 0x1E + (UINT)i;
+			}
+		}
+	}
+	*p_shift = TRUE;
+	if ( c == '=' ) return 0x2D;
+	if ( c == '+' ) return 0x33;
+	if ( c == '*' ) return 0x34;
+	if ( c == '<' ) return 0x36;
+	if ( c == '>' ) return 0x37;
+	if ( c == '?' ) return 0x38;
+	if ( c == '{' ) return 0x30;
+	if ( c == '}' ) return 0x31;
+	*p_shift = FALSE;
 	return 0;
 }
 
@@ -388,6 +423,39 @@ LOCAL void lag( INT ms )
 	say(b);
 }
 
+/*
+ * The counts of the window manager and the screen since the last time
+ * they were asked for
+ */
+LOCAL T_WMSTAT		ut_wm_was;
+LOCAL T_DISPSTAT	ut_disp_was;
+
+LOCAL void ut_stat( void )
+{
+	T_WMSTAT	w;
+	T_DISPSTAT	d;
+	char		b[160];
+	INT		k = 0;
+
+	knl_memset(&w, 0, sizeof(w));
+	knl_memset(&d, 0, sizeof(d));
+	(void)wm_stat(&w);
+	(void)ts_disp_stat(&d);
+	b[k++] = 'o';  b[k++] = 'k';  b[k++] = ' ';
+	put_num(b, &k, (INT)( w.composites - ut_wm_was.composites ));  b[k++] = ' ';
+	put_num(b, &k, (INT)( w.parts - ut_wm_was.parts ));  b[k++] = ' ';
+	put_num(b, &k, (INT)( ( w.pixels - ut_wm_was.pixels ) / 1000 ));  b[k++] = ' ';
+	put_num(b, &k, (INT)( w.ptr_moves - ut_wm_was.ptr_moves ));  b[k++] = ' ';
+	put_num(b, &k, (INT)( w.ptr_built - ut_wm_was.ptr_built ));  b[k++] = ' ';
+	put_num(b, &k, (INT)( d.rects - ut_disp_was.rects ));  b[k++] = ' ';
+	put_num(b, &k, (INT)( ( d.pixels - ut_disp_was.pixels ) / 1000 ));
+	b[k++] = '\n';
+	b[k] = 0;
+	ut_wm_was = w;
+	ut_disp_was = d;
+	say(b);
+}
+
 /* ---------------------------------------------------------------- a line done */
 
 LOCAL void line( CONST char *s )
@@ -449,6 +517,15 @@ LOCAL void line( CONST char *s )
 		tk_dly_tsk(UT_GAP_MS);
 		ev(HID_EV_KEY_UP, (UINT)x, (UINT)m);
 		say("ok\n");
+	} else if ( word(&s, "keydown") && num(&s, &x, TRUE) ) {
+		/* held until its keyup: keys pressed together, a shift held over others */
+		(void)num(&s, &m, TRUE);
+		ev(HID_EV_KEY_DOWN, (UINT)x, (UINT)m);
+		say("ok\n");
+	} else if ( word(&s, "keyup") && num(&s, &x, TRUE) ) {
+		(void)num(&s, &m, TRUE);
+		ev(HID_EV_KEY_UP, (UINT)x, (UINT)m);
+		say("ok\n");
 	} else if ( word(&s, "text") ) {
 		s = skip(s);
 		for ( ; *s != 0; s++ ) {
@@ -489,6 +566,15 @@ LOCAL void line( CONST char *s )
 		say("ok\n");
 	} else if ( word(&s, "lag") && num(&s, &x, FALSE) ) {
 		lag(x);
+	} else if ( word(&s, "stat") ) {
+		ut_stat();
+	} else if ( word(&s, "look") && num(&s, &x, FALSE) && num(&s, &y, FALSE) ) {
+		if ( wm_set_look((UINT)x, (UW)y) >= E_OK ) {
+			(void)wm_composite();
+			say("ok\n");
+		} else {
+			say("err look\n");
+		}
 	} else {
 		say("err what\n");
 	}

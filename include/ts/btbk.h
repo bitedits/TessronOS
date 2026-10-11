@@ -413,6 +413,7 @@ typedef struct {
 	INT	npat;			/* the patterns before it (a figure) */
 	INT	hunit, vunit;
 	INT	segat;			/* where its segment begins (an overlay's text) */
+	UB	pout;			/* a text: 1 after a paragraph closed, 2 in one begun without <p> */
 } BK_TADLV;
 
 typedef struct {
@@ -438,6 +439,8 @@ typedef struct {
 	CONST BK_TADHOOK *hk;
 	BK_TADSTAT st;
 	INT	absorb;			/* elements after a table's cell that it says itself */
+	INT	rtskip;			/* tokens an element of 実時間制御TAD took in already */
+	BOOL	loose;			/* some </p> closes no <p> */
 	ER	er;
 } BK_TADW;
 

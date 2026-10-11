@@ -39,6 +39,9 @@
 	SVCSTUB	ts_ext_prc,	TSN_TS_EXT_PRC
 	SVCSTUB	ts_get_pid,	TSN_TS_GET_PID
 	SVCSTUB	ts_get_mono,	TSN_TS_GET_MONO
+	SVCSTUB	ts_ref_cpu,	TSN_TS_REF_CPU
+	SVCSTUB	ts_def_flt,	TSN_TS_DEF_FLT
+	SVCSTUB	ts_flt_ret,	TSN_TS_FLT_RET
 	SVCSTUB	ts_rcv_msg,	TSN_TS_RCV_MSG
 	SVCSTUB	ts_get_arg,	TSN_TS_GET_ARG
 	SVCSTUB	ts_wai_prc,	TSN_TS_WAI_PRC
@@ -58,6 +61,8 @@
 	SVCSTUB	dt_gmtime,	TSN_DT_GMTIME
 	SVCSTUB	dt_settime,	TSN_DT_SETTIME
 	SVCSTUB	dt_setsystz,	TSN_DT_SETSYSTZ
+	SVCSTUB	dt_getsyszone,	TSN_DT_GETSYSZONE
+	SVCSTUB	dt_setsyszone,	TSN_DT_SETSYSZONE
 	SVCSTUB	ts_snd_msg,	TSN_TS_SND_MSG
 	SVCSTUB	ts_ter_prc,	TSN_TS_TER_PRC
 	SVCSTUB	ts_ref_prc,	TSN_TS_REF_PRC
@@ -74,6 +79,7 @@
 	SVCSTUB	tk_ter_tsk,	TSN_TK_TER_TSK
 	SVCSTUB	tk_dis_dsp,	TSN_TK_DIS_DSP
 	SVCSTUB	tk_chg_pri,	TSN_TK_CHG_PRI
+	SVCSTUB	tk_chg_slt,	TSN_TK_CHG_SLT
 	SVCSTUB	tk_rot_rdq,	TSN_TK_ROT_RDQ
 	SVCSTUB	tk_rel_wai,	TSN_TK_REL_WAI
 	SVCSTUB	tk_ref_tsk,	TSN_TK_REF_TSK
@@ -133,6 +139,7 @@
 	SVCSTUB	ob_get_ico,	TSN_OB_GET_ICO
 	SVCSTUB	ob_set_ico,	TSN_OB_SET_ICO
 	SVCSTUB	ob_ref_vol,	TSN_OB_REF_VOL
+	SVCSTUB	ob_wip_vol,	TSN_OB_WIP_VOL
 	SVCSTUB	ob_get_prt,	TSN_OB_GET_PRT
 	SVCSTUB	ob_set_prt,	TSN_OB_SET_PRT
 	SVCSTUB	ob_dup_key,	TSN_OB_DUP_KEY
@@ -142,6 +149,7 @@
 	SVCSTUB	ob_get_crd,	TSN_OB_GET_CRD
 	SVCSTUB	ob_login,	TSN_OB_LOGIN
 	SVCSTUB	ob_set_pwd,	TSN_OB_SET_PWD
+	SVCSTUB	ob_end_adm,	TSN_OB_END_ADM
 	SVCSTUB	ob_rea_res,	TSN_OB_REA_RES
 	SVCSTUB	ob_wri_res,	TSN_OB_WRI_RES
 	SVCSTUB	ob_del_res,	TSN_OB_DEL_RES
@@ -205,6 +213,8 @@
 	SVCSTUB	so_setifaddr,	TSN_SO_SETIFADDR
 	SVCSTUB	so_dhcp_start,	TSN_SO_DHCP_START
 	SVCSTUB	so_getobj,	TSN_SO_GETOBJ
+	SVCSTUB	so_resolveall,	TSN_SO_RESOLVEALL
+	SVCSTUB	so_recvtos,	TSN_SO_RECVTOS
 
 	/* drawing in a window of one's own (class 8) */
 	SVCSTUB	dp_fill_rect,	TSN_DP_FILL_RECT
@@ -236,3 +246,53 @@
 	SVCSTUB	wm_look,	TSN_WM_LOOK
 	SVCSTUB	wm_set_look,	TSN_WM_SET_LOOK
 	SVCSTUB	wm_draw_bar,	TSN_WM_DRAW_BAR
+	SVCSTUB	wm_obj_surf,	TSN_WM_OBJ_SURF
+	SVCSTUB	wm_obj_put,	TSN_WM_OBJ_PUT
+	SVCSTUB	wm_key_put,	TSN_WM_KEY_PUT
+	SVCSTUB	km_get,		TSN_KM_GET
+	SVCSTUB	km_set,		TSN_KM_SET
+	SVCSTUB	km_label,	TSN_KM_LABEL
+	SVCSTUB	wm_screen,	TSN_WM_SCREEN
+
+	/* the tray (class 9) */
+	SVCSTUB	tr_psh_dat,	TSN_TR_PSH_DAT
+	SVCSTUB	tr_add_dat,	TSN_TR_ADD_DAT
+	SVCSTUB	tr_set_dat,	TSN_TR_SET_DAT
+	SVCSTUB	tr_get_sts,	TSN_TR_GET_STS
+	SVCSTUB	tr_ref_rec,	TSN_TR_REF_REC
+	SVCSTUB	tr_rea_rec,	TSN_TR_REA_REC
+	SVCSTUB	tr_sel_dat,	TSN_TR_SEL_DAT
+	SVCSTUB	tr_mov_dat,	TSN_TR_MOV_DAT
+	SVCSTUB	tr_del_dat,	TSN_TR_DEL_DAT
+	SVCSTUB	tr_clr_tra,	TSN_TR_CLR_TRA
+
+	/* the GPU (class 10, include/ts/gpuapp.h) */
+	SVCSTUB	gp_opn_gpu,	TSN_GP_OPN_GPU
+	SVCSTUB	gp_cls_gpu,	TSN_GP_CLS_GPU
+	SVCSTUB	gp_ref_gpu,	TSN_GP_REF_GPU
+	SVCSTUB	gp_cre_bo,	TSN_GP_CRE_BO
+	SVCSTUB	gp_del_bo,	TSN_GP_DEL_BO
+	SVCSTUB	gp_map_bo,	TSN_GP_MAP_BO
+	SVCSTUB	gp_sub_job,	TSN_GP_SUB_JOB
+	SVCSTUB	gp_wai_fen,	TSN_GP_WAI_FEN
+	SVCSTUB	gp_wai_bo,	TSN_GP_WAI_BO
+	SVCSTUB	gp_shr_bo,	TSN_GP_SHR_BO
+	SVCSTUB	gp_imp_bo,	TSN_GP_IMP_BO
+	SVCSTUB	gp_ref_bo,	TSN_GP_REF_BO
+	/* the serial ports (class 11, include/ts/ser.h) */
+	SVCSTUB	sr_lst_prt,	TSN_SR_LST_PRT
+	SVCSTUB	sr_opn_prt,	TSN_SR_OPN_PRT
+	SVCSTUB	sr_cls_prt,	TSN_SR_CLS_PRT
+	SVCSTUB	sr_rea_prt,	TSN_SR_REA_PRT
+	SVCSTUB	sr_wri_prt,	TSN_SR_WRI_PRT
+	SVCSTUB	sr_set_spd,	TSN_SR_SET_SPD
+	/* USB devices of a program's own (class 12, include/ts/usb.h) */
+	SVCSTUB	us_lst_dev,	TSN_US_LST_DEV
+	SVCSTUB	us_get_dsc,	TSN_US_GET_DSC
+	SVCSTUB	us_opn_dev,	TSN_US_OPN_DEV
+	SVCSTUB	us_cls_dev,	TSN_US_CLS_DEV
+	SVCSTUB	us_ctl,		TSN_US_CTL
+	SVCSTUB	us_set_alt,	TSN_US_SET_ALT
+	SVCSTUB	us_clr_hlt,	TSN_US_CLR_HLT
+	SVCSTUB	us_xfer,	TSN_US_XFER
+	SVCSTUB	us_rst_dev,	TSN_US_RST_DEV

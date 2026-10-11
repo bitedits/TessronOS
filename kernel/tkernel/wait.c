@@ -22,6 +22,7 @@
 EXPORT void knl_wait_release_ok( TCB *tcb )
 {
 	knl_wait_release(tcb);
+	KT_SPIN(knl_kt_release_spin)
 	*tcb->wercd = E_OK;
 }
 

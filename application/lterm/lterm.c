@@ -342,8 +342,11 @@ EXPORT void lt_draw( LTERM *t, LTWIN *w, CONST UB *tail, BOOL caret )
 		}
 		row += draw_rows(w, t->line[k], t->len[k], width, row, first, last, &cx, &cy);
 	}
+	t->tail_x = t->tail_y = -1;
 	if ( tail != NULL && row <= last ) {
 		(void)draw_rows(w, tail, tlen, width, row, first, last, &cx, &cy);
+		t->tail_x = cx;
+		t->tail_y = cy;
 		if ( caret ) {
 			bar.left = cx + 1;  bar.right = cx + 3;
 			bar.top = cy + 1;   bar.bottom = cy + LT_LH - 1;
@@ -360,7 +363,9 @@ EXPORT void lt_draw( LTERM *t, LTWIN *w, CONST UB *tail, BOOL caret )
 	b.clo = ( t->total > rows ) ? first : 0;
 	b.chi = ( t->total > rows ) ? first + rows : b.hi;
 	(void)wm_draw_bar(w->gid, &t->bar, &b, FALSE, TRUE);
-	(void)wm_obj_flush(w->kw, NULL);
+	if ( !t->hold ) {
+		(void)wm_obj_flush(w->kw, NULL);
+	}
 }
 
 /* The knob's place along the bar, in the same reckoning the bar is drawn with */
@@ -434,7 +439,7 @@ EXPORT ER lt_open( LTWIN *w, CONST char *name, CONST char *json )
 	if ( er < E_OK ) {
 		return er;
 	}
-	w->kw = ob_opn_obj(&w->win, OB_OP_ALL);
+	w->kw = ob_opn_obj(&w->win, OB_OP_R | OB_OP_W | OB_OP_PROT);
 	w->gid = ( w->kw > 0 ) ? wm_obj_gid(w->kw) : E_ID;
 
 	memset(&c, 0, sizeof(c));

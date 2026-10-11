@@ -38,18 +38,25 @@ SRCS_SYSMAN := \
 	peripheral_kernel/sysman/space.c \
 	peripheral_kernel/sysman/part.c \
 	peripheral_kernel/fs/fs.c \
+	peripheral_kernel/fs/pipefs.c \
+	peripheral_kernel/fs/devfs.c \
+	peripheral_kernel/fs/objfs.c \
 	peripheral_kernel/fs/fatfs.c \
+	peripheral_kernel/fs/fsprobe.c \
 	peripheral_kernel/fs/crc32c.c \
 	peripheral_kernel/fs/tsfs.c \
 	peripheral_kernel/fs/tsfsblk.c \
 	peripheral_kernel/fs/tsfsbtree.c \
 	peripheral_kernel/fs/tsfsjrnl.c \
 	peripheral_kernel/fs/tsfsobj.c \
+	peripheral_kernel/fs/tsfsck.c \
 	peripheral_kernel/obj/objson.c \
 	peripheral_kernel/obj/obprot.c \
 	peripheral_kernel/obj/obhash.c \
 	peripheral_kernel/obj/obname.c \
 	peripheral_kernel/obj/obfile.c \
+	peripheral_kernel/obj/obfsck.c \
+	peripheral_kernel/obj/obxref.c \
 	peripheral_kernel/obj/obmem.c \
 	peripheral_kernel/obj/obdev.c \
 	peripheral_kernel/obj/obsys.c \
@@ -109,6 +116,7 @@ SRCS_LIBOM := \
 # 画像の復号と PNG の符号化。画面の無い機械でも、実身のアイコンや絵を読み書きする
 SRCS_LIBIMG := \
 	outer_kernel/img/inflate.c \
+	outer_kernel/img/deflate.c \
 	outer_kernel/img/png.c \
 	outer_kernel/img/jpeg.c \
 	outer_kernel/img/bmp.c \
@@ -150,10 +158,13 @@ SRCS_FONT := $(SRCS_FT) \
 	outer_kernel/font/port/ftsystem.c \
 	outer_kernel/font/fn.c $(SRCS_LIBC)
 
-# GPU の共通の層と V3D のアドレス空間(第13章)。機械に依らないので両方の機械で建て、
-# QEMU では試験(ktest_gpu.c)が使う。V3D そのものを動かす側は rpi5.mk が足す
+# GPU の共通の層、プロセスからの SVC(gp_)と V3D のアドレス空間(第13章)。機械に依らない
+# ので両方の機械で建て、QEMU では試験(ktest_gpu.c、ktest_gl.c)が使う。V3D そのものを
+# 動かす側は rpi5.mk が足す
 SRCS_DEVICE  := \
 	device/gpu/gpu.c \
+	device/gpu/gpu_svc.c \
+	device/ser/ser_svc.c \
 	device/gpu/v3d/v3d_mmu.c
 
 # 画面の機械に依らない側・描画・窓・書体。画面を得る側(disp_bochs.c、disp_rpi5.c)は
@@ -165,7 +176,10 @@ SRCS_GUI := \
 	outer_kernel/dp/dp_shape.c \
 	outer_kernel/wm/look.c \
 	outer_kernel/wm/wm.c \
+	outer_kernel/wm/compose.c \
+	outer_kernel/wm/compose_simd.c \
 	outer_kernel/wm/part.c \
+	outer_kernel/wm/keymap.c \
 	outer_kernel/wm/pdraw.c \
 	outer_kernel/wm/pndef.c \
 	outer_kernel/wm/dbox.c \
@@ -176,6 +190,11 @@ SRCS_GUI := \
 	outer_kernel/wm/beep.c \
 	outer_kernel/wm/wmobj.c \
 	outer_kernel/wm/mn.c \
+	outer_kernel/wm/fquit.c \
+	outer_kernel/print/pdf.c \
+	outer_kernel/print/pdf_font.c \
+	outer_kernel/print/prn_rec.c \
+	outer_kernel/print/print.c \
 	$(SRCS_FONT)
 
 # デスクトップとカーネルの中のアプリ、かな漢字変換(設計書 16.5.12、17.14)
@@ -186,10 +205,12 @@ SRCS_DESKTOP := \
 	application/doc/docmenu.c \
 	application/doc/docfind.c \
 	application/kconv/kconv.c \
+	lib/libudic/udic.c \
 	application/desktop/desktop.c \
 	application/desktop/dtedit.c \
 	application/desktop/dtcab.c \
 	application/desktop/dtform.c \
+	application/desktop/dtprint.c \
 	application/desktop/dtvmn.c \
 	application/desktop/dtinfo.c \
 	application/desktop/dtfault.c \
@@ -200,12 +221,25 @@ SRCS_DESKTOP := \
 	application/desktop/dtprog.c \
 	application/desktop/dtres.c \
 	application/desktop/dttool.c \
+	application/desktop/dtscr.c \
+	application/desktop/dttrayv.c \
+	application/desktop/dtnotify.c \
+	application/desktop/dtfix.c \
+	application/desktop/dtdisk.c \
+	application/desktop/dttype.c \
+	application/desktop/dtadmin.c \
 	application/desktop/dtdoc.c \
 	application/desktop/dtfig.c \
 	application/desktop/dtftool.c \
 	application/desktop/dtfcanvas.c \
 	application/desktop/dtfpat.c \
 	application/desktop/dttip.c \
+	application/desktop/dtslide.c \
+	application/desktop/dtrt.c \
+	application/desktop/dtrtwin.c \
+	lib/librtad/rt_num.c \
+	lib/librtad/rt_prog.c \
+	lib/librtad/rt_run.c \
 	application/fig/figview.c
 
 # lwIP と、その TessronOS 側の受け(設計書 12.6)。
@@ -235,6 +269,7 @@ SRCS_NET += \
 	peripheral_kernel/network/netbsd/neta_user.c \
 	peripheral_kernel/network/netbsd/so_api.c \
 	peripheral_kernel/network/netbsd/so_dhcp.c \
+	peripheral_kernel/network/netbsd/so_slaac.c \
 	peripheral_kernel/network/netbsd/so_dns.c
 endif
 
@@ -251,14 +286,18 @@ SRCS_APP += \
 	tests/ktest/ktest_mem.c \
 	tests/ktest/ktest_el0.c \
 	tests/ktest/ktest_smp.c \
+	tests/ktest/ktest_lockup.c \
 	tests/ktest/ktest_blk.c \
 	tests/ktest/ktest_sd.c \
+	tests/ktest/ktest_board.c \
 	tests/ktest/ktest_ser.c \
 	tests/ktest/ktest_fs.c \
 	tests/ktest/ktest_fat.c \
 	tests/ktest/ktest_tsfscut.c \
 	tests/ktest/ktest_proc.c \
 	tests/ktest/ktest_prcobj.c \
+	tests/ktest/ktest_pan.c \
+	tests/ktest/ktest_cred.c \
 	tests/ktest/ktest_cxx.c \
 	tests/ktest/ktest_v8.c \
 	tests/ktest/ktest_uuid.c \
@@ -267,26 +306,42 @@ SRCS_APP += \
 	tests/ktest/ktest_tsfsbtree.c \
 	tests/ktest/ktest_tsfsjrnl.c \
 	tests/ktest/ktest_tsfsobj.c \
+	tests/ktest/ktest_dfix.c \
 	tests/ktest/ktest_ob.c \
 	tests/ktest/ktest_tad.c \
 	tests/ktest/ktest_om.c \
 	tests/ktest/ktest_usb.c \
 	tests/ktest/ktest_devob.c \
 	tests/ktest/ktest_snd.c \
+	tests/ktest/ktest_cam.c \
 	tests/ktest/ktest_store.c \
 	tests/ktest/ktest_unp.c \
 	lib/libbpk/bpk_lh5.c \
+	tests/ktest/ktest_arc.c \
+	lib/libbpk/bpk_arc.c \
+	lib/libbpk/bpk_lh5e.c \
+	lib/libbpk/bpk_pack.c \
 	tests/ktest/ktest_btbk.c \
 	tests/ktest/ktest_btbk_data.S \
+	tests/ktest/ktest_speech_data.S \
 	tests/ktest/ktest_bkp.c \
 	lib/libbtbk/btbk_lzss.c \
 	lib/libbtbk/btbk_arc.c \
 	lib/libbtbk/btbk_tad.c \
 	lib/libbpk/bpk_tron.c \
 	lib/libbpk/bpk_jis.c \
+	lib/libbpk/bpk_rt.c \
+	lib/libbpk/bpk_tad.c \
+	lib/libbpk/bpk_util.c \
+	lib/libbpk/bpk_png.c \
+	lib/libbpk/bpk_fax.c \
+	tests/ktest/ktest_rt.c \
 	tests/ktest/ktest_tray.c \
 	tests/ktest/ktest_xf.c \
 	tests/ktest/ktest_xfu.c \
+	tests/ktest/ktest_btcd.c \
+	tests/ktest/ktest_vols.c \
+	lib/libbtfs/btfs.c \
 	lib/libtxc/txc.c \
 	lib/libtxc/txc_tab.c \
 	lib/libftp/ftp.c \
@@ -301,20 +356,57 @@ SRCS_APP += \
 	tests/ktest/ktest_bt2.c \
 	tests/ktest/ktest_net.c \
 	tests/ktest/ktest_so.c \
+	tests/ktest/ktest_rump.c \
 	tests/ktest/ktest_svcio.c \
+	tests/ktest/ktest_psx.c \
 	tests/ktest/ktest_disp.c \
 	tests/ktest/ktest_dp.c \
 	tests/ktest/ktest_wm.c \
 	tests/ktest/ktest_cab.c \
 	tests/ktest/ktest_tv.c \
+	tests/ktest/ktest_vt.c \
+	tests/ktest/ktest_prn.c \
+	tests/ktest/ktest_scr.c \
 	tests/ktest/ktest_part.c \
 	tests/ktest/ktest_mn.c \
 	tests/ktest/ktest_ms.c \
 	tests/ktest/ktest_xfc.c \
 	tests/ktest/ktest_drop.c \
+	tests/ktest/ktest_dtwin.c \
 	tests/ktest/ktest_fault.c \
+	tests/ktest/ktest_fq.c \
 	tests/ktest/ktest_fn.c \
-	tests/ktest/ktest_gpu.c
+	tests/ktest/ktest_gpu.c \
+	tests/ktest/ktest_gl.c \
+	tests/ktest/ktest_cal.c \
+	application/calendar/cal_tad.c \
+	tests/ktest/ktest_calc.c \
+	application/calc/calc_tad.c \
+	application/calc/calc_print.c \
+	tests/ktest/ktest_udic.c \
+	tests/ktest/ktest_kana.c \
+	application/kanatype/kp_eng.c \
+	lib/libkbmap/kbmap.c \
+	lib/libkbmap/kbmap_tab.c \
+	tests/ktest/ktest_calcu.c \
+	application/calculator/cu_dec.c \
+	application/calculator/cu_eng.c \
+	tests/ktest/ktest_km.c \
+	tests/ktest/ktest_mcard.c \
+	application/mcard/mc_db.c \
+	application/mcard/mc_bin.c \
+	application/mcard/mc_rx.c \
+	application/mcard/mc_var.c \
+	application/mcard/mc_io.c \
+	application/mcard/mc_merge.c \
+	application/mcard/mc_prn.c \
+	tests/ktest/ktest_techo.c \
+	application/techo/tc_db.c \
+	lib/libui/ui_prn.c \
+	tests/ktest/ktest_chs.c \
+	application/charsearch/cs_dic.c \
+	application/charsearch/cs_code.c \
+	tests/ktest/ktest_slide.c
 
 # 汎用の PCI Express の構成空間(平らな ECAM)を歩く組。それを持つ機械
 # (qemu_virt.mk)だけが足す。持たない機械では ktest_main.c が SKIP と出す
@@ -333,9 +425,12 @@ SRCS_CORE := \
 	kernel/sysdepend/cpu/core/armv8a/cpu_cntl.c \
 	kernel/sysdepend/cpu/core/armv8a/reset_main.c \
 	kernel/sysdepend/cpu/core/armv8a/dtb.c \
+	kernel/sysdepend/cpu/core/armv8a/board.c \
 	kernel/sysdepend/cpu/core/armv8a/mmu.c \
 	kernel/sysdepend/cpu/core/armv8a/sys_timer.c \
 	kernel/sysdepend/cpu/core/armv8a/smp.c \
+	kernel/sysdepend/cpu/core/armv8a/lockup.c \
+	kernel/sysdepend/cpu/core/armv8a/cpuclk.c \
 	lib/libtk/sysdepend/cpu/core/armv8a/int_armv8a.c \
 	lib/libtk/sysdepend/cpu/core/armv8a/spinlock.c \
 	lib/libtk/sysdepend/cpu/core/armv8a/wusec_armv8a.c \

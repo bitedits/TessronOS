@@ -191,7 +191,9 @@ EXPORT BOOL bk_link_box( const TS_UUID *parent, const TS_UUID *u, INT box[4] )
 		const char *i = strstr(p, " id=\"");
 
 		e = strchr(p, '>');
-		if ( i == NULL || e == NULL || i > e || strncmp(i + 5, id, 36) != 0 ) continue;
+		if ( i == NULL || e == NULL || i > e ) continue;
+		i += ts_lnk_split((const UB *)i + 5, (INT)( e - i - 5 ), NULL, NULL);	/* past a volume it names */
+		if ( strncmp(i + 5, id, 36) != 0 ) continue;
 		got = bk_tag_box(p, e, box);
 	}
 	free(x);
@@ -225,6 +227,7 @@ EXPORT ER bk_link_out( const TS_UUID *cab, const TS_UUID *u )
 
 		e = strchr(p, '>');
 		if ( e == NULL ) break;
+		if ( i != NULL && i < e ) i += ts_lnk_split((const UB *)i + 5, (INT)( e - i - 5 ), NULL, NULL);
 		if ( i == NULL || i > e || strncmp(i + 5, id, 36) != 0 ) {
 			bpk_buf_putn(&b, s, (INT)( e + 1 - s ));
 			s = e + 1;
@@ -303,7 +306,7 @@ EXPORT ER bk_vol_create( BKVOL *v, const char *name, const char *memo )
 		er = m.fail ? E_NOMEM : ob_cre_obj(&c, &v->obj);
 		bpk_buf_free(&m);
 		if ( er < E_OK ) return er;
-		v->key = ob_opn_obj(&v->obj, OB_OP_ALL);
+		v->key = ob_opn_obj(&v->obj, OB_OP_R | OB_OP_W | OB_OP_PROT);
 		if ( v->key <= 0 ) return ( v->key < 0 ) ? v->key : E_NOEXS;
 		bpk_buf_init(&x);
 		bpk_buf_puts(&x, "<tad version=\"1.0\" encoding=\"UTF-8\"><document><p>");

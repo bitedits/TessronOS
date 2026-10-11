@@ -1,0 +1,29 @@
+<tad version="1.0" encoding="UTF-8" filename="基本表計算の編集">
+<document>
+<p>基本表計算の編集</p>
+<p>基本表計算の窓の編集。トレーとの複写と移動、セルのクリア、行と列の挿入と削除、フィル、検索と置換、セルの結合。メニューの定義。</p>
+</document>
+<menu>
+<item code="tray">トレー<link id="01a0d889-460c-7eda-8b47-5745d175681c_0.xtad" vobjid="01a0d8c3-2003-700b-9a10-c1d2e3f40b0b"/></item>
+<line/>
+<item code="copy" key="C">トレーへ複写</item>
+<item code="paste" key="V">トレーから複写</item>
+<item code="cut" key="X">トレーへ移動</item>
+<item code="moveback" key="Z">トレーから移動</item>
+<line/>
+<item code="clear" key="Delete">セルをクリア</item>
+<line/>
+<item code="row.insert">行を挿入</item>
+<item code="col.insert">列を挿入</item>
+<item code="row.delete">行を削除</item>
+<item code="col.delete">列を削除</item>
+<line/>
+<item code="fill.down" key="D">下方向にフィル</item>
+<item code="fill.right" key="R">右方向にフィル</item>
+<line/>
+<item code="find" key="F">検索/置換</item>
+<line/>
+<item code="merge">セルを結合</item>
+<item code="unmerge">セル結合を解除</item>
+</menu>
+</tad>

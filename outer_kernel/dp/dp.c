@@ -47,6 +47,9 @@ typedef struct {
 	UINT		pitch;
 	T_DPPOINT	corner;	/* where the target sits on the screen */
 	T_DPRGN		*rgn;		/* the shape drawn through, this one's own */
+	BOOL		watch;		/* what it touches is told (dp_watch) */
+	CONST T_DPREC	*rec;		/* drawing kept as drawing (dp_open_rec), or NULL */
+	void		*rec_arg;
 } DPENV;
 
 LOCAL DPENV		dp_env[DP_MAX_ENV];
@@ -171,20 +174,164 @@ LOCAL BOOL env_clip( CONST DPENV *e, T_DPRECT *out )
 	out->right  = ( e->frame.right  < v.right )  ? e->frame.right  : v.right;
 	out->bottom = ( e->frame.bottom < v.bottom ) ? e->frame.bottom : v.bottom;
 
-	if ( out->left < 0 ) {
-		out->left = 0;
-	}
-	if ( out->top < 0 ) {
-		out->top = 0;
-	}
-	if ( out->right > (INT)dp_spec.width ) {
-		out->right = (INT)dp_spec.width;
-	}
-	if ( out->bottom > (INT)dp_spec.height ) {
-		out->bottom = (INT)dp_spec.height;
+	/*
+	 * The screen bounds what is drawn into the screen. Pixels of an
+	 * owner's own (a window's, a page's) are bounded by the frame the
+	 * owner set, which may be larger than the screen: a sheet of A3 is
+	 * taller than most screens.
+	 */
+	if ( e->target == NULL && e->rec == NULL ) {
+		if ( out->left < 0 ) {
+			out->left = 0;
+		}
+		if ( out->top < 0 ) {
+			out->top = 0;
+		}
+		if ( out->right > (INT)dp_spec.width ) {
+			out->right = (INT)dp_spec.width;
+		}
+		if ( out->bottom > (INT)dp_spec.height ) {
+			out->bottom = (INT)dp_spec.height;
+		}
 	}
 
 	return ( out->left < out->right && out->top < out->bottom );
+}
+
+/* ---------------------------------------------------------------- recording */
+
+/*
+ * What a call through an environment that records needs: whom to hand
+ * it to, the origin, and what may be touched as one rectangle. FALSE
+ * for an environment that draws pixels, which goes on the usual way.
+ */
+typedef struct {
+	CONST T_DPREC	*ops;
+	void		*arg;
+	T_DPRECST	st;
+	BOOL		copy;		/* drawn plainly: anything else is not kept */
+} RECAT;
+
+LOCAL BOOL rect_cut( T_DPRECT *r, CONST T_DPRECT *by );
+
+LOCAL BOOL rec_at( INT gid, RECAT *ra )
+{
+	DPENV	*e;
+	BOOL	r = FALSE;
+
+	tk_loc_mtx(dp_mtxid, TMO_FEVR);
+	e = env_of(gid);
+	if ( e != NULL && e->rec != NULL ) {
+		ra->ops = e->rec;
+		ra->arg = e->rec_arg;
+		ra->st.ox = e->origin.x;
+		ra->st.oy = e->origin.y;
+		ra->copy = (BOOL)( e->mode == DP_MODE_COPY );
+		if ( !env_clip(e, &ra->st.clip) ) {
+			ra->copy = FALSE;	/* nothing may be touched */
+		} else if ( e->rgn != NULL ) {
+			T_DPRECT	b;
+
+			if ( dp_rgn_bound(e->rgn, &b) >= E_OK ) {
+				b.left += e->origin.x;
+				b.right += e->origin.x;
+				b.top += e->origin.y;
+				b.bottom += e->origin.y;
+				if ( !rect_cut(&ra->st.clip, &b) ) {
+					ra->copy = FALSE;
+				}
+			}
+		}
+		r = TRUE;
+	}
+	tk_unl_mtx(dp_mtxid);
+
+	return r;
+}
+
+LOCAL void rec_op( T_DPRECOP *op, UINT kind )
+{
+	knl_memset(op, 0, sizeof(*op));
+	op->kind = kind;
+}
+
+/*
+ * A shape handed on when the environment records: TRUE when it did,
+ * and the caller is done. Also what dp_shape.c asks before walking a
+ * shape into runs of pixels.
+ */
+EXPORT BOOL knl_dp_rec_draw( INT gid, CONST T_DPRECOP *op, CONST T_DPPAT *pat )
+{
+	RECAT	ra;
+
+	if ( !rec_at(gid, &ra) ) {
+		return FALSE;
+	}
+	if ( ra.copy && ra.ops->draw != NULL ) {
+		ra.ops->draw(ra.arg, &ra.st, op, pat);
+	}
+	return TRUE;
+}
+
+LOCAL BOOL rec_image( INT gid, CONST T_DPRECIMG *im )
+{
+	RECAT	ra;
+
+	if ( !rec_at(gid, &ra) ) {
+		return FALSE;
+	}
+	if ( ra.copy && ra.ops->image != NULL ) {
+		ra.ops->image(ra.arg, &ra.st, im);
+	}
+	return TRUE;
+}
+
+EXPORT BOOL dp_rec_glyph( INT gid, CONST T_DPRECGLY *g )
+{
+	RECAT	ra;
+
+	if ( g == NULL || !rec_at(gid, &ra) ) {
+		return FALSE;
+	}
+	if ( ra.copy && ra.ops->glyph != NULL ) {
+		ra.ops->glyph(ra.arg, &ra.st, g);
+	}
+	return TRUE;
+}
+
+EXPORT BOOL dp_is_rec( INT gid )
+{
+	RECAT	ra;
+
+	return rec_at(gid, &ra);
+}
+
+EXPORT INT dp_open_rec( CONST T_DPREC *ops, void *arg, INT w, INT h )
+{
+	INT	gid;
+	DPENV	*e;
+
+	if ( ops == NULL || w <= 0 || h <= 0 ) {
+		return E_PAR;
+	}
+	gid = dp_open();
+	if ( gid < 0 ) {
+		return gid;
+	}
+	tk_loc_mtx(dp_mtxid, TMO_FEVR);
+	e = env_of(gid);
+	if ( e != NULL ) {
+		e->rec = ops;
+		e->rec_arg = arg;
+		e->frame.left = 0;
+		e->frame.top = 0;
+		e->frame.right = w;
+		e->frame.bottom = h;
+		e->visible = e->frame;
+	}
+	tk_unl_mtx(dp_mtxid);
+
+	return gid;
 }
 
 /* Cut one rectangle against another; FALSE when nothing is left */
@@ -236,11 +383,18 @@ LOCAL void blend( UW *p, UW colour, UINT mode )
  * are not on the screen yet, and whoever owns them decides when they
  * get there.
  */
+LOCAL void	(*dp_watch_fn)( CONST T_DPRECT *r ) = NULL;
+
 LOCAL void damaged( CONST DPENV *e, CONST T_DPRECT *r )
 {
 	T_DISPRECT	d;
+	void		(*fn)( CONST T_DPRECT *r );
 
 	if ( e->target != NULL ) {
+		fn = dp_watch_fn;
+		if ( e->watch && fn != NULL ) {
+			fn(r);			/* a window's pixels: built onto the screen later */
+		}
 		return;
 	}
 	d.left = r->left;
@@ -401,6 +555,25 @@ EXPORT ER dp_set_place( INT gid, void *pixels, UINT pitch, INT corner_x, INT cor
 	return ( e != NULL ) ? E_OK : E_ID;
 }
 
+EXPORT ER dp_set_watch( INT gid, BOOL on )
+{
+	DPENV	*e;
+
+	tk_loc_mtx(dp_mtxid, TMO_FEVR);
+	e = env_of(gid);
+	if ( e != NULL ) {
+		e->watch = on;
+	}
+	tk_unl_mtx(dp_mtxid);
+
+	return ( e != NULL ) ? E_OK : E_ID;
+}
+
+EXPORT void dp_watch( void (*fn)( CONST T_DPRECT *r ) )
+{
+	dp_watch_fn = fn;
+}
+
 EXPORT ER dp_set_region( INT gid, CONST T_DPRGN *rgn )
 {
 	DPENV	*e;
@@ -487,7 +660,18 @@ EXPORT ER dp_put_pixel( INT gid, INT x, INT y, UW colour )
 {
 	DPENV		*e;
 	T_DPRECT	clip, r;
+	T_DPRECOP	op;
+	T_DPPAT		pat;
 
+	rec_op(&op, DP_REC_RECT);
+	op.r.left = x;
+	op.r.top = y;
+	op.r.right = x + 1;
+	op.r.bottom = y + 1;
+	dp_pat_colour(&pat, colour);
+	if ( knl_dp_rec_draw(gid, &op, &pat) ) {
+		return E_OK;
+	}
 	tk_loc_mtx(dp_mtxid, TMO_FEVR);
 	e = env_of(gid);
 	if ( e == NULL ) {
@@ -525,6 +709,10 @@ EXPORT INT dp_get_pixel( INT gid, INT x, INT y )
 		tk_unl_mtx(dp_mtxid);
 		return E_ID;
 	}
+	if ( e->rec != NULL ) {
+		tk_unl_mtx(dp_mtxid);
+		return E_PAR;			/* drawing kept as drawing has no pixels */
+	}
 	x += e->origin.x;
 	y += e->origin.y;
 	if ( x < 0 || x >= (INT)dp_spec.width
@@ -551,6 +739,18 @@ EXPORT ER dp_fill_run( INT gid, INT x0, INT x1, INT y, CONST T_DPPAT *pat )
 
 	if ( pat == NULL || x1 <= x0 ) {
 		return E_PAR;
+	}
+	{
+		T_DPRECOP	op;
+
+		rec_op(&op, DP_REC_RECT);
+		op.r.left = x0;
+		op.r.top = y;
+		op.r.right = x1;
+		op.r.bottom = y + 1;
+		if ( knl_dp_rec_draw(gid, &op, pat) ) {
+			return E_OK;
+		}
 	}
 	tk_loc_mtx(dp_mtxid, TMO_FEVR);
 	e = env_of(gid);
@@ -691,7 +891,7 @@ EXPORT ER dp_get_argb( INT gid, INT x, INT y, UW *pixels, INT pitch,
 	}
 	ox = e->origin.x;
 	oy = e->origin.y;
-	if ( !env_clip(e, &clip) ) {
+	if ( e->rec != NULL || !env_clip(e, &clip) ) {
 		tk_unl_mtx(dp_mtxid);
 		return E_OK;
 	}
@@ -721,9 +921,21 @@ EXPORT ER dp_put_argb( INT gid, INT x, INT y, CONST UW *pixels, INT pitch,
 	DPENV		*e;
 	T_DPRECT	clip, touched;
 	INT		row, ox, oy;
+	T_DPRECIMG	im;
 
 	if ( pixels == NULL || w <= 0 || h <= 0 || pitch < w ) {
 		return E_PAR;
+	}
+	im.kind = DP_REC_ARGB;
+	im.x = x;
+	im.y = y;
+	im.w = w;
+	im.h = h;
+	im.px = pixels;
+	im.pitch = pitch;
+	im.colour = clear;
+	if ( rec_image(gid, &im) ) {
+		return E_OK;
 	}
 	tk_loc_mtx(dp_mtxid, TMO_FEVR);
 	e = env_of(gid);
@@ -765,6 +977,21 @@ EXPORT ER dp_put_mono( INT gid, INT x, INT y, CONST UB *bits, INT pitch,
 
 	if ( bits == NULL || w <= 0 || h <= 0 ) {
 		return E_PAR;
+	}
+	{
+		T_DPRECIMG	im;
+
+		im.kind = DP_REC_MONO;
+		im.x = x;
+		im.y = y;
+		im.w = w;
+		im.h = h;
+		im.px = bits;
+		im.pitch = pitch;
+		im.colour = colour;
+		if ( rec_image(gid, &im) ) {
+			return E_OK;
+		}
 	}
 	dp_pat_colour(&pat, colour);
 	tk_loc_mtx(dp_mtxid, TMO_FEVR);
@@ -862,6 +1089,21 @@ EXPORT ER dp_put_gray( INT gid, INT x, INT y, CONST UB *cov, INT pitch,
 	if ( cov == NULL || w <= 0 || h <= 0 || pitch < w ) {
 		return E_PAR;
 	}
+	{
+		T_DPRECIMG	im;
+
+		im.kind = DP_REC_GRAY;
+		im.x = x;
+		im.y = y;
+		im.w = w;
+		im.h = h;
+		im.px = cov;
+		im.pitch = pitch;
+		im.colour = colour;
+		if ( rec_image(gid, &im) ) {
+			return E_OK;
+		}
+	}
 	tk_loc_mtx(dp_mtxid, TMO_FEVR);
 	e = env_of(gid);
 	if ( e == NULL ) {
@@ -951,6 +1193,15 @@ EXPORT ER dp_fill_rect_pat( INT gid, CONST T_DPRECT *r, CONST T_DPPAT *pat )
 	if ( r == NULL || pat == NULL ) {
 		return E_PAR;
 	}
+	{
+		T_DPRECOP	op;
+
+		rec_op(&op, DP_REC_RECT);
+		op.r = *r;
+		if ( knl_dp_rec_draw(gid, &op, pat) ) {
+			return E_OK;
+		}
+	}
 	tk_loc_mtx(dp_mtxid, TMO_FEVR);
 	e = env_of(gid);
 	if ( e == NULL ) {
@@ -1011,6 +1262,16 @@ EXPORT ER dp_frame_rect_pat( INT gid, CONST T_DPRECT *r, CONST T_DPPAT *pat,
 	if ( r->right - r->left <= 0 || r->bottom - r->top <= 0 ) {
 		return E_PAR;
 	}
+	{
+		T_DPRECOP	op;
+
+		rec_op(&op, DP_REC_FRAME);
+		op.r = *r;
+		op.width = width;
+		if ( knl_dp_rec_draw(gid, &op, pat) ) {
+			return E_OK;
+		}
+	}
 	/* the four sides, drawn as rectangles so the corners are covered once */
 	er = dp_hold();
 	if ( er < E_OK ) {
@@ -1052,6 +1313,22 @@ EXPORT ER dp_line_pat( INT gid, INT x0, INT y0, INT x1, INT y1,
 
 	if ( pat == NULL ) {
 		return E_PAR;
+	}
+	{
+		T_DPRECOP	op;
+		T_DPPOINT	pt[2];
+
+		rec_op(&op, DP_REC_LINE);
+		pt[0].x = x0;
+		pt[0].y = y0;
+		pt[1].x = x1;
+		pt[1].y = y1;
+		op.p = pt;
+		op.n = 2;
+		op.width = 1;
+		if ( knl_dp_rec_draw(gid, &op, pat) ) {
+			return E_OK;
+		}
 	}
 	tk_loc_mtx(dp_mtxid, TMO_FEVR);
 	e = env_of(gid);
@@ -1475,6 +1752,17 @@ EXPORT ER dp_fill_round( INT gid, CONST T_DPRECT *rect, INT rx, INT ry,
 	if ( rect == NULL || pat == NULL || rx < 0 || ry < 0 ) {
 		return E_PAR;
 	}
+	{
+		T_DPRECOP	op;
+
+		rec_op(&op, DP_REC_ROUND);
+		op.r = *rect;
+		op.rx = rx;
+		op.ry = ry;
+		if ( knl_dp_rec_draw(gid, &op, pat) ) {
+			return E_OK;
+		}
+	}
 	tk_loc_mtx(dp_mtxid, TMO_FEVR);
 	e = env_of(gid);
 	if ( e == NULL ) {
@@ -1570,6 +1858,18 @@ EXPORT ER dp_frame_round( INT gid, CONST T_DPRECT *rect, INT rx, INT ry,
 
 	if ( rect == NULL || pat == NULL || width <= 0 || rx < 0 || ry < 0 ) {
 		return E_PAR;
+	}
+	{
+		T_DPRECOP	op;
+
+		rec_op(&op, DP_REC_ROUNDF);
+		op.r = *rect;
+		op.rx = rx;
+		op.ry = ry;
+		op.width = width;
+		if ( knl_dp_rec_draw(gid, &op, pat) ) {
+			return E_OK;
+		}
 	}
 	if ( rect->right - rect->left <= 2 * width
 	  || rect->bottom - rect->top <= 2 * width ) {
@@ -1682,9 +1982,9 @@ EXPORT ER dp_copy_rect( INT gid, CONST T_DPRECT *src, INT to_x, INT to_y )
 	}
 	tk_loc_mtx(dp_mtxid, TMO_FEVR);
 	e = env_of(gid);
-	if ( e == NULL ) {
+	if ( e == NULL || e->rec != NULL ) {
 		tk_unl_mtx(dp_mtxid);
-		return E_ID;
+		return ( e == NULL ) ? E_ID : E_OK;	/* a recorded page has nothing to move */
 	}
 	s.left   = src->left   + e->origin.x;
 	s.top    = src->top    + e->origin.y;

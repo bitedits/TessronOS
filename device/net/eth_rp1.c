@@ -12,9 +12,11 @@
  *	Ethernet of the RP1: the RJ45 socket of the board (design 10.4).
  *
  *	The controller is a Cadence GEM inside the RP1, with a Broadcom
- *	BCM54213PE on its MDIO bus. It is reached through the same PCIe
- *	window as the header pins, so the firmware has to have left the
- *	link up (`pciex4_reset=0`; design 4.6).
+ *	BCM54213PE on its MDIO bus at address 1 (Raspberry Pi 5), or the
+ *	BCM54210PE of the Compute Module 5 at address 0 (include/ts/board.h);
+ *	both are driven through their standard registers only. It is reached
+ *	through the same PCIe window as the header pins, so the firmware has
+ *	to have left the link up (`pciex4_reset=0`; design 4.6).
  *
  *	Two rings of descriptors are used, one each way, with a buffer per
  *	descriptor. The controller owns a descriptor until it sets the
@@ -39,7 +41,9 @@
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
 #include <ts/net.h>
+#include <ts/time.h>
 #include <ts/gpio.h>
+#include <ts/board.h>
 #include "sysman/pfalloc.h"
 
 /* ---------------------------------------------------------------- registers */
@@ -160,10 +164,22 @@
 
 /* ---------------------------------------------------------------- rings */
 #define ETH_PHY_RESET_PIN	32	/* RP1 GPIO 32 holds the PHY in reset while low */
-#define ETH_PHY_ADDR		1	/* where the board's PHY answers (its device tree) */
-#define ETH_RX_RING	64		/* a page's worth of frames from many connections at once */
+#define ETH_PHY_ADDR		( knl_board.eth_phy )	/* where the board's PHY answers (its device tree) */
+#define ETH_RX_RING	128		/* two pages' worth of frames from many connections at once */
 #define ETH_TX_RING	8
-#define ETH_BUF_ORDER	6		/* 2^6 pages hold a buffer per descriptor */
+#define ETH_BUF_ORDER	7		/* 2^7 pages hold a buffer per descriptor */
+
+/*
+ * Four descriptors share a line of the data cache (64 bytes). Writing
+ * one back writes the line, the three others with it as the cache had
+ * them; one the controller filled in the meantime would go back to it
+ * as free, with the frame in it lost and the ring out of step -- the
+ * controller ahead of a descriptor the driver waits at for good. So the
+ * receive descriptors go back to the controller a whole line at once,
+ * when the driver has read all four, and are never written while the
+ * controller may write any of them.
+ */
+#define ETH_DESC_LINE	4
 #define ETH_BUF_LEN	2048		/* a whole frame, a multiple of 64 */
 
 /*
@@ -208,6 +224,7 @@ typedef struct {
 	BOOL		up;		/* the link carries */
 	BOOL		told_tx, told_rx;	/* a failure of each kind has been described */
 	BOOL		rx_stalled;	/* the receiver found no free descriptor and stopped */
+	UD		stall_at;	/* when that was first seen (ns) */
 	UINT		n_restart;	/* times the receiver was started again */
 } ETH_DEV;
 
@@ -317,15 +334,22 @@ LOCAL ER phy_write( UINT phy, UINT reg, UINT val )
 }
 
 /*
- * Find the PHY: the first address on the bus whose identity is neither
- * all ones nor all zeroes.
+ * Find the PHY: the address the board's device tree gives it, and when
+ * nothing answers there, the first address on the bus whose identity is
+ * neither all ones nor all zeroes.
  */
 LOCAL ER phy_find( void )
 {
 	UINT	a;
 	INT	id1, id2;
-	INT	seen1 = 0x10000, seen2 = 0x10000;	/* what address 1 said */
+	INT	seen1 = 0x10000, seen2 = 0x10000;	/* what the board's address said */
 
+	id1 = phy_read(ETH_PHY_ADDR, MII_ID1);
+	id2 = phy_read(ETH_PHY_ADDR, MII_ID2);
+	if ( id1 >= 0 && id2 >= 0 && id1 != 0xffff && (id1 != 0 || id2 != 0) ) {
+		eth.phy = ETH_PHY_ADDR;
+		return E_OK;
+	}
 	for ( a = 0; a < 32; a++ ) {
 		id1 = phy_read(a, MII_ID1);
 		id2 = phy_read(a, MII_ID2);
@@ -465,7 +489,7 @@ LOCAL void link_check( void )
  * transmitter could fetch a descriptor from the foot of memory. The two
  * spare descriptors sit in the ring page after the rings.
  */
-#define ETH_PARK_OFS	0x800
+#define ETH_PARK_OFS	0xC00
 
 LOCAL void queues_park( void )
 {
@@ -521,17 +545,24 @@ LOCAL void rings_init( void )
 }
 
 /*
- * The controller stops receiving when it finds no free descriptor, and
- * stays stopped. With the ring read to its end, the receiver is turned
- * off, the ring given back whole from its start and the receiver turned
- * on again.
+ * The controller that finds no free descriptor drops the frame and
+ * looks at the same descriptor again for the next one, so receiving
+ * goes on by itself once the ring has been read. Should it not -- the
+ * ring read to its end, and still no frame in it a while after the
+ * stop was seen (ETH_STALL_MS) -- the receiver is turned off, left a
+ * moment for a transfer under way to end, the ring given back whole
+ * from its start and the receiver turned on again.
  */
+#define ETH_STALL_MS	200
+
 LOCAL void rx_restart( void )
 {
 	INT	i;
 	UD	pa;
 
 	out_w(GEM_NCR, in_w(GEM_NCR) & ~NCR_RE);
+	(void)in_w(GEM_NCR);
+	tk_dly_tsk(1);
 	for ( i = 0; i < ETH_RX_RING; i++ ) {
 		eth.rxd[i].addr &= ~RXD_OWN;
 		eth.rxd[i].ctrl = 0;
@@ -682,11 +713,19 @@ EXPORT INT net_recv( void *frame, SZ size, TMO tmout )
 				eth.n_drop++;	/* too long for the caller */
 			}
 
-			/* the descriptor goes back to the controller */
-			d->ctrl = 0;
-			d->addr &= ~RXD_OWN;
-			dcache_flush(d, sizeof(*d));
+			/* the descriptors go back to the controller a cache line at once */
+			if ( ( eth.rx_next % ETH_DESC_LINE ) == ETH_DESC_LINE - 1 ) {
+				ETH_DESC	*g = d - ( ETH_DESC_LINE - 1 );
+				INT		k;
+
+				for ( k = 0; k < ETH_DESC_LINE; k++ ) {
+					g[k].ctrl = 0;
+					g[k].addr &= ~RXD_OWN;
+				}
+				dcache_flush(g, sizeof(*g) * ETH_DESC_LINE);
+			}
 			eth.rx_next = ( eth.rx_next + 1 ) % ETH_RX_RING;
+			eth.rx_stalled = FALSE;		/* frames come: the receiver goes on */
 
 			if ( got > 0 ) {
 				break;
@@ -694,9 +733,14 @@ EXPORT INT net_recv( void *frame, SZ size, TMO tmout )
 			continue;		/* dropped: look at the next one */
 		}
 
-		/* nothing left in the ring: a receiver that stopped is started again */
+		/* nothing left in the ring: a receiver stopped for a while is started again */
 		if ( eth.rx_stalled ) {
-			rx_restart();
+			UD	now = 0;
+
+			(void)ts_get_mono(&now);
+			if ( now - eth.stall_at >= (UD)ETH_STALL_MS * 1000000 ) {
+				rx_restart();
+			}
 		}
 		if ( tmout == TMO_POL ) {
 			break;
@@ -725,7 +769,10 @@ EXPORT INT net_recv( void *frame, SZ size, TMO tmout )
 		}
 		eth.n_drop++;			/* the ring filled up or faulted */
 		out_w(GEM_RSR, rsr);
-		eth.rx_stalled = TRUE;		/* started again once the ring is read */
+		if ( !eth.rx_stalled ) {
+			eth.rx_stalled = TRUE;	/* started again if it does not go on by itself */
+			(void)ts_get_mono(&eth.stall_at);
+		}
 	}
 
 	tk_unl_mtx(eth.mtxid_rx);
@@ -885,8 +932,14 @@ EXPORT INT knl_eth_rp1_init( void )
 	out_w(GEM_TSR, 0xffffffff);
 	out_w(GEM_RSR, 0xffffffff);
 	out_w(GEM_PBUFRXCUT, 0);
-	out_w(GEM_HRB, 0);
-	out_w(GEM_HRT, 0);
+	/*
+	 * Every multicast frame through the hash: IPv6 needs the all-nodes
+	 * group (router advertisements) and the solicited-node groups
+	 * (neighbour solicitation, duplicate address detection); the stack
+	 * above picks the groups it has joined
+	 */
+	out_w(GEM_HRB, 0xffffffff);
+	out_w(GEM_HRT, 0xffffffff);
 
 	mac_read();
 
@@ -900,7 +953,7 @@ EXPORT INT knl_eth_rp1_init( void )
 	eth.rxd = (ETH_DESC *)PA2VA(eth.rxd_pa);
 	eth.txd = (ETH_DESC *)PA2VA(eth.txd_pa);
 
-	/* a buffer per descriptor: 72 of 2KB, which is 36 pages */
+	/* a buffer per descriptor: 136 of 2KB, which is 68 pages */
 	pf = knl_alloc_pages(ETH_BUF_ORDER, ZONE_DMA32, KAF_ZERO | KAF_DMA32);
 	if ( pf == NULL ) {
 		return E_NOMEM;

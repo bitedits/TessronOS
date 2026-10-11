@@ -1,0 +1,202 @@
+# 予定表 (design 11.10), for tools/ui_run.py: a link that is not a day's
+# moved and sized, the change taken back, copied and moved through the tray
+# and the tray's levels in the menu, 全画面表示, a link carried out of the
+# window (moved, copied with the second button, and pressed twice: a copy of
+# its object), 属性変更, 実身複製 and 実行 asked of the desktop, 背景色変更,
+# and a new object from the 原紙箱 dropped on the month
+open 019d6f00-1a2b-7c3d-8e4f-a1b2c3d4e5f6
+expect calendar: ready
+wait 800
+win 予定表
+open 019a4370-3819-79a2-9758-881e1e0de90a
+wait 1000
+drag 400 414 820 520
+expect calendar: dropped 1
+key 08 01
+wait 500
+shot ops_dropped
+drag 820 532 720 572
+expect calendar: moved 1
+wait 300
+shot ops_moved
+drag 805 570 855 570
+expect calendar: resized
+wait 300
+drag 700 583 700 700
+expect calendar: resized
+wait 500
+shot ops_sized
+click 720 620 1
+wait 600
+shot ops_menu
+move 740 680
+wait 150
+move 760 686
+wait 500
+shot ops_edit
+move 820 686
+wait 150
+move 830 666
+wait 300
+click 830 666
+expect calendar: undone
+wait 300
+shot ops_undone
+click 700 572
+key 06 01
+expect calendar: copied 1
+key 19 01
+expect calendar: pasted 1
+wait 300
+shot ops_pasted
+key 1B 01
+expect calendar: cut 1
+key 1D 01
+expect calendar: pasted 1
+wait 300
+shot ops_tray
+click 300 300 1
+wait 600
+move 310 300
+wait 150
+move 330 300
+wait 500
+move 420 300
+wait 150
+move 420 240
+wait 150
+move 440 240
+wait 600
+shot ops_tray_menu
+key 29
+wait 200
+key 29
+wait 200
+key 29
+wait 300
+key 0F 01
+expect calendar: fullscreen on
+wait 2500
+shot ops_fullscreen
+key 0F 01
+expect calendar: fullscreen off
+wait 800
+move 700 572
+down
+move 650 400
+wait 300
+move 400 120
+wait 300
+move 250 60
+wait 600
+move 252 62
+wait 300
+shot ops_carrying
+up
+expect calendar: moved out
+wait 500
+shot ops_carried
+click 780 604 1
+wait 600
+move 760 620
+wait 150
+move 770 624
+wait 600
+shot ops_vobj_menu
+move 870 624
+wait 150
+move 890 684
+wait 300
+click 890 684
+wait 1000
+shot ops_attr
+key 28
+expect calendar: attr
+wait 500
+click 780 604 1
+wait 600
+move 790 620
+wait 150
+move 800 624
+wait 600
+shot ops_real_menu
+move 870 624
+wait 150
+move 900 644
+wait 300
+click 900 644
+wait 1000
+shot ops_dup_ask
+key 28
+expect calendar: duplicated
+wait 500
+shot ops_duplicated
+click 780 604 1
+wait 600
+move 790 660
+wait 150
+move 800 664
+wait 600
+shot ops_exec_menu
+key 29
+wait 200
+key 29
+wait 300
+click 400 600 1
+wait 600
+move 410 540
+wait 150
+move 420 540
+wait 600
+shot ops_view_menu
+move 500 540
+wait 150
+move 520 680
+wait 300
+click 520 680
+wait 1000
+text c8e0f0
+wait 300
+key 28
+expect calendar: paper #c8e0f0
+wait 800
+shot ops_paper
+move 800 620
+down
+move 700 400
+wait 300
+move 400 120
+wait 300
+move 260 70
+wait 600
+down 1
+wait 200
+up 1
+wait 200
+up
+expect (0) as a copy
+wait 800
+shot ops_copied_out
+click 700 598
+down
+move 650 400
+wait 300
+move 400 120
+wait 300
+move 60 200
+wait 600
+up
+wait 1000
+shot ops_dup_drag_ask
+key 28
+expect (0) as a new object
+wait 800
+shot ops_dup_dragged
+drag 980 89 500 420
+wait 1000
+shot ops_base_ask
+key 28
+wait 1000
+shot ops_base_dropped
+# nothing it did was refused for want of a right
+absent !OACV!

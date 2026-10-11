@@ -26,11 +26,17 @@
  *	status that does not answer the command) is put back by the class
  *	reset and both endpoints cleared.
  *
- *	Each disk is registered with tk_def_dev() as "uda", "udb", ... in
+ *	Each disk is registered with tk_def_dev() as "uda", "udb", ... "udz",
+ *	"udaa", "udab" ... (the place it takes in the table, its letters
+ *	counted as the columns of a spreadsheet are), in
  *	the way of the other disks (design 10.6): subunit 0 is the whole
  *	disk and the partitions of its GPT or MBR follow, so "uda0" is the
  *	first partition. The object layer is told whenever one comes or goes,
  *	and when the medium of a removable one goes in or out.
+ *
+ *	A CD-ROM drive (peripheral type 5) is a disk as well: its blocks are
+ *	of 2048 bytes, it is read only, and it has no partitions of its own
+ *	(what is on the disc is read from the whole disk).
  *
  *	A disk taken out while it is open stays registered, answering every
  *	request with an error, until the last one closes it.
@@ -44,7 +50,7 @@
 #include <ts/ob.h>
 #include "usbdev.h"
 
-#define MSC_MAX			8
+#define MSC_MAX			128	/* disks at once: "uda" to "udz", then "udaa" on */
 #define MSC_SUBCLASS_SCSI	0x06
 #define MSC_PROTO_BOT		0x50
 #define MSC_REQ_RESET		0xff
@@ -67,6 +73,9 @@
 #define SCSI_MODE_SENSE6	0x1a
 #define SCSI_SYNC_CACHE10	0x35
 
+#define SCSI_TYPE_DISK		0x00
+#define SCSI_TYPE_CDROM		0x05
+
 typedef struct {
 	BOOL	used;
 	BOOL	gone;		/* the device went; the name waits to go */
@@ -79,16 +88,26 @@ typedef struct {
 	UW	blksz;
 	BOOL	removable;
 	BOOL	readonly;
+	BOOL	cdrom;		/* a CD-ROM drive */
 	BOOL	medium;		/* a medium is in */
 	BOOL	notify_media;	/* the object layer is to hear of it */
 	UW	last_poll;
 	T_PARTTBL tbl;
 	UB	devnm[8];
+	INT	no;		/* its place in the table, what its name says */
 	ID	devid;
 	UB	vendor[9], model[17];
 } MSCDEV;
 
-LOCAL MSCDEV	msc_tbl[MSC_MAX];
+/*
+ * A disk's entry is made when a disk first takes its place, and kept for
+ * the next: the table holds what has been plugged in at once, and the
+ * entries are as large as a partition table is.
+ */
+LOCAL MSCDEV	*msc_tbl[MSC_MAX];
+
+/* The entry at a place, NULL while none was made there */
+#define MSC_AT(i)	( msc_tbl[i] )
 LOCAL BOOL	msc_notify = FALSE;	/* a disk came or went */
 
 /* ---------------------------------------------------------------- transport */
@@ -543,7 +562,7 @@ LOCAL ER msc_register( MSCDEV *m )
 
 	ddev.exinf   = m;
 	ddev.drvatr  = 0;
-	ddev.devatr  = TDK_DISK_HD;
+	ddev.devatr  = m->cdrom ? TDK_DISK_CDROM : TDK_DISK_HD;
 	ddev.nsub    = m->tbl.n;
 	ddev.blksz   = (SZ)m->blksz;
 	ddev.openfn  = (FP)msc_open;
@@ -572,8 +591,8 @@ LOCAL void msc_medium( MSCDEV *m )
 	if ( !m->medium ) {
 		return;
 	}
-	m->readonly = scsi_protected(m);
-	if ( m->blksz == BLK_SECTOR_SIZE ) {
+	m->readonly = m->cdrom ? TRUE : scsi_protected(m);
+	if ( m->blksz == BLK_SECTOR_SIZE && !m->cdrom ) {
 		knl_read_parttbl(msc_readfn, m, m->nblocks, &m->tbl);
 	}
 }
@@ -598,6 +617,29 @@ EXPORT BOOL knl_msc_match( USBDEV *dev )
 	return FALSE;
 }
 
+/*
+ * The name of the disk at place n: "ud" and n in letters, a to z, then
+ * aa to az, ba ... as the columns of a spreadsheet are counted.
+ */
+LOCAL void msc_name( INT n, UB *out )
+{
+	UB	t[4];
+	INT	k = 0, i;
+
+	n++;
+	while ( n > 0 && k < (INT)sizeof(t) ) {
+		n--;
+		t[k++] = (UB)( 'a' + n % 26 );
+		n /= 26;
+	}
+	out[0] = 'u';
+	out[1] = 'd';
+	for ( i = 0; i < k; i++ ) {
+		out[2 + i] = t[k - 1 - i];
+	}
+	out[2 + k] = 0;
+}
+
 EXPORT ER knl_msc_attach( USBDEV *dev )
 {
 	MSCDEV	*m = NULL;
@@ -607,8 +649,14 @@ EXPORT ER knl_msc_attach( USBDEV *dev )
 	ER	er;
 
 	for ( i = 0; i < MSC_MAX; i++ ) {
-		if ( !msc_tbl[i].used ) {
-			m = &msc_tbl[i];
+		if ( msc_tbl[i] == NULL ) {
+			msc_tbl[i] = (MSCDEV *)Kcalloc(1, sizeof(MSCDEV));
+			if ( msc_tbl[i] == NULL ) {
+				return E_NOMEM;
+			}
+		}
+		if ( !msc_tbl[i]->used ) {
+			m = msc_tbl[i];
 			break;
 		}
 	}
@@ -616,6 +664,7 @@ EXPORT ER knl_msc_attach( USBDEV *dev )
 		return E_LIMIT;
 	}
 	knl_memset(m, 0, sizeof(*m));
+	m->no = i;
 	m->dev = dev;
 	for ( p = dev->cfg; p != NULL; p = knl_usb_next_desc(p, end) ) {
 		if ( p[1] == USB_DT_INTERFACE && p[0] >= 9 ) {
@@ -651,22 +700,20 @@ EXPORT ER knl_msc_attach( USBDEV *dev )
 	cdb[0] = SCSI_INQUIRY;
 	cdb[4] = sizeof(inq);
 	i = bot_cmd(m, cdb, 6, inq, sizeof(inq), TRUE, &n);
-	if ( i != 0 || n < 36 || (inq[0] & 0x1f) != 0x00 ) {
+	if ( i != 0 || n < 36 || ( (inq[0] & 0x1f) != SCSI_TYPE_DISK && (inq[0] & 0x1f) != SCSI_TYPE_CDROM ) ) {
 		USB_LOG("usb: disk: INQUIRY answered %d, %d bytes, type %d\n",
 			i, n, inq[0] & 0x1f);
-		/* not a disk this driver serves (a CD-ROM, a card reader's other LUN) */
+		/* not a disk this driver serves (a card reader's other LUN, a tape) */
 		m->used = FALSE;
 		return E_NOSPT;
 	}
-	m->removable = ( (inq[1] & 0x80) != 0 );
+	m->cdrom = (BOOL)( (inq[0] & 0x1f) == SCSI_TYPE_CDROM );
+	m->removable = (BOOL)( (inq[1] & 0x80) != 0 || m->cdrom );
 	knl_memcpy(m->vendor, inq + 8, 8);
 	knl_memcpy(m->model, inq + 16, 16);
 	msc_medium(m);
 
-	m->devnm[0] = 'u';
-	m->devnm[1] = 'd';
-	m->devnm[2] = (UB)('a' + (m - msc_tbl));
-	m->devnm[3] = 0;
+	msc_name(m->no, m->devnm);
 	er = msc_register(m);
 	if ( er < E_OK ) {
 		m->used = FALSE;
@@ -675,10 +722,10 @@ EXPORT ER knl_msc_attach( USBDEV *dev )
 	m->last_poll = knl_usb_ms();
 	dev->msc = m;
 	knl_memcpy(dev->devnm, m->devnm, sizeof(m->devnm));
-	USB_LOG("usb: %s: %s %s, %d blocks of %d%s%s, %d partitions\n",
+	USB_LOG("usb: %s: %s %s, %d blocks of %d%s%s%s, %d partitions\n",
 		m->devnm, m->vendor, m->model, (UW)m->nblocks, (INT)m->blksz,
-		m->removable ? ", removable" : "", m->readonly ? ", read only" : "",
-		m->tbl.n);
+		m->cdrom ? ", CD-ROM" : "", m->removable ? ", removable" : "",
+		m->readonly ? ", read only" : "", m->tbl.n);
 
 	return E_OK;
 }
@@ -726,10 +773,10 @@ EXPORT void knl_msc_poll( void )
 	UW	now = knl_usb_ms();
 
 	for ( i = 0; i < MSC_MAX; i++ ) {
-		MSCDEV	*m = &msc_tbl[i];
+		MSCDEV	*m = MSC_AT(i);
 		BOOL	was;
 
-		if ( !m->used ) {
+		if ( m == NULL || !m->used ) {
 			continue;
 		}
 		if ( m->gone ) {
@@ -763,9 +810,9 @@ EXPORT void knl_msc_notify( void )
 		knl_obdev_changed();
 	}
 	for ( i = 0; i < MSC_MAX; i++ ) {
-		MSCDEV	*m = &msc_tbl[i];
+		MSCDEV	*m = MSC_AT(i);
 
-		if ( m->used && m->notify_media ) {
+		if ( m != NULL && m->used && m->notify_media ) {
 			m->notify_media = FALSE;
 			knl_obdev_media(m->devnm, m->medium);
 		}
@@ -778,7 +825,7 @@ EXPORT BOOL knl_msc_wants_poll( void )
 	INT	i;
 
 	for ( i = 0; i < MSC_MAX; i++ ) {
-		if ( msc_tbl[i].used && ( msc_tbl[i].gone || msc_tbl[i].removable ) ) {
+		if ( MSC_AT(i) != NULL && MSC_AT(i)->used && ( MSC_AT(i)->gone || MSC_AT(i)->removable ) ) {
 			return TRUE;
 		}
 	}

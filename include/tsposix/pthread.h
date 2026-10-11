@@ -123,6 +123,10 @@ int	pthread_attr_setguardsize( pthread_attr_t *a, size_t size );
 int	pthread_attr_getguardsize( const pthread_attr_t *a, size_t *size );
 int	pthread_attr_setscope( pthread_attr_t *a, int scope );
 int	pthread_attr_setinheritsched( pthread_attr_t *a, int inh );
+int	pthread_attr_setschedpolicy( pthread_attr_t *a, int policy );
+int	pthread_attr_getschedpolicy( const pthread_attr_t *a, int *policy );
+int	pthread_attr_setschedparam( pthread_attr_t *a, const struct sched_param *param );
+int	pthread_attr_getschedparam( const pthread_attr_t *a, struct sched_param *param );
 
 /* Mutexes */
 int	pthread_mutex_init( pthread_mutex_t *m, const pthread_mutexattr_t *attr );

@@ -1,0 +1,60 @@
+# 実時間制御TAD (design 15), for tools/ui_run.py: the samples of section 10
+# of the specification (実時間TAD見本) played as slides, one after another.
+# 10.1 to 10.6 wait until they are begun (Space); 10.7 to 10.9 play at once.
+open 01a0d8c5-6a00-7a00-8a00-5e1a7d000000
+expect slide: 1 of 9
+wait 800
+shot rt_10_1_waiting
+key 2C
+expect rtmedia: ready
+wait 1500
+shot rt_10_1
+key 4F
+expect slide: 2 of 9
+key 2C
+wait 2000
+shot rt_10_2
+key 4F
+expect slide: 3 of 9
+key 2C
+wait 2000
+shot rt_10_3
+key 4F
+expect slide: 4 of 9
+key 2C
+wait 400
+shot rt_10_4_moving
+wait 1200
+shot rt_10_4
+key 4F
+expect slide: 5 of 9
+key 2C
+wait 2500
+shot rt_10_5
+key 4F
+expect slide: 6 of 9
+key 2C
+wait 2500
+shot rt_10_6
+key 4F
+expect slide: 7 of 9
+wait 900
+shot rt_10_7_fading
+wait 3000
+shot rt_10_7
+key 4F
+expect slide: 8 of 9
+expect mpegplay: embedded for the player
+wait 3000
+shot rt_10_8
+key 4F
+expect slide: 9 of 9
+wait 1500
+shot rt_10_9_title
+wait 4500
+shot rt_10_9_clip
+key 29
+expect slide: closed
+wait 300
+# nothing it did was refused for want of a right
+absent !OACV!

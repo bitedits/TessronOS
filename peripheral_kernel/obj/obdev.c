@@ -64,11 +64,12 @@
 #include <ts/tsfs.h>
 #include <ts/ser.h>
 #include <ts/blk.h>
+#include <ts/fs.h>
 #include "obj.h"
 
-#define OBD_MAX		128		/* devices and subunits known */
+#define OBD_MAX		2048		/* devices and subunits known: every disk's partitions among them */
 #define OBD_HND_MAX	1024		/* devices open at once through their objects */
-#define OBD_LIST_MAX	8192		/* bytes of the list's record 0 */
+#define OBD_LIST_MAX	( OBD_MAX * 80 )	/* bytes of the list's record 0: a link to each */
 #define ENT_CLOCK	( -1 )		/* OBDHND.ent: the clock */
 #define ENT_LIST	( -2 )		/* the list of the devices */
 #define ENT_SYSTEM	( -3 )		/* the system (obsys.c) */
@@ -94,6 +95,7 @@ typedef struct {
 	ID	dd;			/* 0: not opened, the key reads no record */
 	W	blksz;
 	BOOL	sound;			/* a sound device: records are its data numbers */
+	BOOL	camera;			/* a camera: records are its data numbers */
 	BOOL	serial;			/* a serial port: records 2 and 3 are its attributes */
 	CONST T_OBDVOPS *vops;		/* a device added by name */
 	void	*vctx;
@@ -114,11 +116,17 @@ LOCAL CONST W snd_dn[OB_SND_NREC] = {
 	-110, -111, -112, -113, -114, -115,	/* info, mode, control, count, end count, buffer */
 	-140,				/* status */
 	-120, -121,			/* input and output selectors */
-	-122, -123, -124, -125, -126, -127, -128, -129, -130, -131, -132, -133, -134
+	-122, -123, -124, -125, -126, -127, -128, -129, -130, -131, -132, -133, -134,
+	-141, -142,			/* the outputs, and the one chosen */
+	-143, -144			/* the mixer, and a volume set */
 };
+
+/* A camera's records and the data numbers they are (OB_CAM_*, include/ts/cam.h) */
+LOCAL CONST W cam_dn[OB_CAM_NREC] = { 0, 0, -1, -2, -3, -4, -5 };
 
 #define TDK_KIND(atr)	( (atr) & 0x00FFU )
 #define TDK_SOUND_KIND	0x0080U		/* include/ts/snd.h: TDK_SOUND */
+#define TDK_CAMERA_KIND	0x00A0U		/* include/ts/cam.h: TDK_CAMERA */
 
 /* Whether a device is a sound device, from the kind it registered as */
 LOCAL BOOL dev_is_sound( CONST UB *name )
@@ -126,6 +134,13 @@ LOCAL BOOL dev_is_sound( CONST UB *name )
 	T_RDEV	rd;
 
 	return (BOOL)( tk_ref_dev(name, &rd) >= E_OK && TDK_KIND(rd.devatr) == TDK_SOUND_KIND );
+}
+
+LOCAL BOOL dev_is_camera( CONST UB *name )
+{
+	T_RDEV	rd;
+
+	return (BOOL)( tk_ref_dev(name, &rd) >= E_OK && TDK_KIND(rd.devatr) == TDK_CAMERA_KIND );
 }
 
 LOCAL BOOL dev_is_serial( CONST UB *name )
@@ -136,9 +151,11 @@ LOCAL BOOL dev_is_serial( CONST UB *name )
 }
 
 LOCAL OBDENT	obd[OBD_MAX];
+LOCAL INT	obd_hi = 0;		/* one past the last entry ever used: the loops go no further */
 LOCAL OBDHND	obd_hnd[OBD_HND_MAX];
 LOCAL ID	obd_mtx = 0;
 LOCAL BOOL	obd_loaded = FALSE;	/* the device box has been read */
+LOCAL UW	obd_serial = 0;		/* each time a device or a medium came or went */
 
 #define LOCK()		tk_loc_mtx(obd_mtx, TMO_FEVR)
 #define UNLOCK()	tk_unl_mtx(obd_mtx)
@@ -179,7 +196,7 @@ LOCAL INT ent_by_name( CONST UB *name )
 {
 	INT	i;
 
-	for ( i = 0; i < OBD_MAX; i++ ) {
+	for ( i = 0; i < obd_hi; i++ ) {
 		if ( obd[i].used && same_name(obd[i].name, name) ) return i;
 	}
 	return -1;
@@ -189,7 +206,7 @@ LOCAL INT ent_by_uuid( CONST TS_UUID *u )
 {
 	INT	i;
 
-	for ( i = 0; i < OBD_MAX; i++ ) {
+	for ( i = 0; i < obd_hi; i++ ) {
 		if ( obd[i].used && obd[i].seen && ts_uuid_cmp(&obd[i].uuid, u) == 0 ) return i;
 	}
 	return -1;
@@ -202,6 +219,7 @@ LOCAL INT ent_new( CONST UB *name )
 	for ( i = 0; i < OBD_MAX; i++ ) {
 		if ( !obd[i].used ) {
 			knl_memset(&obd[i], 0, sizeof(OBDENT));
+			if ( i >= obd_hi ) obd_hi = i + 1;
 			for ( k = 0; name[k] != 0 && k < OBD_NAME - 1; k++ ) {
 				obd[i].name[k] = name[k];
 			}
@@ -251,11 +269,26 @@ LOCAL void box_load( ID vol )
 	Kfree(j);
 }
 
+/* Whether metadata read from the store says nothing refers to the object */
+LOCAL BOOL refs_none( CONST UB *j, INT len )
+{
+	LOCAL CONST char	key[] = "\"refCount\":0";
+	INT			i, k;
+
+	for ( i = 0; i + (INT)sizeof(key) - 1 <= len; i++ ) {
+		for ( k = 0; key[k] != 0 && j[i + k] == (UB)key[k]; k++ ) ;
+		if ( key[k] == 0 ) {
+			return (BOOL)( i + k >= len || j[i + k] < '0' || j[i + k] > '9' );
+		}
+	}
+	return FALSE;
+}
+
 /* The box written again with every name and UUID known */
 LOCAL void box_save( ID vol )
 {
 	UB	*j, *t;
-	INT	len = 0, n = 0, i;
+	INT	len = 0, n = 0, i, k;
 	BOOL	first = TRUE, fresh = FALSE;
 	ER	er;
 
@@ -273,15 +306,31 @@ LOCAL void box_save( ID vol )
 			"\"editable\":true,\"deletable\":false,\"readable\":true}");
 		fresh = TRUE;
 	}
+	/*
+	 * Every device known, the ones there now first; when that is more
+	 * than the box holds, those that are not there are left out (they
+	 * are given UUIDs again when they come back).
+	 */
 	n = knl_oj_put(t, n, OB_META_MAX, "[");
-	for ( i = 0; i < OBD_MAX; i++ ) {
-		if ( !obd[i].used || obd[i].fixed ) continue;
-		n = knl_oj_put(t, n, OB_META_MAX, first ? "{\"name\":" : ",{\"name\":");
-		n = knl_oj_put_str(t, n, OB_META_MAX, obd[i].name);
-		n = knl_oj_put(t, n, OB_META_MAX, ",\"uuid\":");
-		n = knl_oj_put_uuid(t, n, OB_META_MAX, &obd[i].uuid);
-		n = knl_oj_put(t, n, OB_META_MAX, "}");
-		first = FALSE;
+	for ( k = 0; k < 2; k++ ) {
+		for ( i = 0; i < obd_hi && n >= 0; i++ ) {
+			INT	at = n;
+
+			if ( !obd[i].used || obd[i].fixed || obd[i].seen != ( k == 0 ) ) continue;
+			n = knl_oj_put(t, n, OB_META_MAX - 1, first ? "{\"name\":" : ",{\"name\":");
+			n = knl_oj_put_str(t, n, OB_META_MAX - 1, obd[i].name);
+			n = knl_oj_put(t, n, OB_META_MAX - 1, ",\"uuid\":");
+			n = knl_oj_put_uuid(t, n, OB_META_MAX - 1, &obd[i].uuid);
+			n = knl_oj_put(t, n, OB_META_MAX - 1, "}");
+			/* room is kept for the rest of the metadata */
+			if ( n < 0 || n > OB_META_MAX - 1024 ) {
+				n = at;
+				i = obd_hi;
+				k = 2;
+				break;
+			}
+			first = FALSE;
+		}
 	}
 	n = knl_oj_put(t, n, OB_META_MAX, "]");
 	if ( len > 0 && n > 0 ) {
@@ -291,8 +340,17 @@ LOCAL void box_save( ID vol )
 		   : fresh ? knl_tsfs_cre_as(vol, &ob_uuid_devbox, j, len)
 		   : knl_tsfs_set_meta(vol, &ob_uuid_devbox, j, len);
 		if ( er >= E_OK ) {
-			for ( i = 0; i < OBD_MAX; i++ ) {
+			for ( i = 0; i < obd_hi; i++ ) {
 				if ( obd[i].used ) obd[i].kept = TRUE;
+			}
+			/*
+			 * The store keeps the count of references itself and takes
+			 * nothing from the metadata's; no link reaches the box, so
+			 * the system holds it once (a box made before it did is
+			 * held when it is next written)
+			 */
+			if ( fresh || refs_none(j, len) ) {
+				(void)ts_lnk_obj(vol, &ob_uuid_devbox);
 			}
 		}
 	}
@@ -326,7 +384,7 @@ LOCAL void refresh( void )
 	BOOL	fresh = FALSE;
 	ID	vol;
 
-	for ( i = 0; i < OBD_MAX; i++ ) {
+	for ( i = 0; i < obd_hi; i++ ) {
 		if ( obd[i].ops == NULL ) obd[i].seen = FALSE;	/* one added by name stays */
 	}
 	for (;;) {
@@ -344,7 +402,8 @@ LOCAL void refresh( void )
 					m++;
 				}
 				if ( s >= 0 ) {		/* a subunit: the name and its number */
-					if ( s >= 10 ) name[m++] = (UB)( '0' + s / 10 );
+					if ( s >= 100 ) name[m++] = (UB)( '0' + s / 100 );
+					if ( s >= 10 ) name[m++] = (UB)( '0' + s / 10 % 10 );
 					name[m++] = (UB)( '0' + s % 10 );
 				}
 				name[m] = 0;
@@ -397,7 +456,7 @@ LOCAL void revoke( CONST UB *devnm )
 	INT	i;
 	BOOL	hit;
 
-	for ( i = 0; i < OBD_MAX; i++ ) {
+	for ( i = 0; i < obd_hi; i++ ) {
 		LOCK();
 		hit = ( obd[i].used && name_under(obd[i].name, devnm) );
 		if ( hit ) {
@@ -407,6 +466,9 @@ LOCAL void revoke( CONST UB *devnm )
 		UNLOCK();
 		if ( hit && knl_fs_revoke((CONST char *)name) > 0 ) {
 			dev_post(&u, OB_E_CHANGE);
+		}
+		if ( hit ) {
+			(void)knl_obfile_revoke(name);	/* the volumes of objects on it */
 		}
 	}
 }
@@ -428,6 +490,7 @@ EXPORT void knl_obdev_media( CONST UB *devnm, BOOL in )
 	if ( e >= 0 ) {
 		u = obd[e].uuid;
 	}
+	obd_serial++;
 	UNLOCK();
 	if ( e >= 0 ) {
 		dev_post(&u, in ? OB_E_ATTACH : OB_E_DETACH);
@@ -439,37 +502,203 @@ EXPORT void knl_obdev_media( CONST UB *devnm, BOOL in )
 
 EXPORT void knl_obdev_changed( void )
 {
-	BOOL	was[OBD_MAX];
-	TS_UUID	u[OBD_MAX];
-	UINT	ev[OBD_MAX];
-	INT	ent[OBD_MAX];
+	typedef struct {
+		TS_UUID	u;
+		UINT	ev;
+		INT	ent;
+	} CHG;
+	BOOL	*was;
+	CHG	*c;
 	INT	i, n = 0;
 
 	if ( obd_mtx <= 0 ) {
 		return;
 	}
+	was = (BOOL *)Kmalloc(sizeof(BOOL) * OBD_MAX);
+	c = (CHG *)Kmalloc(sizeof(CHG) * OBD_MAX);
+	if ( was == NULL || c == NULL ) {
+		if ( was != NULL ) Kfree(was);
+		if ( c != NULL ) Kfree(c);
+		return;
+	}
 	LOCK();
-	for ( i = 0; i < OBD_MAX; i++ ) {
+	for ( i = 0; i < obd_hi; i++ ) {
 		was[i] = ( obd[i].used && obd[i].seen );
 	}
 	refresh();
-	for ( i = 0; i < OBD_MAX; i++ ) {
+	for ( i = 0; i < obd_hi; i++ ) {
 		BOOL	now = ( obd[i].used && obd[i].seen );
 
 		if ( now != was[i] ) {
-			u[n] = obd[i].uuid;
-			ev[n] = now ? OB_E_ATTACH : OB_E_DETACH;
-			ent[n] = i;
+			c[n].u = obd[i].uuid;
+			c[n].ev = now ? OB_E_ATTACH : OB_E_DETACH;
+			c[n].ent = i;
 			n++;
 		}
 	}
+	obd_serial++;
 	UNLOCK();
 	for ( i = 0; i < n; i++ ) {
-		dev_post(&u[i], ev[i]);
-		if ( ev[i] == OB_E_DETACH ) {
-			revoke(obd[ent[i]].name);	/* an entry keeps its name */
+		dev_post(&c[i].u, c[i].ev);
+		if ( c[i].ev == OB_E_DETACH ) {
+			revoke(obd[c[i].ent].name);	/* an entry keeps its name */
 		}
 	}
+	Kfree(was);
+	Kfree(c);
+}
+
+/* ---------------------------------------------------------------- the volumes kept attached */
+
+/*
+ * The volumes of objects to be attached again at the next start, by
+ * their own UUIDs with their top objects, kept in the device box's
+ * metadata (tessronos.volumes): [{"volume": UUID, "top": UUID}, ...].
+ */
+#define VOLS_MAX	256
+
+LOCAL INT vols_read( ID vol, UB *j, INT *p_len, TS_UUID *vu, TS_UUID *top, INT max )
+{
+	INT	len = 0, arr, pos, e, n = 0;
+
+	if ( knl_tsfs_get_meta(vol, &ob_uuid_devbox, j, OB_META_MAX - 1, &len) < E_OK ) {
+		*p_len = 0;
+		return 0;
+	}
+	j[len] = 0;
+	*p_len = len;
+	arr = knl_oj_path(j, len, "tessronos", "volumes");
+	pos = arr;
+	while ( arr >= 0 && n < max && ( e = knl_oj_next(j, len, arr, &pos) ) >= 0 ) {
+		UB	a[TS_UUID_STRLEN + 1], b[TS_UUID_STRLEN + 1];
+
+		if ( j[e] != '{'
+		  || knl_oj_str(j, len, knl_oj_member(j, len, e, "volume"), a, sizeof(a)) < 0
+		  || ts_str_to_uuid((CONST char *)a, &vu[n]) < E_OK ) {
+			continue;
+		}
+		if ( knl_oj_str(j, len, knl_oj_member(j, len, e, "top"), b, sizeof(b)) < 0
+		  || ts_str_to_uuid((CONST char *)b, &top[n]) < E_OK ) {
+			knl_memset(&top[n], 0, sizeof(top[n]));
+		}
+		n++;
+	}
+	return n;
+}
+
+EXPORT INT knl_obdev_vols_get( TS_UUID *vu, TS_UUID *top, INT max )
+{
+	UB	*j;
+	INT	len = 0, n = 0;
+	ID	vol = knl_obfile_first_vol();
+
+	if ( vol <= 0 || obd_mtx <= 0 || vu == NULL || top == NULL ) {
+		return 0;
+	}
+	j = (UB *)Kmalloc(OB_META_MAX);
+	if ( j == NULL ) {
+		return 0;
+	}
+	LOCK();
+	n = vols_read(vol, j, &len, vu, top, max);
+	UNLOCK();
+	Kfree(j);
+	return n;
+}
+
+EXPORT ER knl_obdev_vols_put( CONST TS_UUID *vuuid, CONST TS_UUID *top, BOOL keep )
+{
+	TS_UUID	*vu, *tp;
+	UB	*j, *t;
+	INT	len = 0, n, i, k = 0;
+	ID	vol = knl_obfile_first_vol();
+	ER	er = E_OK;
+
+	if ( vol <= 0 || obd_mtx <= 0 || vuuid == NULL ) {
+		return E_NOEXS;
+	}
+	j = (UB *)Kmalloc(OB_META_MAX);
+	t = (UB *)Kmalloc(OB_META_MAX);
+	vu = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * VOLS_MAX * 2);
+	if ( j == NULL || t == NULL || vu == NULL ) {
+		if ( j != NULL ) Kfree(j);
+		if ( t != NULL ) Kfree(t);
+		if ( vu != NULL ) Kfree(vu);
+		return E_NOMEM;
+	}
+	tp = vu + VOLS_MAX;
+	LOCK();
+	if ( !obd_loaded ) {
+		box_load(vol);
+		obd_loaded = TRUE;
+	}
+	box_save(vol);				/* the box is there to keep it in */
+	n = vols_read(vol, j, &len, vu, tp, VOLS_MAX - 1);
+	for ( i = 0; i < n; i++ ) {
+		if ( ts_uuid_cmp(&vu[i], vuuid) != 0 ) {
+			vu[k] = vu[i];
+			tp[k] = tp[i];
+			k++;
+		}
+	}
+	if ( keep ) {
+		vu[k] = *vuuid;
+		if ( top != NULL ) tp[k] = *top;
+		else knl_memset(&tp[k], 0, sizeof(tp[k]));
+		k++;
+	}
+	if ( len <= 0 ) {
+		er = E_NOEXS;
+	} else {
+		INT	m = knl_oj_put(t, 0, OB_META_MAX, "[");
+
+		for ( i = 0; i < k; i++ ) {
+			m = knl_oj_put(t, m, OB_META_MAX, ( i > 0 ) ? ",{\"volume\":" : "{\"volume\":");
+			m = knl_oj_put_uuid(t, m, OB_META_MAX, &vu[i]);
+			m = knl_oj_put(t, m, OB_META_MAX, ",\"top\":");
+			m = knl_oj_put_uuid(t, m, OB_META_MAX, &tp[i]);
+			m = knl_oj_put(t, m, OB_META_MAX, "}");
+		}
+		m = knl_oj_put(t, m, OB_META_MAX, "]");
+		len = ( m > 0 ) ? knl_oj_set_path(j, len, OB_META_MAX, "tessronos", "volumes", t, m) : -1;
+		er = ( len <= 0 ) ? E_LIMIT : knl_tsfs_set_meta(vol, &ob_uuid_devbox, j, len);
+	}
+	UNLOCK();
+	Kfree(j);
+	Kfree(t);
+	Kfree(vu);
+	return er;
+}
+
+EXPORT UW knl_obdev_serial( void )
+{
+	return __atomic_load_n(&obd_serial, __ATOMIC_ACQUIRE);
+}
+
+/* The names of the disks and partitions there are now, OBD_NAME bytes each */
+EXPORT INT knl_obdev_disks( UB *buf, INT max )
+{
+	T_RDEV	rd;
+	UB	name[OBD_NAME];
+	INT	i, n = 0;
+
+	if ( obd_mtx <= 0 || buf == NULL ) {
+		return 0;
+	}
+	for ( i = 0; i < obd_hi && n < max; i++ ) {
+		BOOL	take;
+
+		LOCK();
+		if ( i == 0 ) refresh();
+		take = (BOOL)( obd[i].used && obd[i].seen && obd[i].ops == NULL );
+		if ( take ) knl_memcpy(name, obd[i].name, OBD_NAME);
+		UNLOCK();
+		if ( take && tk_ref_dev(name, &rd) >= E_OK && rd.blksz > 1 && !dev_is_sound(name) ) {
+			knl_memcpy(buf + n * OBD_NAME, name, OBD_NAME);
+			n++;
+		}
+	}
+	return n;
 }
 
 EXPORT ER knl_obdev_uuid( CONST UB *devnm, TS_UUID *p_uuid )
@@ -659,6 +888,9 @@ LOCAL ER obd_ref( CONST TS_UUID *uuid, T_OBREF *r )
 		if ( dev_is_sound(obd[i].name) ) {
 			r->sub = OB_S_SOUND;
 			r->nrec = OB_SND_NREC;
+		} else if ( dev_is_camera(obd[i].name) ) {
+			r->sub = OB_S_CAMERA;
+			r->nrec = OB_CAM_NREC;
 		} else {
 			r->sub = ( tk_ref_dev(obd[i].name, &rd) >= E_OK && rd.blksz > 1 )
 			       ? OB_S_DISK : OB_S_CHAR;
@@ -674,18 +906,88 @@ LOCAL ER obd_ref( CONST TS_UUID *uuid, T_OBREF *r )
  * Devices belong to the system. A disk's blocks are the administrators'
  * alone (rw-r----- with their group); the clock is read by everyone;
  * sound is everyone's to play and record, each opening a channel of
- * its own.
+ * its own. The system object is written by the administrators and by
+ * the ordinary users' group (its records of the colour scheme, the
+ * wallpaper and the power are the only ones that take writing), and so
+ * is a medium of the person's (medium_free).
  */
+
+/* Whether name begins with the base, the disk's name without its partition's number */
+LOCAL BOOL on_disk( CONST UB *name, CONST UB *base, INT nb )
+{
+	INT	k;
+
+	for ( k = 0; k < nb; k++ ) {
+		if ( name[k] != base[k] ) return FALSE;
+	}
+	return TRUE;
+}
+
+/*
+ * A medium the person at the machine may read and write as a whole: a
+ * disk of the USB mass storage ("uda", "uda0", a CD-ROM as well), of
+ * which the system holds nothing -- no native volume attached (its
+ * objects keep their own protection, which the blocks would get round)
+ * and nothing mounted but where a program mounts a medium, under
+ * FS_MEDIA_DIR. A disk the machine started from is never one.
+ */
+LOCAL BOOL medium_free( CONST UB *name )
+{
+	T_FSMNT	*mt;
+	UB	*vp;
+	INT	nb = 0, n, i;
+	BOOL	free = TRUE;
+	CONST INT stride = 32;
+
+	if ( name[0] != 'u' || name[1] != 'd' ) {
+		return FALSE;
+	}
+	while ( nb < OBD_NAME && name[nb] != 0 && ( name[nb] < '0' || name[nb] > '9' ) ) nb++;
+
+	n = fs_mounts(NULL, 0);
+	if ( n > 0 ) {
+		mt = (T_FSMNT *)Kmalloc(sizeof(T_FSMNT) * (SZ)( n + 4 ));
+		if ( mt == NULL ) {
+			return FALSE;
+		}
+		n = fs_mounts(mt, n + 4);
+		for ( i = 0; i < n && free; i++ ) {
+			if ( mt[i].dev[0] != 0 && on_disk(mt[i].dev, name, nb)
+			  && !on_disk(mt[i].path, (CONST UB *)FS_MEDIA_DIR "/", (INT)sizeof(FS_MEDIA_DIR)) ) {
+				free = FALSE;
+			}
+		}
+		Kfree(mt);
+	}
+	vp = (UB *)Kmalloc(stride * 64);
+	if ( vp == NULL ) {
+		return FALSE;
+	}
+	n = knl_obfile_vols(vp, stride, 64);
+	for ( i = 0; i < n && free; i++ ) {
+		if ( on_disk(vp + i * stride, name, nb) ) {
+			free = FALSE;
+		}
+	}
+	Kfree(vp);
+	return free;
+}
+
 LOCAL ER obd_prot( CONST TS_UUID *uuid, T_OBPRT *prt )
 {
 	CONST T_OBDVOPS	*ops = NULL;
 	INT	i;
-	BOOL	open = FALSE;
+	BOOL	open = FALSE, medium = FALSE;
+	UB	name[OBD_NAME];
 
+	name[0] = 0;
 	if ( !is_clock(uuid) && !is_list(uuid) && !is_system(uuid) ) {
 		LOCK();
 		i = ent_by_uuid(uuid);
-		if ( i >= 0 ) ops = obd[i].ops;
+		if ( i >= 0 ) {
+			ops = obd[i].ops;
+			knl_memcpy(name, obd[i].name, OBD_NAME);
+		}
 		UNLOCK();
 		if ( ops != NULL ) {
 			/* added by name: the mode it gives, and the record only x reaches */
@@ -701,14 +1003,33 @@ LOCAL ER obd_prot( CONST TS_UUID *uuid, T_OBPRT *prt )
 			}
 			return E_OK;
 		}
-		/* what a program plays sound or talks on a line with is everyone's */
-		open = ( i >= 0 && ( dev_is_sound(obd[i].name) || dev_is_serial(obd[i].name) ) );
+		/* what a program plays sound, talks on a line or takes pictures with is everyone's */
+		open = ( i >= 0 && ( dev_is_sound(name) || dev_is_serial(name) || dev_is_camera(name) ) );
+		/* a medium of the person's: read and written by the ordinary users too */
+		medium = ( i >= 0 && !open && medium_free(name) );
 	}
 	knl_memset(prt, 0, sizeof(*prt));
 	prt->owner = ob_user_system;
 	prt->group = ob_group_admin;
 	prt->mode = is_list(uuid) ? 0444 : is_clock(uuid) ? 0644 : is_system(uuid) ? 0664 : open ? 0666 : 0640;
 	prt->attr = OB_A_PERM;
+	if ( is_system(uuid) ) {
+		/* the colour scheme, the wallpaper and the power are the person's at the machine to set */
+		prt->nacl = 1;
+		prt->acl[0].kind = OB_ACE_GROUP;
+		prt->acl[0].who = ob_group_users;
+		prt->acl[0].ops = OB_OP_WRITE;
+	} else {
+		/*
+		 * What a device is -- its size, where it is mounted -- is the
+		 * ordinary users' to look at; a medium of the person's is
+		 * theirs to read and write as well
+		 */
+		prt->nacl = 1;
+		prt->acl[0].kind = OB_ACE_GROUP;
+		prt->acl[0].who = ob_group_users;
+		prt->acl[0].ops = medium ? ( OB_OP_R | OB_OP_WRITE ) : OB_OP_ATRRD;
+	}
 
 	return E_OK;
 }
@@ -719,7 +1040,7 @@ LOCAL INT obd_open( CONST TS_UUID *uuid, UINT ops )
 	ID	dd = 0;
 	T_RDEV	rd;
 	W	blksz = 1;
-	BOOL	sound = FALSE, serial = FALSE;
+	BOOL	sound = FALSE, serial = FALSE, camera = FALSE;
 	CONST T_OBDVOPS	*vops = NULL;
 	void	*vctx = NULL;
 	UD	pos = 0;
@@ -749,6 +1070,7 @@ LOCAL INT obd_open( CONST TS_UUID *uuid, UINT ops )
 			blksz = rd.blksz;
 			sound = ( TDK_KIND(rd.devatr) == TDK_SOUND_KIND );
 			serial = ( TDK_KIND(rd.devatr) == TDK_SERIAL );
+			camera = ( TDK_KIND(rd.devatr) == TDK_CAMERA_KIND );
 		}
 	}
 	if ( vops != NULL && vops->opened != NULL ) {
@@ -766,6 +1088,7 @@ LOCAL INT obd_open( CONST TS_UUID *uuid, UINT ops )
 			obd_hnd[i].blksz = blksz;
 			obd_hnd[i].sound = sound;
 			obd_hnd[i].serial = serial;
+			obd_hnd[i].camera = camera;
 			UNLOCK();
 			return i + 1;
 		}
@@ -809,12 +1132,16 @@ LOCAL INT describe( OBDHND *o, UB *t, INT max )
 		n = knl_oj_put(t, n, max, ": the system (virtual). Records 1 to 9 are key and value "
 				   "lines: the system, power (write OFF or RESTART), the screen (画面), the USB "
 				   "devices, the colour scheme (write its number), the wallpaper (write its "
-				   "object), the network, sound, the hardware's state");
+				   "object), the network, sound (write SELECT and an output's id), the hardware's state");
 	} else if ( o->ent < 0 ) {
 		n = knl_oj_put(t, n, max, ": clock (virtual)");
 	} else if ( o->sound ) {
 		n = knl_oj_put(t, n, max, ": sound. Record 1 is the PCM (written, it plays; read, "
 				   "it gives what was recorded); records 2 on are its attributes");
+	} else if ( o->camera ) {
+		n = knl_oj_put(t, n, max, ": camera. Record 1 is its frames (read, the newest one "
+				   "not had yet); record 2 what it is, 3 its modes, 4 the mode picked (written, "
+				   "it is picked), 5 the stream (write 1 to start, 0 to stop), 6 its counts");
 	} else if ( o->serial ) {
 		n = knl_oj_put(t, n, max, ": serial port. Record 1 is the data (read, what has "
 				   "come in; written, it is sent); record 2 its speed, record 3 what it is");
@@ -838,7 +1165,7 @@ LOCAL INT list_text( UB *t, INT max )
 			   "<document><p>devices</p>");
 	LOCK();
 	refresh();
-	for ( i = 0; i < OBD_MAX; i++ ) {
+	for ( i = 0; i < obd_hi; i++ ) {
 		if ( !obd[i].used || !obd[i].seen ) continue;
 		(void)ts_uuid_to_str(&obd[i].uuid, us, sizeof(us));
 		n = knl_oj_put(t, n, max, "<p><link id=\"");
@@ -858,7 +1185,7 @@ LOCAL INT list_count( void )
 
 	LOCK();
 	refresh();
-	for ( i = 0; i < OBD_MAX; i++ ) {
+	for ( i = 0; i < obd_hi; i++ ) {
 		if ( obd[i].used && obd[i].seen ) n++;
 	}
 	UNLOCK();
@@ -882,6 +1209,7 @@ LOCAL INT clock_text( UB *t, INT max )
 		return -1;
 	}
 	(void)dt_getsystz(&tz);
+	if ( tm.tm_isdst ) tz += 60;		/* summer time: an hour more */
 	n = knl_oj_put_num(t, 0, max, tm.tm_year + 1900);
 	n = knl_oj_put(t, n, max, "-");
 	n = two(t, n, max, tm.tm_mon + 1);
@@ -1179,6 +1507,17 @@ LOCAL ER obd_rea( INT h, INT recno, D off, void *buf, SZ size, SZ *p_asize, BOOL
 		if ( er >= E_OK && p_asize != NULL ) *p_asize = asz;
 		return ( er < E_OK ) ? er : E_OK;
 	}
+	if ( o->camera ) {
+		if ( recno < 1 || recno >= OB_CAM_NREC ) {
+			return E_NOEXS;
+		}
+		if ( off != 0 ) {
+			return E_PAR;		/* a frame and an attribute are read whole */
+		}
+		er = tk_srea_dev(o->dd, cam_dn[recno], buf, size, &asz);
+		if ( er >= E_OK && p_asize != NULL ) *p_asize = asz;
+		return ( er < E_OK ) ? er : E_OK;
+	}
 	if ( o->serial && recno > 1 && recno < OB_SER_NREC ) {
 		if ( off != 0 ) {
 			return E_PAR;		/* an attribute is read whole */
@@ -1240,7 +1579,19 @@ LOCAL ER obd_wri( INT h, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize
 		if ( off != 0 ) {
 			return E_PAR;		/* sound is written as it comes, an attribute whole */
 		}
+		if ( recno == OB_SND_OUTS || recno == OB_SND_OUTSEL ) {
+			/* the output is the system's: chosen through its record 8, which is protected */
+			return E_RONLY;
+		}
 		er = tk_swri_dev(o->dd, snd_dn[recno], buf, size, &asz);
+		if ( er >= E_OK && p_asize != NULL ) *p_asize = asz;
+		return ( er < E_OK ) ? er : E_OK;
+	}
+	if ( o->camera && ( recno == OB_CAM_MODE || recno == OB_CAM_STREAM ) ) {
+		if ( off != 0 ) {
+			return E_PAR;
+		}
+		er = tk_swri_dev(o->dd, cam_dn[recno], buf, size, &asz);
 		if ( er >= E_OK && p_asize != NULL ) *p_asize = asz;
 		return ( er < E_OK ) ? er : E_OK;
 	}
@@ -1317,16 +1668,23 @@ LOCAL ER obd_lrc( INT h, T_OBREC *buf, INT n, INT *p_cnt )
 	}
 	/* a key for the attributes has the device asked with it opened for now */
 	dd = o->dd;
-	if ( dd <= 0 && o->ent >= 0 && ( o->sound || o->blksz > 1 ) ) {
+	if ( dd <= 0 && o->ent >= 0 && ( o->sound || o->camera || o->blksz > 1 ) ) {
 		dd = tk_opn_dev(obd[o->ent].name, TD_READ);
 	}
-	for ( k = 0; k < ( o->sound ? OB_SND_NREC : o->serial ? OB_SER_NREC : 2 ) && k < n; k++ ) {
+	for ( k = 0; k < ( o->sound ? OB_SND_NREC : o->camera ? OB_CAM_NREC : o->serial ? OB_SER_NREC : 2 ) && k < n; k++ ) {
 		buf[k].recno = k;
 		buf[k].rt = ( k == 0 ) ? OB_RT_TAD : OB_RT_SYSDATA;
 		buf[k].sub = 0;
 		buf[k].size = ( k == 0 ) ? (UD)describe(o, t, sizeof(t)) : 0;
 		if ( o->serial && k > 1 ) {
 			buf[k].size = ( k == 2 ) ? sizeof(UW) : sizeof(T_SERINFO);
+		}
+		if ( o->camera && k > OB_CAM_FRAME ) {
+			SZ	asz = 0;
+
+			if ( dd > 0 && tk_srea_dev(dd, cam_dn[k], NULL, 0, &asz) >= E_OK ) {
+				buf[k].size = (UD)asz;
+			}
 		}
 		if ( o->sound && k > OB_SND_PCM ) {
 			SZ	asz = 0;
@@ -1397,14 +1755,35 @@ LOCAL ER obd_gat( INT h, UB *json, SZ size, SZ *p_asize )
 	n = knl_oj_put(json, n, (INT)size, ",\"blksz\":");
 	n = knl_oj_put_num(json, n, (INT)size, o->blksz);
 	n = knl_oj_put(json, n, (INT)size, "}");
-	/* a disk whose volume is mounted: where, with what and how (design 12.2.3) */
-	if ( o->ent >= 0 && o->blksz > 1 && knl_fs_mount_of((CONST char *)obd[o->ent].name, &mnt) ) {
-		n = knl_oj_put(json, n, (INT)size, ",\"tessronos\":{\"mount\":{\"path\":");
-		n = knl_oj_put_str(json, n, (INT)size, mnt.path);
-		n = knl_oj_put(json, n, (INT)size, ",\"fs\":");
-		n = knl_oj_put_str(json, n, (INT)size, mnt.fimp);
-		n = knl_oj_put(json, n, (INT)size, ( mnt.flags & FS_MNT_RDONLY ) ? ",\"readonly\":true}}"
-										 : ",\"readonly\":false}}");
+	/*
+	 * A disk: what is on it (design 7.6), and the volume mounted from
+	 * it, where, with what and how (design 12.2.3)
+	 */
+	if ( o->ent >= 0 && o->blksz > 1 && !o->sound && !o->serial ) {
+		T_FSPROBE	*pr = (T_FSPROBE *)Kmalloc(sizeof(T_FSPROBE));
+
+		BOOL		mounted = knl_fs_mount_of((CONST char *)obd[o->ent].name, &mnt);
+
+		n = knl_oj_put(json, n, (INT)size, ",\"tessronos\":{");
+		if ( mounted ) {
+			n = knl_oj_put(json, n, (INT)size, "\"mount\":{\"path\":");
+			n = knl_oj_put_str(json, n, (INT)size, mnt.path);
+			n = knl_oj_put(json, n, (INT)size, ",\"fs\":");
+			n = knl_oj_put_str(json, n, (INT)size, mnt.fimp);
+			n = knl_oj_put(json, n, (INT)size, ( mnt.flags & FS_MNT_RDONLY ) ? ",\"readonly\":true}"
+											 : ",\"readonly\":false}");
+		}
+		if ( pr != NULL && knl_fs_probe((CONST char *)obd[o->ent].name, pr) >= E_OK ) {
+			n = knl_oj_put(json, n, (INT)size, mounted ? ",\"format\":{\"kind\":" : "\"format\":{\"kind\":");
+			n = knl_oj_put_str(json, n, (INT)size, pr->name);
+			n = knl_oj_put(json, n, (INT)size, ",\"label\":");
+			n = knl_oj_put_str(json, n, (INT)size, pr->label);
+			n = knl_oj_put(json, n, (INT)size, ",\"fs\":");
+			n = knl_oj_put_str(json, n, (INT)size, pr->fimp);
+			n = knl_oj_put(json, n, (INT)size, "}");
+		}
+		if ( pr != NULL ) Kfree(pr);
+		n = knl_oj_put(json, n, (INT)size, "}");
 	}
 	n = knl_oj_put(json, n, (INT)size, "}");
 	if ( n < 0 ) {
@@ -1438,7 +1817,7 @@ LOCAL ER obd_lst( CONST TS_UUID *from, TS_UUID *buf, INT n, INT *p_cnt )
 				best = virt[k];
 			}
 		}
-		for ( i = 0; i < OBD_MAX; i++ ) {
+		for ( i = 0; i < obd_hi; i++ ) {
 			if ( !obd[i].used || !obd[i].seen ) continue;
 			if ( cnt > 0 && ts_uuid_cmp(&obd[i].uuid, &buf[cnt - 1]) <= 0 ) continue;
 			if ( cnt == 0 && from != NULL && ts_uuid_cmp(&obd[i].uuid, from) <= 0 ) continue;
@@ -1501,12 +1880,29 @@ EXPORT ER fs_attach_dev( ID devkey, CONST char *fimpnm, UINT flags )
 	TS_UUID	u;
 	ER	er;
 
-	if ( fimpnm == NULL || ( flags & ~(UINT)FS_MNT_RDONLY ) != 0 ) {
+	if ( ( flags & ~(UINT)FS_MNT_RDONLY ) != 0 ) {
 		return EX_INVAL;
 	}
 	er = disk_of_key(devkey, mount_ops(flags), name, &u);
 	if ( er < EX_OK ) {
 		return er;
+	}
+	if ( fimpnm == NULL ) {
+		/* the fimp of what is on it */
+		T_FSPROBE	*pr = (T_FSPROBE *)Kmalloc(sizeof(T_FSPROBE));
+
+		if ( pr == NULL ) {
+			return EX_NOMEM;
+		}
+		er = knl_fs_probe((CONST char *)name, pr);
+		fimpnm = ( er >= E_OK ) ? knl_fs_kind_fimp(pr->kind) : "";
+		Kfree(pr);
+		if ( er < E_OK ) {
+			return EX_IO;
+		}
+		if ( fimpnm[0] == 0 ) {
+			return EX_NOTSUP;	/* no fimp mounts this kind */
+		}
 	}
 	er = knl_fs_attach_media(fimpnm, (CONST char *)name, flags);
 	if ( er >= EX_OK ) {

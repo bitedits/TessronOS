@@ -1,0 +1,11 @@
+<tad version="1.0" encoding="UTF-8" filename="キー配列のかな配列">
+<document>
+<p>キー配列のかな配列</p>
+<p>かなの配列。JISかな、TRONかな配列、親指シフト。メニューの定義。</p>
+</document>
+<menu>
+<item code="kana.jis">JISかな</item>
+<item code="kana.tron">TRONかな配列</item>
+<item code="kana.nicola">親指シフト</item>
+</menu>
+</tad>

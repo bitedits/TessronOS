@@ -1,0 +1,18 @@
+<tad version="1.0" encoding="UTF-8" filename="基本表計算のメニュー">
+<document>
+<p>基本表計算のメニュー</p>
+<p>基本表計算の窓のメニュー。閉じる、保存、表示、編集、書体、文字修飾、文字サイズ、文字色、書式と、仮身操作から実行までの共通の項目。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2003-7001-9a10-c1d2e3f40b01"/></include>
+<item>保存<link id="01a0d889-45ed-7774-81e6-53a2d63223c7_0.xtad" vobjid="01a0d8c3-2003-7002-9a10-c1d2e3f40b02"/></item>
+<item>表示<link id="01a0d889-46d1-7b12-9c23-4d5e6f7a8b12_0.xtad" vobjid="01a0d8c3-2003-7003-9a10-c1d2e3f40b03"/></item>
+<item>編集<link id="01a0d889-46d2-7c23-8d34-5e6f7a8b9c23_0.xtad" vobjid="01a0d8c3-2003-7004-9a10-c1d2e3f40b04"/></item>
+<item>書体<link id="01a0d889-46d3-7d34-9e45-6f7a8b9cad34_0.xtad" vobjid="01a0d8c3-2003-7005-9a10-c1d2e3f40b05"/></item>
+<item>文字修飾<link id="01a0d889-46d4-7e45-8f56-7a8b9cadbe45_0.xtad" vobjid="01a0d8c3-2003-7006-9a10-c1d2e3f40b06"/></item>
+<item>文字サイズ<link id="01a0d889-46d5-7f56-9a67-8b9cadbecf56_0.xtad" vobjid="01a0d8c3-2003-7007-9a10-c1d2e3f40b07"/></item>
+<item>文字色<link id="01a0d889-46d6-7067-8b78-9cadbecfd067_0.xtad" vobjid="01a0d8c3-2003-7008-9a10-c1d2e3f40b08"/></item>
+<item>書式<link id="01a0d889-46d7-7178-9c89-adbecfd0e178_0.xtad" vobjid="01a0d8c3-2003-7009-9a10-c1d2e3f40b09"/></item>
+<include><link id="01a0d889-45ec-766a-986d-5fad49d48e06_0.xtad" vobjid="01a0d8c3-2003-700a-9a10-c1d2e3f40b0a"/></include>
+</menu>
+</tad>

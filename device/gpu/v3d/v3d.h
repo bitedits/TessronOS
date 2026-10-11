@@ -86,7 +86,49 @@ typedef struct {
 
 IMPORT void	v3d_stat( T_V3DSTAT *st );
 
+/*
+ * Where the time of the control list jobs went, as the driver sees it,
+ * in ticks of the system counter (cntvct_el0) summed over the jobs that
+ * ended since the last take. A job runs: the caches made ready and the
+ * binner started (setup), the binner until its end is seen (bin), the
+ * caches made ready again and the renderer started (mid), the renderer
+ * until its end is seen (render), the caches cleaned when the job asked
+ * for it (clean). The ends are seen in the interrupt handler, so bin
+ * and render include the interrupt's latency.
+ */
+typedef struct {
+	UW	njob;		/* jobs that ended */
+	UD	first_kick;	/* the counter when the first of them started; 0 none */
+	UD	last_end;	/* and when the last of them ended */
+	UD	setup;
+	UD	bin;
+	UD	mid;
+	UD	render;
+	UD	clean;
+} T_V3DJOBT;
+
+/* What was summed since the last take, and the sums started again */
+IMPORT void	v3d_jobt_take( T_V3DJOBT *t );
+
 /* Start the tests on the board in a task of their own (v3d_test.c) */
 IMPORT void	v3d_test_start( void );
+
+/*
+ * The address spaces of the processes (13-gpu.md 13.5): the table of
+ * one (NULL: the kernel's), and the check at start that a job in one
+ * reaches its own BOs and not the kernel's (v3d_test.c). Processes get
+ * spaces only when it passed.
+ */
+IMPORT T_V3DMMU	*v3d_as_mmu( void *as );
+IMPORT BOOL	v3d_as_check( void );
+
+/*
+ * Compositing the windows on the GPU (v3d_compose.c): set up, the check
+ * that compares its screen with the processor's and turns it on, and
+ * that check in a task of its own when the tests do not run it.
+ */
+IMPORT ER	v3d_compose_init( void );
+IMPORT BOOL	v3d_compose_check( void );
+IMPORT void	v3d_compose_start( void );
 
 #endif /* _DEVICE_GPU_V3D_V3D_H_ */

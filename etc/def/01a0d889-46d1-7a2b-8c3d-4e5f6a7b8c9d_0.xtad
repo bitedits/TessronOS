@@ -1,0 +1,14 @@
+<tad version="1.0" encoding="UTF-8" filename="編集">
+<document>
+<p>編集</p>
+<p>ブラウザの編集。メニューの定義。</p>
+</document>
+<menu>
+<item code="copy" key="C">トレーへ複写</item>
+<item code="cut" key="X">トレーへ移動</item>
+<item code="paste" key="V">トレーから複写</item>
+<item code="selall" key="A">すべて選択</item>
+<line/>
+<item code="sethome">ホームページに設定</item>
+</menu>
+</tad>

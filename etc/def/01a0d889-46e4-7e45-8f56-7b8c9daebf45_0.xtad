@@ -1,0 +1,9 @@
+<tad version="1.0" encoding="UTF-8" filename="かな入力練習のキーコード変換">
+<document>
+<p>かな入力練習のキーコード変換</p>
+<p>キーボードが自分で配列を変えているときの、キーの読み替え。なし、または実身のキーコード変換から選ぶ。メニューの定義。</p>
+</document>
+<menu>
+<list code="trans.item"/>
+</menu>
+</tad>

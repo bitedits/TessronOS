@@ -6,5 +6,7 @@
 <menu>
 <item code="paper">用紙枠表示オンオフ</item>
 <item code="pagesetup">用紙枠設定</item>
+<line/>
+<item code="print" key="P">印刷...</item>
 </menu>
 </tad>

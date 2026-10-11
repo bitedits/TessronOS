@@ -67,15 +67,16 @@ TessronOS は TRON Forum の μT-Kernel 3.0 を出発点にしている。本書
 
 ## NetBSD のネットワークスタック(取り込んでいない。`tools/netbsd/build.sh`が取得してビルドする)
 
-TCP/IPスタック(docs/tessronos/09-network.md)は、NetBSDのカーネルのネットワーク部分を、rumpカーネルの部品としてTessronOSのカーネルの中で動かす。ソースはリポジトリに含めず、`tools/netbsd/build.sh`がNetBSDの配布物を取得し、スタックに必要なディレクトリだけをWSLのホームに展開して、TessronOSのツールチェーンでコンパイルする。ChromiumやMozcと同じく、リポジトリの外に置く。展開するのは約26MBで、スクリプトが検査値を確かめて取得し直せるので、リポジトリに入れる利点がない。
+TCP/IPスタック(docs/tessronos/09-network.md)は、NetBSDのカーネルのネットワーク部分を、rumpカーネルの部品としてTessronOSのカーネルの中で動かす。ソースはリポジトリに含めず、`tools/netbsd/build.sh`がNetBSDの配布物を取得し、スタックに必要なディレクトリだけをWSLのホームに展開して、TessronOSのツールチェーンでコンパイルする。ChromiumやMozcと同じく、リポジトリの外に置く。展開するのは約27MBで、スクリプトが検査値を確かめて取得し直せるので、リポジトリに入れる利点がない。
 
 | 項目 | 値 |
 | --- | --- |
-| バージョン | NetBSD 10.1 |
-| 取得元 | `https://cdn.netbsd.org/pub/NetBSD/NetBSD-10.1/source/sets/syssrc.tgz` |
-| 取得日 | 2026-09-30 |
-| SHA512 | `766ac21f33cfe0e701dfedb894fa07f36d811da1a12e979181e8fca7af4e627852680ce42a7b29e97dd3e2e402ddf9ae7bfba60c8d7dc6b8a3354d8ce8c06926`(リリースの`source/sets/SHA512`と同じ) |
-| 置き場 | `~/netbsd/netbsd-10.1`(`sys/`と`common/`のうち、スクリプトの`EXTRACT_DIRS`、`EXTRACT_TREES`にあるもの) |
+| バージョン | NetBSD 11.0 |
+| 取得元 | `syssrc.tgz`(80,565,300バイト)を`https://cdn.netbsd.org/pub/NetBSD/NetBSD-11.0/source/sets/`、`https://archive.netbsd.org/pub/NetBSD-archive/NetBSD-11.0/source/sets/`、`https://ftp.netbsd.org/pub/NetBSD/NetBSD-11.0/source/sets/`の順に試す(`NB_URL`で先頭に足せる)。新しい版が出た版は本流のサーバから外されて保存用のサーバに移る。前に使っていた10.1では、2026年10月7日に本流のサーバと国内のミラーが404を返し、保存用のサーバは先頭の2MiBしか返さなかった。どこからも全体が取れなければ、下の「残す部分」を使う |
+| 取得日 | 2026-10-07 |
+| SHA512 | `318d451ecc83749607d5448198c02663ea5f0b7f4cc74fb565747f86eead7b66b5809a37deee219dc6ddb2e5ee332d1cbb94c1a4e9db63620c3abd7586fb3057`(リリースの`source/sets/SHA512`と同じ) |
+| 残す部分 | `netbsd-11.0-rumpsrc.tgz`(約5MB、2074ファイル)。`syssrc.tgz`のうちスクリプトが展開するファイルだけを、変更せずに名前の順に並べ、持ち主と固めた時刻を入れずに固めたもの。`tools/netbsd/`にあればそれを、無ければTessronOSのリリース`netbsd-11.0-src`の添付(`NB_SUB_URL`で先頭に足せる)を使う。SHA512は`69df51784bc88696219af3a6793c780f1edc051a5c98bc8edabc88efa88766be63559dbc9eb20c8c7c9947f381530c188e8dc8835ac50ed43af2784517295ba4` |
+| 置き場 | `~/netbsd/netbsd-11.0`(`sys/`と`common/`のうち、スクリプトの`EXTRACT_DIRS`、`EXTRACT_TREES`にあるもの) |
 | 生成物 | `~/tessronos-netbsd/rumpnet.o`、著作権表示の一覧`~/tessronos-netbsd/NOTICE-netbsd.txt` |
 | ライセンス | BSD(2条項、3条項、一部4条項)ほか(`THIRD_PARTY_NOTICES.md`) |
 | 変更 | ソースは変更しない |
@@ -99,7 +100,6 @@ rumpカーネルの中に入るTessronOSの部品(`peripheral_kernel/network/net
 | --- | --- |
 | `if_tsneta.c` | デバイス`neta`をEthernetのインタフェース`neta0`にする |
 | `tsnet_conf.c` | アドレスと経路の設定、`FIONREAD`、呼び出したタスクに貸すスレッドを作る |
-| `novfs_stub.c` | ファイルシステムを組み込まないため、rumpカーネルの基盤が参照するファイルシステムのシンボルを用意する |
 
 rumpカーネルのビルドには、NetBSDの`build.sh`とnbmakeを使う`buildrump.sh`(`https://github.com/rumpkernel/buildrump.sh`)がある。しかし最後の更新は2017年で、2016年のNetBSDのソースを前提にしている。TessronOSは自立したaarch64のツールチェーンで浮動小数点のレジスタを使わずにコンパイルする必要があり、ファイルの一覧を直接持つほうが単純なので、使っていない。
 
@@ -185,18 +185,41 @@ C ライブラリの不足分は `peripheral_kernel/libc/` にある(`qsort`・`
 | パッチ | 内容 |
 | --- | --- |
 | `abseil-cctz-libc.patch` | abseilの時刻帯を、TessronOSのCライブラリで扱う |
+| `angle_es3_samples.patch` | ANGLEのOpenGL ESのバックエンドが、システムのドライバ自身がOpenGL ES 3以上を出しているときは、必須の形式の4サンプルがないことでOpenGL ES 2.0に制限しない(マルチサンプリングを持たないsoftpipeの上のWebGL 2、第14章14.6.1) |
+| `angle_framebuffer_wgpu.patch` | ANGLEのWebGPUの裏の`FramebufferWgpu.cpp`が読むlibc++の内部の頭書き(`<__config>`)を除く(WebGL on WebGPU、第14章14.6.5.1) |
+| `angle_intermnode.patch` | ANGLEのシェーダ変換器の、検査付きの数を配列の大きさにする所を、gccが受け付ける形にする |
 | `cookie_jar.patch` | `document.cookie`を、ブラウザのCookieの入れ物に向ける |
+| `dom_websocket.patch` | `WebSocket`のチャネルを、プロセスの中のネットワークスタックで動くもの(`port/blink/websocket_tessronos.cc`)にする |
 | `html_canvas_painter.patch` | canvasのレイヤーを合成に回さず、ページの描画の記録に描く |
 | `html_media_element.patch`、`video_painter.patch` | メディアの操作部品がなくても動く。動画を常にソフトウェアで描く |
+| `isolated_context.patch` | 窓が隔離された文脈か、クロスオリジン分離されているかを、ブラウザが許した起源で答えさせる(第14章14.4.14) |
+| `language_detection_model.patch` | 組み込みのAIの`LanguageDetector`の言語の推定を、ブラウザのCLD3の呼出しに向ける(第14章14.4.13) |
 | `interface_object.patch` | コンパイルしていないWebのインタフェースを、グローバルのプロパティとして`undefined`と読ませる |
 | `skia-png-frameinfo.patch` | libpngのコーデックが、1枚の画像の枠の情報を答える |
 | `viewport_scrollbars.patch` | スクロールバーを隠す設定を、メインフレームのビューポートだけに効かせる(ページ全体はウインドウのスクロールバーで動かす) |
+| `shared_memory_region.patch`、`shared_memory_tracker.patch` | 共有メモリの領域を、`/dev/shm`の一時ファイルではなくプロセスのメモリの物(`memfd_create`、`lib/libcxxrt/ts_mman.c`)で作る。同じ領域の写像がどれも同じアドレスになることを許す(Mojoのデータパイプ、`fetch()`の応答の本文) |
+| `webnn_context_provider.patch` | 頁のプロセスで動かすWebNNのサービスに、LiteRTのない版の計算の文脈を作る口を足す(第14章14.4.16) |
+| `default_decoder_factory.patch` | 埋め込む側が渡す機械の映像の復号器(Raspberry Pi 5のHEVC)を、ソフトウェアの復号器より先に並べる口を足す(第14章14.6.7) |
+| `web_printing_manager.patch` | ChromeOSだけで使うWeb Printingの口を、このブラウザでも使う(第14章14.4.14) |
+| `wasm_interpreter.patch`、`wasm_interpreter_h.patch` | WebAssemblyのインタプリタ(DrumBrake)の命令の処理から次の処理への呼出しを、gccでも必ず分岐にする(命令ごとにスタックを使わない)。gccが受け付けないクラスの中での明示的特殊化を、`if constexpr`で型を選ぶテンプレートにする。DrumBrakeはJITを入れてから作っていない(`v8_enable_drumbrake = false`、第14章14.3)が、作り直すときのために残す |
+
+音声の合成と認識(第14章14.4.15)のOpen JTalk 1.11、hts_engine API 1.10、Flite 2.2、whisper.cpp 1.7.6は、`tessron-chromium/tools/browser/speech.sh`が取得して`~/speech/src`に展開し、コンパイルする。ソースは変更しない。MeCabの辞書を開く所(`mmap.h`)とhts_engine APIの音声を開く所(`HTS_misc.c`)だけ、ビルドの場所に写したものを書き換え、ブラウザが持つバイト列から読ませる。MeCabの設定を読む所(`param.cpp`)の、使わないファイルのストリームを作る1行も写しから除く。
 
 FFmpeg 4.4.6は、`~/ffbt/ffmpeg-4.4.6`のソースを`tessron-chromium/tools/browser/ffmpeg.sh`がビルドする(ソースは変更しない)。
 
-## Mesa(生成したヘッダを1つ取り込む。ほかは`tools/mesa/`が取得して使う)
+## Mesa(生成したヘッダを2つ取り込む。ほかは`tools/mesa/`が取得して使う)
 
-GPUのユーザ空間(docs/tessronos/13-gpu.md 13.6)はMesaを移植する予定である。現時点でリポジトリにあるMesa由来のものは、V3D 7.1の制御リストのパケットを詰めるヘッダ1つ(`device/gpu/v3d/mesa/v3d_packet_v71_pack.h`)だけである。これはMesaの`src/broadcom/cle/v3d_packet.xml`を`gen_pack_header.py`で変換したもので、`tools/mesa/probe.sh pack`が生成し、先頭にMITライセンスの著作権表示と許諾文(`tools/mesa/pack_notice.txt`)を付けて書き出す。手で編集せず、Mesaの版を上げるときは`MESA_VER`と`MESA_SHA256`を変えて作り直す。生成したヘッダが呼ぶ補助の関数(`device/gpu/v3d/mesa/cle/v3d_packet_helpers.h`)は、カーネルが浮動小数点のレジスタを使わずに済むように書いたTessronOSのファイルで、Mesaの同名のファイルの写しではない。それ以外は、`tools/mesa/probe.sh`が取得し、作業ディレクトリ(既定は`/tmp/tsmesa`)で生成とコンパイルを試すだけである。
+GPUのユーザ空間(docs/tessronos/13-gpu.md 13.6)のOpenGL ESはMesaである。Mesaのソースはリポジトリに入れない。`make GL=1`のとき`tools/mesa/build.sh`が、`~/mesa/mesa-26.2.3`に取得したリリース(SHA-256を検査する)からファイルをハードリンクした写しを`~/tsmesa/src`に作り、`tools/mesa/patches`のパッチを当て(パッチが当たるファイルだけは写しを別のファイルにしてから書き換えるので、取得したソースは変わらない)、`tools/mesa/src`のファイルをMesaの`src`の同じ場所に足す。そのうえでホストのmesonを本番のオプションで実行し、生成物をninjaで作り、`compile_commands.json`のコマンドを`tools/mesa/translate.py`がTessronOSのプロセス用に書き換えてコンパイルし、移植層(`lib/libgl`)とともに`~/tsmesa/libtsgl.a`にする。
+
+| パッチ | 対象 | 内容 |
+| --- | --- | --- |
+| `util-tessronos.patch` | `src/util/detect_os.h`、`os_misc.c`、`u_thread.c` | `DETECT_OS_TESSRONOS`(POSIXの一つとする)、メモリの大きさを`sysconf`で得るときのヘッダ、スレッドのCPU時間を持たないこと |
+| `hud-signal.patch` | `src/gallium/auxiliary/hud/hud_context.c` | シグナルを持たないので、HUDの表示を切り替えるシグナルの処理を入れない |
+| `egl-tessronos.patch` | `src/egl/main/egldisplay.h`、`egldisplay.c`、`eglapi.c`、`src/egl/drivers/dri2/egl_dri2.c`、`egl_dri2.h`、`src/egl/meson.build` | EGLのプラットフォーム`tessronos`(`EGL_PLATFORM_TESSRONOS`、既定のプラットフォーム、初期化と後始末の振り分け、ソースの追加) |
+
+足すファイルは`tools/mesa/src/egl/drivers/dri2/platform_tessronos.c`(EGLのプラットフォーム)だけで、TessronOSのファイルである。libdrmなどMesaがLinuxで使うライブラリのヘッダの代わりは`tools/mesa/shim`にあり、その実体はTessronOSの`lib/libgl`(DRMシム`gl_drm.c`、OSの層`gl_os.c`、窓とGPUの問い合わせ`gl_win.c`)である。Mesaの版を上げるときは、`MESA_VER`と`MESA_SHA256`を変え、パッチが当たることを確かめ(`patch`が失敗すればビルドが止まる)、`tools/mesa/build.sh all`で建て直し、`ktest`の`gl`の群を走らせる。
+
+現時点でリポジトリにあるMesa由来のものは、V3D 7.1の制御リストのパケットを詰めるヘッダ(`device/gpu/v3d/mesa/v3d_packet_v71_pack.h`)と、ウインドウの合成のシェーダのヘッダ(`device/gpu/v3d/mesa/v3d_cp_shaders.h`)の2つである。これはMesaの`src/broadcom/cle/v3d_packet.xml`を`gen_pack_header.py`で変換したもので、`tools/mesa/probe.sh pack`が生成し、先頭にMITライセンスの著作権表示と許諾文(`tools/mesa/pack_notice.txt`)を付けて書き出す。手で編集せず、Mesaの版を上げるときは`MESA_VER`と`MESA_SHA256`を変えて作り直す。生成したヘッダが呼ぶ補助の関数(`device/gpu/v3d/mesa/cle/v3d_packet_helpers.h`)は、カーネルが浮動小数点のレジスタを使わずに済むように書いたTessronOSのファイルで、Mesaの同名のファイルの写しではない。合成のシェーダのヘッダは、`tools/mesa/shaders.sh`がMesaを`~/mesa`に取得し、NIR、V3Dのシェーダコンパイラ、QPU、`src/util`をホスト向けの静的ライブラリにして`tools/mesa/gen_cp_shaders.c`とリンクし、その出力(QPUのコード、ユニフォームの内容、詰めたレコードとパケット)に先頭のMITライセンスの表示を付けて書き出す。これも手で編集せず、作り直す。`tools/mesa/test_cp_shaders.c`は同じライブラリにリンクしてシェーダをホストで確かめる(13-gpu.md 13.10.4)。それ以外は、`tools/mesa/probe.sh`が取得し、作業ディレクトリ(既定は`/tmp/tsmesa`)で生成とコンパイルを試すだけである。
 
 | 項目 | 内容 |
 | --- | --- |
@@ -215,8 +238,10 @@ TessronOSのコードがMesaから参照したものは次のとおりで、生�
 | `device/gpu/v3d/v3d.c`のジョブの実行 | `src/broadcom/simulator/v3dx_simulator.c` | キャッシュの無効化とクリーン、制御リストの開始、完了の判定の手順 |
 | `tools/mesa/cle_probe.c` | `src/broadcom/cle/gen_pack_header.py`、`v3d_packet.xml` | 生成したヘッダをインクルードして使う(生成物は作業ディレクトリにだけ置く) |
 | `device/gpu/v3d/v3d_test.c`のフレームの組み立て | `src/broadcom/vulkan/v3dvx_meta_common.c`、`v3dvx_cmd_buffer.c`、`src/broadcom/common/v3d_util.c`、`v3d_limits.h` | バッファを1色で埋める、またはコピーするフレームのパケットの並び、タイルとスーパータイルの大きさ、タイルの割当てメモリの大きさ |
-
-Mesa本体を取り込む段階(13-gpu.mdのM1)では、この節を取り込んだファイルの一覧、改変、更新の手順を含むものに書き換える。
+| `tools/mesa/gen_cp_shaders.c` | `src/gallium/drivers/v3d/v3d_screen.c`、`v3d_program.c`、`v3dx_draw.c`、`v3dx_emit.c`、`v3d_blit.c` | NIRのオプション、コンパイラに渡す前の準備、シェーダステートレコードの各項目の決め方、ビニングの状態のパケット、NIRのビルダで書いたシェーダからメモリを読むやり方 |
+| `device/gpu/v3d/v3d_compose.c`のジョブの組み立て | `src/gallium/drivers/v3d/v3dx_draw.c`、`v3dx_rcl.c`、`v3d_job.c` | ドローのパケットの並び、汎用のタイルリスト(ロード、プリミティブの形式、インスタンスの番号、分岐、ストア)、タイルの割当てメモリの余裕 |
+| `tools/mesa/src/egl/drivers/dri2/platform_tessronos.c` | `src/egl/drivers/dri2/platform_surfaceless.c`、`platform_x11.c`、`egl_dri2.c` | プラットフォームが用意する関数の表、ソフトウェアの描画のローダの拡張(描いた像を受け取る関数)、ピクセルバッファの像の割当て、構成の登録 |
+| `lib/libgl/gl_drm.c`、`tools/mesa/shim/xf86drm.h` | `include/drm-uapi/drm.h`、`v3d_drm.h`、libdrmの関数の名前と引数(Mesaが呼ぶもの) | V3Dの要求とGEM・PRIME・同期オブジェクトの関数を`gp_`のSVCに置き換えるための、要求の項目と関数の形 |
 
 ## フォント(`etc/font/`)
 

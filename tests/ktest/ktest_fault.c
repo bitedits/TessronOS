@@ -47,6 +47,7 @@
 #define SP_KFAULT	11		/* as tests/uprog/svcprog.c */
 #define SP_PAUSEWIN	25
 #define SP_FAULT	26
+#define SP_FLTBACK	36
 #define FAULT_VA	"0x0000200000001230"
 
 #define KEY_PAUSE	0x48
@@ -344,7 +345,7 @@ LOCAL void test_pause_desk( void )
 LOCAL void test_pause_proc( void )
 {
 	T_PSTS	psts;
-	char	w[48];
+	char	w[160];
 	INT	wa, wb;
 	ID	a, b;
 
@@ -429,7 +430,7 @@ LOCAL void test_pause_sys( void )
 
 LOCAL void test_fault_abort( void )
 {
-	char	w[48];
+	char	w[160];
 	INT	wid, kw;
 	ID	pid;
 
@@ -565,6 +566,21 @@ LOCAL void test_fault_many( void )
 	KT_ASSERT_EQ(wm_self_check(), 0);
 }
 
+/* A fault the program takes itself (ts_def_flt): it goes on, and no dialog is shown */
+LOCAL void test_fault_back( void )
+{
+	T_PSTS	psts;
+	ID	pid;
+
+	pid = start(SP_FLTBACK, 0, 0, 0);
+	KT_ASSERT(pid > 0);
+	if ( pid <= 0 ) return;
+	psts.exitcd = -1;
+	KT_ASSERT_ER(ts_wai_prc(pid, &psts, 10000), E_OK);
+	KT_ASSERT_EQ(psts.exitcd, 0);
+	KT_ASSERT_EQ(window_titled(FT_TITLE, 5), 0);
+}
+
 EXPORT void ktest_fault( void )
 {
 	KT_RUN(test_setup);
@@ -574,6 +590,7 @@ EXPORT void ktest_fault( void )
 	KT_RUN(test_fault_abort);
 	KT_RUN(test_fault_ill);
 	KT_RUN(test_fault_iabt);
+	KT_RUN(test_fault_back);
 	KT_RUN(test_fault_kcall);
 	KT_RUN(test_fault_many);
 	if ( up ) {

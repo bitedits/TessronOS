@@ -143,7 +143,7 @@ LOCAL BOOL tip_ready( void )
 LOCAL void tip_show( DTWIN *d )
 {
 	dt_draw(( d->tb_host != NULL ) ? d->tb_host : d);
-	wm_composite();
+	wm_update();
 }
 
 /*
@@ -419,7 +419,7 @@ EXPORT BOOL tip_key( DTWIN *d, UINT key, UINT mods )
 	}
 
 	/* a letter: romaji, or the kana on the key */
-	tc = tip_roman ? ( ( ch > 0x20 && ch < 0x7F ) ? ch : 0 ) : kc_kana_key(key, shift);
+	tc = tip_roman ? ( ( ch > 0x20 && ch < 0x7F ) ? ch : 0 ) : kc_kana_key_m(key, mods);
 	if ( tc != 0 ) {
 		tip_conv = FALSE;
 		return (BOOL)( tip_send(d, tc, stat) || busy );
@@ -482,6 +482,15 @@ LOCAL INT tip_width( ID fid, INT a, INT b )
 
 	tip_piece(a, b, buf, sizeof(buf));
 	return fn_width(fid, buf);
+}
+
+/* The same down the line */
+LOCAL INT tip_vwidth( ID fid, INT a, INT b )
+{
+	UB	buf[TSMOZC_TEXT_MAX];
+
+	tip_piece(a, b, buf, sizeof(buf));
+	return fn_vwidth(fid, buf);
 }
 
 /* A number as its digits; answers how many */
@@ -577,6 +586,67 @@ LOCAL void tip_draw_list( INT gid, ID fid, INT x, INT top, INT bottom,
 }
 
 /*
+ * The composition down the line (縦書き): from the caret downwards in
+ * the vertical forms, on white, each clause lined on its left side, the
+ * one being converted turned over, the caret a bar across; the
+ * candidates under the end of it.
+ */
+LOCAL void tip_draw_v( DTWIN *d, INT gid, ID fid, CONST T_DPRECT *box,
+		       CONST T_DPRECT *page )
+{
+	T_KCOUT		*o = tip_out;
+	T_DPRECT	b;
+	INT		px, cx, y, c, end;
+
+	/* the size of the letters it goes in among, no wider than the line */
+	px = dd_caret_px(d);
+	if ( px > ( box->right - box->left ) ) px = box->right - box->left;
+	if ( px < 10 ) px = 10;
+	(void)fn_set_size(fid, px);
+	(void)fn_set_style(fid, FN_ST_VERT, 0);
+	end = o->cl[o->n_cl];
+	b.left = box->left;
+	b.right = box->right;
+	b.top = box->top;
+	b.bottom = box->top + tip_vwidth(fid, tip_base, end) + 2;
+	dp_fill_rect(gid, &b, TIP_GROUND);
+	cx = ( b.left + b.right ) / 2;
+
+	y = b.top + 1;
+	for ( c = o->n_out; c < o->n_cl; c++ ) {
+		INT		h = tip_vwidth(fid, o->cl[c], o->cl[c + 1]);
+		BOOL		target = (BOOL)( c == o->clause
+					&& ( tip_conv || tip_list || o->n_cl - o->n_out > 1 ) );
+		UB		buf[TSMOZC_TEXT_MAX];
+		T_DPRECT	u;
+
+		tip_piece(o->cl[c], o->cl[c + 1], buf, sizeof(buf));
+		if ( target ) {
+			u.left = b.left;  u.right = b.right;
+			u.top = y;  u.bottom = y + h;
+			dp_fill_rect(gid, &u, TIP_TARGET);
+		}
+		(void)fn_vdraw(gid, fid, cx, y, buf, target ? TIP_GROUND : TIP_INK);
+		/* each clause its own line at its left, a gap between them */
+		u.top = y + 1;  u.bottom = y + h - 1;
+		u.left = b.left;  u.right = b.left + ( target ? 2 : 1 );
+		dp_fill_rect(gid, &u, target ? TIP_TARGET : TIP_INK);
+		y += h;
+	}
+	if ( !tip_conv && !tip_list && o->caret >= tip_base ) {
+		INT		cy = b.top + 1 + tip_vwidth(fid, tip_base, o->caret);
+		T_DPRECT	k;
+
+		k.left = b.left;  k.right = b.right;
+		k.top = cy;  k.bottom = cy + 2;
+		dp_fill_rect(gid, &k, 0x00D00000U);
+	}
+	if ( tip_list ) {
+		tip_draw_list(gid, fid, b.left, b.top, b.bottom, page);
+	}
+}
+
+/*
  * The composition, drawn over the text at the caret: on white, each
  * clause underlined, the one being converted turned over, and the
  * caret. Called after the window's text and caret are drawn.
@@ -595,6 +665,10 @@ EXPORT void tip_draw( DTWIN *d, INT gid )
 	dt_work_rect(d, &page);
 	if ( tv_doc_caret_box(d->doc, &page, d->scroll_y, d->rec, d->cpara,
 			      d->cpos, &box) < E_OK ) {
+		return;
+	}
+	if ( d->doc->vert ) {
+		tip_draw_v(d, gid, fid, &box, &page);
 		return;
 	}
 	px = ( box.bottom - box.top ) * 3 / 4;

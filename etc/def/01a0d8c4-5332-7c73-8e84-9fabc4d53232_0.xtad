@@ -1,0 +1,110 @@
+<tad version="1.0" encoding="UTF-8" filename="マイクロカードのデータボックス">
+<document>
+<p>マイクロカードのデータボックス</p>
+<p>マイクロカードの表示設定、状態表示、並べ替え、重複検索、新しい実身への書き出し、削除と保存と形式変更の確認、印刷(差し込み)、印刷設定のパネルの定義。カードウィンドウと一覧ウィンドウはマイクロカードが自分で描く。</p>
+</document>
+<databox>
+<panel num="2" rect="0,0,452,250" title="表示設定">
+<text x="16" y="34">カード文字サイズ</text>
+<select num="11" rect="16,42,436,70" across="true" value="4"><name>5</name><name>7</name><name>8</name><name>10</name><name>12</name><name>14</name><name>17</name><name>19</name><name>24</name><name>29</name></select>
+<switch num="12" rect="16,76,140,98">比例ピッチ</switch>
+<switch num="13" rect="150,76,274,98">階調表示</switch>
+<text x="16" y="124">一覧文字サイズ</text>
+<select num="14" rect="16,132,436,160" across="true" value="4"><name>5</name><name>7</name><name>8</name><name>10</name><name>12</name><name>14</name><name>17</name><name>19</name><name>24</name><name>29</name></select>
+<switch num="15" rect="16,166,140,188">比例ピッチ</switch>
+<switch num="16" rect="150,166,274,188">階調表示</switch>
+<switch num="17" rect="290,166,436,188">カード項目名</switch>
+<button num="101" rect="244,214,332,240" answer="cancel">取消</button>
+<button num="102" rect="340,214,436,240" answer="ok" emph="true">設定</button>
+</panel>
+<panel num="3" rect="0,0,452,128" title="状態表示">
+<text num="1" x="20" y="40"> </text>
+<text num="2" x="20" y="66"> </text>
+<button num="101" rect="348,92,436,118" answer="ok" emph="true">確認</button>
+</panel>
+<panel num="4" rect="0,0,360,296" title="並べ替え">
+<text x="16" y="30">キー</text>
+<list num="11" rect="16,38,344,214"/>
+<text x="16" y="242">順序</text>
+<select num="12" rect="64,224,244,252" across="true" value="1"><name>昇順</name><name>降順</name></select>
+<button num="101" rect="152,262,240,288" answer="cancel">取消</button>
+<button num="102" rect="248,262,344,288" emph="true">並べ替え</button>
+</panel>
+<panel num="5" rect="0,0,380,112" title="並べ替え">
+<text num="1" x="20" y="40"> </text>
+<button num="101" rect="168,74,256,100" answer="cancel">取消</button>
+<button num="102" rect="264,74,364,100" answer="ok" emph="true">並べ替え</button>
+</panel>
+<panel num="6" rect="0,0,360,260" title="重複検索">
+<text x="16" y="30">重複を調べる項目</text>
+<list num="11" rect="16,38,344,216"/>
+<button num="101" rect="160,226,248,252" answer="cancel">取消</button>
+<button num="102" rect="256,226,344,252" emph="true">実行</button>
+</panel>
+<panel num="7" rect="0,0,540,170" title="新しい実身へ">
+<text x="16" y="32">データ形式</text>
+<select num="11" rect="16,40,524,68" across="true" value="1"><name>マイクロカード</name><name>＠形式</name><name>表計算</name><name>ＣＳＶ</name></select>
+<text x="16" y="100">実身名：</text>
+<box num="12" rect="90,80,524,108" max="60" jp="true"/>
+<button num="101" rect="340,132,428,158" answer="cancel">取消</button>
+<button num="102" rect="436,132,524,158" emph="true">実行</button>
+</panel>
+<panel num="8" rect="0,0,400,128" title="カードの削除">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<button num="101" rect="200,90,288,116" answer="cancel">取消</button>
+<button num="102" rect="296,90,384,116" answer="ok" emph="true">削除</button>
+</panel>
+<panel num="9" rect="0,0,340,112" title="マイクロカード">
+<text x="20" y="40">変更を保存してから閉じますか？</text>
+<button num="101" rect="16,72,92,98" answer="cancel">取消</button>
+<button num="103" rect="100,72,212,98">保存しない</button>
+<button num="102" rect="220,72,324,98" emph="true">保存</button>
+</panel>
+<panel num="10" rect="0,0,440,128" title="マイクロカード">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<text num="3" x="24" y="84"> </text>
+<button num="101" rect="336,92,424,118" answer="ok" emph="true">確認</button>
+</panel>
+<panel num="11" rect="0,0,420,128" title="形式の変更">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<button num="101" rect="216,90,304,116" answer="cancel">取消</button>
+<button num="102" rect="312,90,404,116" answer="ok" emph="true">変更</button>
+</panel>
+<panel num="12" rect="0,0,420,300" title="印刷カード設定">
+<text x="16" y="30">カードレイアウト</text>
+<list num="11" rect="16,38,404,176"/>
+<text x="16" y="206">対象</text>
+<select num="12" rect="64,188,304,216" across="true" value="2"><name>このカード</name><name>全カード</name></select>
+<text num="13" x="16" y="246"> </text>
+<button num="101" rect="220,264,308,290" answer="cancel">取消</button>
+<button num="102" rect="316,264,404,290" emph="true">確認</button>
+</panel>
+<panel num="13" rect="0,0,460,420" title="カード印刷設定">
+<text x="16" y="30">カードレイアウト</text>
+<list num="11" rect="16,38,444,128"/>
+<text x="16" y="160">カード枚数　横</text>
+<serial num="12" rect="132,140,188,170"><f w="2" lo="1" hi="20" value="1"/></serial>
+<text x="200" y="160">縦</text>
+<serial num="13" rect="224,140,280,170"><f w="2" lo="0" hi="50" value="1"/></serial>
+<text x="16" y="198">カード間隔(mm)　横</text>
+<serial num="14" rect="160,178,224,208"><f w="3" lo="0" hi="400" value="0"/></serial>
+<text x="236" y="198">縦</text>
+<serial num="15" rect="260,178,324,208"><f w="3" lo="0" hi="400" value="0"/></serial>
+<text x="16" y="236">印刷順序</text>
+<select num="16" rect="100,216,320,244" across="true" value="1"><name>横方向</name><name>縦方向</name></select>
+<text x="16" y="272">用紙</text>
+<select num="17" rect="100,252,444,280" across="true" value="1"><name>A4</name><name>A3</name><name>A5</name><name>B4</name><name>B5</name><name>レター</name></select>
+<text x="16" y="306">向き</text>
+<select num="18" rect="100,288,240,316" across="true" value="1"><name>縦</name><name>横</name></select>
+<text x="16" y="342">ヘッダ</text>
+<box num="19" rect="80,324,444,350" max="60" jp="true"/>
+<text x="16" y="376">フッタ</text>
+<box num="20" rect="80,358,444,384" max="60" jp="true"/>
+<button num="101" rect="260,388,348,414" answer="cancel">取消</button>
+<button num="102" rect="356,388,444,414" answer="ok" emph="true">設定</button>
+</panel>
+</databox>
+</tad>

@@ -173,12 +173,95 @@ EXPORT void dt_trash_open( void )
 		dt_tool_refresh(DT_TOOL_TRASH);
 		wm_raise(d->wid);
 		wm_focus(d->wid);
-		wm_composite();
+		wm_update();
 		return;
 	}
 	tool_rect(&o, 140, 100, 600, 500);
 	(void)dt_open_made(trash_record(NULL), "屑実身操作", DT_TOOL_TRASH, &o);
-	wm_composite();
+	wm_update();
+}
+
+/* ---------------------------------------------------------------- ウインドウ一覧 */
+
+/*
+ * The windows the desktop shows, nearest first, each as a link to the
+ * object it shows, named with the window's title: opening one brings
+ * that window to the front, as opening an object already open does.
+ * Its own window and the other tools' are left out. The list is made
+ * again whenever the windows on the screen or their order change
+ * (dt_winlist_poll, from the desktop's loop).
+ */
+#define WL_MAX		64
+
+LOCAL UW	wl_seen = 0;		/* the order of the windows when the list was made */
+
+LOCAL T_TAD *winlist_record( void )
+{
+	INT		wids[WL_MAX], n, i, k = 0;
+	TS_UUID		ids[WL_MAX];
+	UB		names[WL_MAX][WM_TITLE_MAX];
+	CONST char	*np[WL_MAX];
+
+	n = wm_list(wids, WL_MAX);
+	for ( i = 0; i < n && k < WL_MAX; i++ ) {
+		DTWIN	*d = dt_win_of(wids[i]);
+
+		if ( d == NULL || d->tool != DT_TOOL_NONE || d->sealed ) {
+			continue;
+		}
+		ids[k] = d->id;
+		if ( wm_title(wids[i], (char *)names[k], WM_TITLE_MAX) <= 0 ) {
+			names[k][0] = 0;
+		}
+		np[k] = (CONST char *)names[k];
+		k++;
+	}
+	return dt_list_record("ウインドウ一覧", ids, np, k);
+}
+
+/* What the order of the windows comes to, to see when it changes */
+LOCAL UW winlist_sign( void )
+{
+	INT	wids[WL_MAX], n, i;
+	UW	h = 2166136261U;
+
+	n = wm_list(wids, WL_MAX);
+	for ( i = 0; i < n; i++ ) {
+		h = ( h ^ (UW)wids[i] ) * 16777619U;
+	}
+	return h ^ (UW)n;
+}
+
+EXPORT void dt_winlist_open( void )
+{
+	DTWIN		*d = dt_tool_window(DT_TOOL_WINLIST);
+	T_DPRECT	o;
+
+	if ( d != NULL ) {
+		wm_raise(d->wid);
+		wm_focus(d->wid);
+		wm_update();
+		return;
+	}
+	tool_rect(&o, 700, 80, 300, 360);
+	(void)dt_open_made(winlist_record(), "ウインドウ一覧", DT_TOOL_WINLIST, &o);
+	wl_seen = winlist_sign();
+	wm_update();
+}
+
+EXPORT void dt_winlist_poll( void )
+{
+	UW	s;
+
+	if ( dt_tool_window(DT_TOOL_WINLIST) == NULL ) {
+		return;
+	}
+	s = winlist_sign();
+	if ( s != wl_seen ) {
+		wl_seen = s;
+		dt_tool_refresh(DT_TOOL_WINLIST);
+		wm_update();
+	}
 }
 
 /*
@@ -530,7 +613,7 @@ EXPORT void dt_search_open( DTWIN *from )
 		tool_rect(&o, 200, 120, 600, 500);
 		(void)dt_open_made(rec, (CONST char *)title, DT_TOOL_SEARCH, &o);
 	}
-	wm_composite();
+	wm_update();
 }
 
 /* ---------------------------------------------------------------- 仮身ネットワーク */
@@ -1043,7 +1126,7 @@ LOCAL void nw_show( CONST TS_UUID *start )
 		tool_rect(&o, 80, 60, 900, 600);
 		(void)dt_open_made(rec, (CONST char *)title, DT_TOOL_NETWORK, &o);
 	}
-	wm_composite();
+	wm_update();
 }
 
 EXPORT void dt_network_open( DTWIN *from, CONST T_VOBJ *v )
@@ -1082,6 +1165,9 @@ EXPORT void dt_tool_refresh( UINT tool )
 		break;
 	case DT_TOOL_NETWORK:
 		nw_show(&nw_start);
+		break;
+	case DT_TOOL_WINLIST:
+		dt_remade(d, winlist_record());
 		break;
 	default:
 		break;
@@ -1175,7 +1261,7 @@ EXPORT void dt_tool_menu_do( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj,
 	default:
 		break;
 	}
-	wm_composite();
+	wm_update();
 }
 
 /*
@@ -1189,7 +1275,7 @@ EXPORT BOOL dt_tool_key( DTWIN *d, UINT code, UINT mods )
 
 	if ( d->tool == DT_TOOL_TRASH && !ctrl && code == KEY_DEL ) {
 		trash_delete(d);
-		wm_composite();
+		wm_update();
 		return TRUE;
 	}
 	if ( ctrl && code == KEY_X ) {

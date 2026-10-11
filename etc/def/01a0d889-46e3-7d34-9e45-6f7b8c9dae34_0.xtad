@@ -1,0 +1,9 @@
+<tad version="1.0" encoding="UTF-8" filename="かな入力練習のかな入力方式">
+<document>
+<p>かな入力練習のかな入力方式</p>
+<p>練習するかな入力の配列。実身のかな入力配列と、JISかな、ローマ字から選ぶ。メニューの定義。</p>
+</document>
+<menu>
+<list code="kana.item"/>
+</menu>
+</tad>

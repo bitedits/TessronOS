@@ -17,6 +17,11 @@
  *
  *	The start-up argument the creator passed is mapped read only at
  *	ARG_PAGE; its first four bytes are the exit code to return.
+ *
+ *	Built with HELLO_CMD it is the command hello, linked from bin (design
+ *	16.5.19): its argument is then the words typed after its name, a
+ *	line of UTF-8, which it prints; the first word, when it is a number,
+ *	is the exit code, and 0 otherwise.
  */
 
 typedef unsigned char		UB;
@@ -32,6 +37,7 @@ extern INT  ts_get_mono( UD *p_ns );
 extern INT  tk_get_tid( void );
 extern INT  tk_dly_tsk( UW ms );
 extern INT  tm_putstring( const UB *s );
+extern long ts_get_arg( void *buf, long size );
 
 /* One message of the process queue (kernel include/ts/proc.h) */
 #define TS_MSG_MAX	256
@@ -100,6 +106,27 @@ int main( void )
 	put(scratch);
 	put("\n");
 
+#ifdef HELLO_CMD
+	{
+		static char	words[256];
+		long		n = ts_get_arg(words, (long)sizeof(words) - 1);
+		const char	*w = words;
+
+		code = 0;
+		if ( n > 0 ) {
+			words[( n < (long)sizeof(words) ) ? n : (long)sizeof(words) - 1] = '\0';
+			put("  arguments: ");
+			put(words);
+			put("\n");
+			while ( *w >= '0' && *w <= '9' ) code = code * 10 + (UW)( *w++ - '0' );
+			if ( w == words || ( *w != '\0' && *w != ' ' ) ) code = 0;
+		}
+		put("  exit code ");
+		put_dec((INT)code);
+		put("\n");
+		return (int)code;
+	}
+#endif
 	code = ARG_PAGE[0];		/* the exit code the creator asked for */
 
 	/*

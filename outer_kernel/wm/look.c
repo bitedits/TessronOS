@@ -32,7 +32,7 @@
 #include <ts/wm.h>
 #include <ts/conf.h>
 
-#define LOOK_MAX	192		/* entries the table holds */
+#define LOOK_MAX	224		/* entries the table holds */
 #define LOOK_STRIPE	0x80		/* a tone that is the warning's stripes */
 
 typedef struct {
@@ -133,21 +133,6 @@ LOCAL CONST LOOKDEF	look_default[] = {
 	{ LK_INACTPARTSCOL,	0x00808080U, 0, 0 },
 	{ LK_LIGHTPARTSCOL,	0x00FFFFFFU, 0, 0 },
 
-	{ LK_LOOK,		1, 0, 0 },
-	{ LK_OPACITY,		255, 0, 0 },
-	{ LK_WASH,		0x00202838U, 0, 0 },
-	{ LK_WASH_STR,		0, 0, 0 },
-	{ LK_ROUND,		0, 0, 0 },
-	{ LK_SHD_DX,		4, 0, 0 },
-	{ LK_SHD_DY,		4, 0, 0 },
-	{ LK_SHD_SIZE,		2, 0, 0 },
-	{ LK_SHD_DARK,		0, 0, 0 },
-	{ LK_BAR_WASH,		0x00405878U, 0, 0 },
-	{ LK_BAR_STR,		0, 0, 0 },
-	{ LK_MOTION,		0, 0, 0 },
-	{ LK_BLUR,		0, 0, 0 },
-	{ LK_FROM,		1, 0, 0 },
-	{ LK_LIVE,		1, 0, 0 },
 };
 
 /*
@@ -299,6 +284,15 @@ EXPORT INT knl_look_init( void )
 
 		if ( e != NULL ) {
 			e->fore = (UW)cf_user_items[i].dflt;
+			e->tone = 0;
+		}
+	}
+	/* and the windows' look as システム環境設定 has it when nothing is said */
+	for ( i = 0; i < cf_look_nitem; i++ ) {
+		LOOKENT	*e = ent_of(cf_look_items[i].look, TRUE);
+
+		if ( e != NULL ) {
+			e->fore = (UW)cf_look_items[i].dflt;
 			e->tone = 0;
 		}
 	}

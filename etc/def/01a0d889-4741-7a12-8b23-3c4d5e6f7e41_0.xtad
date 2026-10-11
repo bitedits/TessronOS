@@ -1,0 +1,10 @@
+<tad version="1.0" encoding="UTF-8" filename="キー配列の英字配列">
+<document>
+<p>キー配列の英字配列</p>
+<p>英字の配列。キーの刻印どおりか、Dvorak。メニューの定義。</p>
+</document>
+<menu>
+<item code="latin.keys">キーの刻印どおり</item>
+<item code="latin.dvorak">Dvorak</item>
+</menu>
+</tad>

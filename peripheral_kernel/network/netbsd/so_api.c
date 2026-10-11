@@ -65,11 +65,19 @@
 #define NB_IP_MULTICAST_LOOP	11
 #define NB_IP_ADD_MEMBERSHIP	12
 #define NB_IP_DROP_MEMBERSHIP	13
+#define NB_IP_RECVTTL		23
 
+#define NB_IPV6_UNICAST_HOPS	4
+#define NB_IPV6_MULTICAST_IF	9
+#define NB_IPV6_MULTICAST_HOPS	10
+#define NB_IPV6_MULTICAST_LOOP	11
 #define NB_IPV6_JOIN_GROUP	12
 #define NB_IPV6_LEAVE_GROUP	13
 #define NB_IPV6_CHECKSUM	26
 #define NB_IPV6_V6ONLY		27
+#define NB_IPV6_RECVHOPLIMIT	37
+#define NB_IPV6_RECVTCLASS	57
+#define NB_IPV6_TCLASS		61
 
 #define NB_MSG_OOB		0x0001
 #define NB_MSG_PEEK		0x0002
@@ -116,6 +124,12 @@ LOCAL UW		so_gw = 0;		/* the default route's gateway */
 LOCAL UW		ns_fixed[2];		/* name servers the settings name */
 LOCAL UW		ns_iface[2];		/* name servers the interface came with */
 LOCAL char		so_domain[80];
+/* IPv6 as the settings say (so_setip6) */
+LOCAL UINT		ip6_mode = CNF_NET_SLAAC ? SO_IP6_AUTO : SO_IP6_LINK;
+LOCAL UB		ip6_addr[16];		/* fixed: the address, its prefix length */
+LOCAL INT		ip6_plen = 0;
+LOCAL UB		ip6_gw[16];		/* fixed: the default router, all zero none */
+LOCAL UB		ns6_fixed[2][16];	/* IPv6 name servers the settings name */
 
 /* ---------------------------------------------------------------- errors */
 
@@ -754,6 +768,94 @@ EXPORT INT so_recvmsg( INT s, struct msghdr *msg, INT flags )
 	return (INT)n;
 }
 
+EXPORT INT knl_so_nb_recv_hlim( INT s, void *mem, SZ size, struct sockaddr *from,
+				socklen_t *fromlen, INT *p_hlim )
+{
+	NB_MSGHDR	m;
+	struct {
+		void	*base;
+		UD	len;
+	}		iov;
+	UB		nb[SA_MAX];
+	UD		ctl[8];			/* the ancillary data, aligned as it is laid out */
+	D		a[3], n;
+	INT		e;
+
+	*p_hlim = -1;
+	a[0] = so_fd(s);
+	if ( a[0] < 0 ) {
+		return E_ID;
+	}
+	iov.base = mem;
+	iov.len = (UD)size;
+	m.msg_name = nb;
+	m.msg_namelen = SA_MAX;
+	m.msg_iov = &iov;
+	m.msg_iovlen = 1;
+	m.msg_control = ctl;
+	m.msg_controllen = sizeof(ctl);
+	m.msg_flags = 0;
+	a[1] = A(&m); a[2] = NB_MSG_DONTWAIT;
+	e = nb_call(NB_SYS_recvmsg, a, 3, &n);
+	if ( e != 0 ) {
+		return (INT)knl_so_nb_er(e);
+	}
+	if ( m.msg_controllen > 0 ) {
+		*p_hlim = rump_tsnet_cmsg_hlim(ctl, m.msg_controllen);
+	}
+	sa_out(nb, m.msg_namelen, from, fromlen);
+	return (INT)n;
+}
+
+/*
+ * One datagram (or what has arrived of a stream) with the type of
+ * service or traffic class that came with it in the ancillary data
+ * (IP_RECVTOS, IPV6_RECVTCLASS)
+ */
+EXPORT INT so_recvtos( INT s, void *mem, SZ size, INT flags,
+		       struct sockaddr *from, socklen_t *fromlen, INT *p_tos )
+{
+	NB_MSGHDR	m;
+	struct {
+		void	*base;
+		UD	len;
+	}		iov;
+	UB		nb[SA_MAX];
+	UD		ctl[16];		/* the ancillary data, aligned as it is laid out */
+	D		a[3], n;
+	INT		e;
+
+	*p_tos = -1;
+	a[0] = so_fd(s);
+	if ( a[0] < 0 ) {
+		return E_ID;
+	}
+	if ( size < 0 ) {
+		return E_PAR;
+	}
+	iov.base = mem;
+	iov.len = (UD)size;
+	m.msg_name = ( from != NULL ) ? nb : NULL;
+	m.msg_namelen = ( from != NULL ) ? SA_MAX : 0;
+	m.msg_iov = &iov;
+	m.msg_iovlen = 1;
+	m.msg_control = ctl;
+	m.msg_controllen = sizeof(ctl);
+	m.msg_flags = 0;
+	a[1] = A(&m); a[2] = msg_in(flags);
+	e = nb_call(NB_SYS_recvmsg, a, 3, &n);
+	if ( e != 0 ) {
+		return (INT)knl_so_nb_er(e);
+	}
+	if ( m.msg_controllen > 0 ) {
+		*p_tos = rump_tsnet_cmsg_tos(ctl, m.msg_controllen);
+	}
+	if ( from != NULL ) {
+		sa_out(nb, m.msg_namelen, from, fromlen);
+	}
+	return (INT)n;
+}
+
 /* ---------------------------------------------------------------- waiting */
 
 typedef struct {
@@ -921,6 +1023,12 @@ LOCAL BOOL opt_in( INT level, INT optname, INT *p_level, INT *p_name )
 		case IP_MULTICAST_LOOP:		*p_name = NB_IP_MULTICAST_LOOP; return TRUE;
 		case IP_ADD_MEMBERSHIP:		*p_name = NB_IP_ADD_MEMBERSHIP; return TRUE;
 		case IP_DROP_MEMBERSHIP:	*p_name = NB_IP_DROP_MEMBERSHIP; return TRUE;
+		/*
+		 * NetBSD has no option for it: the TTL is asked for in its
+		 * stead, and the interface component puts the TOS beside it
+		 * (rumpcomp/tsnet_conf.c); the TTL itself is not handed over
+		 */
+		case IP_RECVTOS:		*p_name = NB_IP_RECVTTL; return TRUE;
 		default:			return FALSE;
 		}
 	case IPPROTO_IPV6:
@@ -930,6 +1038,13 @@ LOCAL BOOL opt_in( INT level, INT optname, INT *p_level, INT *p_name )
 		case IPV6_CHECKSUM:	*p_name = NB_IPV6_CHECKSUM; return TRUE;
 		case IPV6_JOIN_GROUP:	*p_name = NB_IPV6_JOIN_GROUP; return TRUE;
 		case IPV6_LEAVE_GROUP:	*p_name = NB_IPV6_LEAVE_GROUP; return TRUE;
+		case IPV6_UNICAST_HOPS:	*p_name = NB_IPV6_UNICAST_HOPS; return TRUE;
+		case IPV6_MULTICAST_IF:	*p_name = NB_IPV6_MULTICAST_IF; return TRUE;
+		case IPV6_MULTICAST_HOPS: *p_name = NB_IPV6_MULTICAST_HOPS; return TRUE;
+		case IPV6_MULTICAST_LOOP: *p_name = NB_IPV6_MULTICAST_LOOP; return TRUE;
+		case IPV6_RECVHOPLIMIT:	*p_name = NB_IPV6_RECVHOPLIMIT; return TRUE;
+		case IPV6_RECVTCLASS:	*p_name = NB_IPV6_RECVTCLASS; return TRUE;
+		case IPV6_TCLASS:	*p_name = NB_IPV6_TCLASS; return TRUE;
 		default:		return FALSE;
 		}
 	default:
@@ -1155,6 +1270,8 @@ EXPORT ER so_fcntl( INT s, INT cmd, INT val )
 
 /* ---------------------------------------------------------------- names */
 
+#define RA_MAX		16		/* addresses of a name taken from the server */
+
 /* A numeric IPv4 address a.b.c.d, in network byte order */
 LOCAL BOOL ip4_parse( CONST char *s, UW *p_addr )
 {
@@ -1180,34 +1297,502 @@ LOCAL BOOL ip4_parse( CONST char *s, UW *p_addr )
 	return TRUE;
 }
 
-/* The one answer of so_getaddrinfo, in one block of its own */
-LOCAL struct addrinfo *ai_make( UW addr, INT port, CONST struct addrinfo *hints, CONST char *name )
+LOCAL INT hex_val( char c )
+{
+	if ( c >= '0' && c <= '9' ) return c - '0';
+	if ( c >= 'a' && c <= 'f' ) return c - 'a' + 10;
+	if ( c >= 'A' && c <= 'F' ) return c - 'A' + 10;
+	return -1;
+}
+
+/*
+ * A numeric IPv6 address (RFC 4291 2.2: groups, "::", an IPv4 address
+ * at the end), and after '%' the zone of a link-local one: an
+ * interface's name or number, 0 for none.
+ */
+LOCAL BOOL ip6_parse( CONST char *s, UB *a, UINT *p_scope )
+{
+	UH	g[8];
+	char	tail[16];
+	INT	ng = 0, gap = -1, i = 0, k, n, d, at;
+	UW	v, v4;
+
+	*p_scope = 0;
+	if ( s[0] == ':' ) {
+		if ( s[1] != ':' ) return FALSE;
+		gap = 0;
+		i = 2;
+	}
+	while ( s[i] != '\0' && s[i] != '%' ) {
+		/* the last 32 bits written as an IPv4 address */
+		for ( k = i; s[k] != '\0' && s[k] != '%' && s[k] != ':' && s[k] != '.'; k++ ) ;
+		if ( s[k] == '.' ) {
+			for ( n = 0; s[i + n] != '\0' && s[i + n] != '%'; n++ ) {
+				if ( n >= (INT)sizeof(tail) - 1 ) return FALSE;
+				tail[n] = s[i + n];
+			}
+			tail[n] = '\0';
+			if ( ng > 6 || !ip4_parse(tail, &v4) ) return FALSE;
+			v4 = so_ntohl(v4);
+			g[ng++] = (UH)( v4 >> 16 );
+			g[ng++] = (UH)v4;
+			i += n;
+			break;
+		}
+		v = 0;
+		for ( n = 0; ( d = hex_val(s[i]) ) >= 0; n++, i++ ) {
+			if ( n == 4 ) return FALSE;
+			v = v * 16 + (UW)d;
+		}
+		if ( n == 0 || ng == 8 ) return FALSE;
+		g[ng++] = (UH)v;
+		if ( s[i] == ':' ) {
+			i++;
+			if ( s[i] == ':' ) {
+				if ( gap >= 0 ) return FALSE;
+				gap = ng;
+				i++;
+			} else if ( s[i] == '\0' || s[i] == '%' ) {
+				return FALSE;		/* a colon at the end */
+			}
+		} else if ( s[i] != '\0' && s[i] != '%' ) {
+			return FALSE;
+		}
+	}
+	if ( ( gap < 0 && ng != 8 ) || ( gap >= 0 && ng > 7 ) ) return FALSE;
+	if ( gap < 0 ) gap = ng;
+	knl_memset(a, 0, 16);
+	for ( k = 0; k < ng; k++ ) {
+		at = ( k < gap ) ? k : 8 - ( ng - k );
+		a[at * 2] = (UB)( g[k] >> 8 );
+		a[at * 2 + 1] = (UB)g[k];
+	}
+	if ( s[i] == '%' ) {
+		CONST char	*z = s + i + 1;
+
+		v = 0;
+		for ( k = 0; z[k] >= '0' && z[k] <= '9' && v < 0x10000; k++ ) v = v * 10 + (UW)( z[k] - '0' );
+		if ( k == 0 || z[k] != '\0' ) {
+			v = so_ifnametoindex(z);
+		}
+		if ( v == 0 ) return FALSE;
+		*p_scope = v;
+	}
+	return TRUE;
+}
+
+EXPORT void knl_so_ip6_text( char *buf, SZ len, CONST UB *a )
+{
+	CONST char	*hex = "0123456789abcdef";
+	char		t[48];
+	INT		i, j, n = 0, best = -1, blen = 1, run;
+	UINT		gv;
+	BOOL		any;
+
+	/* the longest run of two or more zero groups, the first of equals */
+	for ( i = 0; i < 8; i = j ) {
+		for ( j = i; j < 8 && a[j * 2] == 0 && a[j * 2 + 1] == 0; j++ ) ;
+		run = j - i;
+		if ( run > blen ) {
+			best = i;
+			blen = run;
+		}
+		if ( j == i ) j++;
+	}
+	for ( i = 0; i < 8; i++ ) {
+		if ( i == best ) {
+			t[n++] = ':';
+			if ( i == 0 ) t[n++] = ':';
+			i += blen - 1;
+			continue;
+		}
+		/* an IPv4 address mapped (::ffff:a.b.c.d) shows its last 32 bits as one */
+		if ( i == 6 && best == 0 && blen == 5 && a[10] == 0xff && a[11] == 0xff ) {
+			for ( j = 12; j < 16; j++ ) {
+				UINT	v = a[j];
+
+				if ( v >= 100 ) t[n++] = (char)( '0' + v / 100 );
+				if ( v >= 10 ) t[n++] = (char)( '0' + ( v / 10 ) % 10 );
+				t[n++] = (char)( '0' + v % 10 );
+				if ( j < 15 ) t[n++] = '.';
+			}
+			break;
+		}
+		gv = ( (UINT)a[i * 2] << 8 ) | a[i * 2 + 1];
+		any = FALSE;
+		for ( j = 12; j >= 0; j -= 4 ) {
+			UINT	x = ( gv >> j ) & 0xf;
+
+			if ( x != 0 || any || j == 0 ) {
+				t[n++] = hex[x];
+				any = TRUE;
+			}
+		}
+		if ( i < 7 ) t[n++] = ':';
+	}
+	t[n] = '\0';
+	for ( i = 0; i < (INT)len - 1 && t[i] != '\0'; i++ ) buf[i] = t[i];
+	if ( len > 0 ) buf[i] = '\0';
+}
+
+/* ---------------------------------------------------------------- the order of addresses */
+
+/*
+ * The addresses of a name are put in the order to try them, after the
+ * destination address selection of RFC 6724: those this machine has no
+ * source address for come last, then those whose source address is of
+ * the same scope and the same kind (by the policy table) come first,
+ * and of the rest those of the higher precedence. An IPv6 address with
+ * only a link-local or a site-local source address of its own is
+ * therefore tried after an IPv4 one.
+ */
+
+#define SCOPE_LINK	2
+#define SCOPE_SITE	5
+#define SCOPE_GLOBAL	14
+
+LOCAL BOOL in_prefix( CONST UB *a, CONST UB *p, INT bits )
+{
+	INT	i;
+
+	for ( i = 0; i < bits / 8; i++ ) {
+		if ( a[i] != p[i] ) return FALSE;
+	}
+	if ( bits % 8 != 0 ) {
+		UB	m = (UB)( 0xff << ( 8 - bits % 8 ) );
+
+		if ( ( a[i] & m ) != ( p[i] & m ) ) return FALSE;
+	}
+	return TRUE;
+}
+
+/* The precedence and label of an IPv6 address (RFC 6724 2.1) */
+LOCAL void policy6( CONST UB *a, INT *prec, INT *label )
+{
+	LOCAL CONST struct {
+		UB	p[16];
+		INT	bits, prec, label;
+	} tab[] = {
+		{ { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1 }, 128, 50, 0 },
+		{ { 0,0,0,0,0,0,0,0,0,0,0xff,0xff }, 96, 35, 4 },
+		{ { 0x20, 0x02 }, 16, 30, 2 },
+		{ { 0x20, 0x01, 0, 0 }, 32, 5, 5 },
+		{ { 0xfc }, 7, 3, 13 },
+		{ { 0 }, 96, 1, 3 },
+		{ { 0xfe, 0xc0 }, 10, 1, 11 },
+		{ { 0x3f, 0xfe }, 16, 1, 12 },
+	};
+	INT	i;
+
+	for ( i = 0; i < (INT)( sizeof(tab) / sizeof(tab[0]) ); i++ ) {
+		if ( in_prefix(a, tab[i].p, tab[i].bits) ) {
+			*prec = tab[i].prec;
+			*label = tab[i].label;
+			return;
+		}
+	}
+	*prec = 40;
+	*label = 1;
+}
+
+LOCAL INT scope6( CONST UB *a )
+{
+	if ( a[0] == 0xff ) return a[1] & 0x0f;			/* multicast */
+	if ( a[0] == 0xfe && ( a[1] & 0xc0 ) == 0x80 ) return SCOPE_LINK;
+	if ( a[0] == 0xfe && ( a[1] & 0xc0 ) == 0xc0 ) return SCOPE_SITE;
+	if ( in_prefix(a, (CONST UB *)"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\1", 128) ) return SCOPE_LINK;
+	return SCOPE_GLOBAL;
+}
+
+LOCAL INT scope4( CONST UB *a )
+{
+	if ( a[0] == 127 || ( a[0] == 169 && a[1] == 254 ) ) return SCOPE_LINK;
+	return SCOPE_GLOBAL;
+}
+
+/* What the machine has to send from */
+typedef struct {
+	BOOL	v4;			/* an IPv4 address */
+	BOOL	gw6;			/* an IPv6 default router */
+	INT	n6;
+	T_SOIF6	a6[8];			/* the IPv6 addresses that can be used */
+} SOURCES;
+
+LOCAL void sources_of( SOURCES *src )
+{
+	UW	a = 0, m = 0;
+	UB	gw[16];
+	T_SOIF6	l[8];
+	INT	i, n;
+
+	knl_memset(src, 0, sizeof(*src));
+	if ( !so_started || !knl_so_nb_card ) {
+		return;
+	}
+	(void)rump_tsnet_getaddr4(SO_IFNAME, &a, &m);
+	src->v4 = ( a != 0 );
+	src->gw6 = knl_so_gw6(gw);
+	n = rump_tsnet_addrs6(SO_IFNAME, l, 8);
+	for ( i = 0; i < n && i < 8; i++ ) {
+		if ( l[i].flags & ( SO_IF6_TENTATIVE | SO_IF6_DUPLICATED | SO_IF6_DETACHED | SO_IF6_ANYCAST ) ) {
+			continue;
+		}
+		src->a6[src->n6++] = l[i];
+	}
+}
+
+/* Whether the machine has an address of the family to reach the world with */
+LOCAL BOOL family_up( CONST SOURCES *src, INT family )
+{
+	INT	i;
+
+	if ( family == AF_INET ) {
+		return src->v4;
+	}
+	for ( i = 0; i < src->n6; i++ ) {
+		if ( scope6(src->a6[i].addr) == SCOPE_GLOBAL ) return TRUE;
+	}
+	return FALSE;
+}
+
+/* How a destination stands: whether it can be reached, and what decides its place */
+typedef struct {
+	BOOL	usable;
+	BOOL	same_scope;
+	BOOL	deprecated;
+	BOOL	same_label;
+	INT	prec;
+	INT	scope;
+} RANK;
+
+LOCAL void rank_of( CONST T_SOADDR *d, CONST SOURCES *src, RANK *r )
+{
+	INT	i, best = -1, bs = 0, s, dlabel, slabel, dummy;
+
+	knl_memset(r, 0, sizeof(*r));
+	if ( d->family == AF_INET ) {
+		r->scope = scope4(d->addr);
+		r->prec = 35;
+		r->usable = ( d->addr[0] == 127 ) || src->v4;
+		r->same_scope = TRUE;
+		r->same_label = TRUE;
+		return;
+	}
+	r->scope = scope6(d->addr);
+	policy6(d->addr, &r->prec, &dlabel);
+	if ( r->scope == SCOPE_LINK && d->addr[0] != 0xfe ) {
+		r->usable = TRUE;			/* ::1 */
+		r->same_scope = TRUE;
+		r->same_label = TRUE;
+		return;
+	}
+	/* the source: the smallest scope no smaller than the destination's, not deprecated if it can be */
+	for ( i = 0; i < src->n6; i++ ) {
+		s = scope6(src->a6[i].addr);
+		if ( s < r->scope ) continue;
+		if ( best < 0 || s < bs
+		  || ( s == bs && ( src->a6[best].flags & SO_IF6_DEPRECATED ) && !( src->a6[i].flags & SO_IF6_DEPRECATED ) ) ) {
+			best = i;
+			bs = s;
+		}
+	}
+	if ( best < 0 ) {
+		return;
+	}
+	policy6(src->a6[best].addr, &dummy, &slabel);
+	r->same_scope = ( bs == r->scope );
+	r->deprecated = ( ( src->a6[best].flags & SO_IF6_DEPRECATED ) != 0 );
+	r->same_label = ( slabel == dlabel );
+	r->usable = ( r->scope == SCOPE_LINK ) || src->gw6
+		 || in_prefix(d->addr, src->a6[best].addr, src->a6[best].plen);
+}
+
+/* Whether a goes before b */
+LOCAL BOOL rank_before( CONST RANK *a, CONST RANK *b )
+{
+	if ( a->usable != b->usable ) return a->usable;
+	if ( a->same_scope != b->same_scope ) return a->same_scope;
+	if ( a->deprecated != b->deprecated ) return !a->deprecated;
+	if ( a->same_label != b->same_label ) return a->same_label;
+	if ( a->prec != b->prec ) return ( a->prec > b->prec );
+	if ( a->scope != b->scope ) return ( a->scope < b->scope );
+	return FALSE;
+}
+
+/* The addresses put in order, those that tie keeping theirs */
+LOCAL void sort_addrs( T_SOADDR *l, INT n, CONST SOURCES *src )
+{
+	RANK		r[RA_MAX], rt;
+	T_SOADDR	t;
+	INT		i, j;
+
+	for ( i = 0; i < n; i++ ) {
+		rank_of(&l[i], src, &r[i]);
+	}
+	for ( i = 1; i < n; i++ ) {
+		t = l[i];
+		rt = r[i];
+		for ( j = i; j > 0 && rank_before(&rt, &r[j - 1]); j-- ) {
+			l[j] = l[j - 1];
+			r[j] = r[j - 1];
+		}
+		l[j] = t;
+		r[j] = rt;
+	}
+}
+
+/* ---------------------------------------------------------------- looking up */
+
+/* A name looked up, and with no dot in it looked for in the domain as well */
+LOCAL ER lookup( CONST char *name, INT family, T_SOADDR *l, INT *p_n )
+{
+	char	full[160];
+	INT	i, k = 0;
+	BOOL	dot = FALSE;
+	ER	er;
+
+	er = knl_so_dns_query(name, family, l, RA_MAX, p_n);
+	if ( er != E_NOEXS || so_domain[0] == '\0' ) {
+		return er;
+	}
+	for ( i = 0; name[i] != '\0'; i++ ) {
+		if ( name[i] == '.' ) dot = TRUE;
+	}
+	if ( dot || i + 1 + (INT)sizeof(so_domain) >= (INT)sizeof(full) ) {
+		return er;
+	}
+	for ( i = 0; name[i] != '\0'; i++ ) full[k++] = name[i];
+	full[k++] = '.';
+	for ( i = 0; so_domain[i] != '\0'; i++ ) full[k++] = so_domain[i];
+	full[k] = '\0';
+	return knl_so_dns_query(full, family, l, RA_MAX, p_n);
+}
+
+LOCAL BOOL loopback( CONST T_SOADDR *a )
+{
+	return ( a->family == AF_INET ) ? ( a->addr[0] == 127 )
+	     : in_prefix(a->addr, (CONST UB *)"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\1", 128);
+}
+
+/*
+ * The addresses of a name into l (RA_MAX of room), in the order to try
+ * them: a number as it is, else through the name servers. 'numeric'
+ * refuses a name that is not a number.
+ */
+LOCAL ER resolve_list( CONST char *name, INT family, INT flags, BOOL numeric,
+		       T_SOADDR *l, INT *p_n )
+{
+	SOURCES	src;
+	UW	a4;
+	INT	n = 0, i, k;
+	ER	er;
+
+	*p_n = 0;
+	if ( family != AF_UNSPEC && family != AF_INET && family != AF_INET6 ) {
+		return E_NOSPT;
+	}
+	knl_memset(l, 0, sizeof(T_SOADDR));
+	if ( ip4_parse(name, &a4) ) {
+		if ( family == AF_INET6 ) return E_NOEXS;
+		l[0].family = AF_INET;
+		knl_memcpy(l[0].addr, &a4, 4);
+		*p_n = 1;
+		return E_OK;
+	}
+	if ( ip6_parse(name, l[0].addr, &l[0].scope) ) {
+		if ( family == AF_INET ) return E_NOEXS;
+		l[0].family = AF_INET6;
+		*p_n = 1;
+		return E_OK;
+	}
+	if ( numeric ) {
+		return E_NOEXS;
+	}
+	sources_of(&src);
+	if ( ( flags & SO_RA_ADDRCONFIG ) && !family_up(&src, AF_INET) && !family_up(&src, AF_INET6) ) {
+		flags &= ~SO_RA_ADDRCONFIG;	/* no address yet: nothing to choose by */
+	}
+	if ( ( flags & SO_RA_ADDRCONFIG ) && family == AF_UNSPEC ) {
+		/* a family the machine cannot reach the world with is not asked for */
+		BOOL	up4 = family_up(&src, AF_INET), up6 = family_up(&src, AF_INET6);
+
+		family = ( up4 && !up6 ) ? AF_INET : ( up6 && !up4 ) ? AF_INET6 : AF_UNSPEC;
+	}
+	er = lookup(name, family, l, &n);
+	if ( er < E_OK ) {
+		return er;
+	}
+	if ( flags & SO_RA_ADDRCONFIG ) {
+		for ( i = k = 0; i < n; i++ ) {
+			if ( loopback(&l[i]) || family_up(&src, l[i].family) ) l[k++] = l[i];
+		}
+		n = k;
+		if ( n == 0 ) return E_NOEXS;
+	}
+	sort_addrs(l, n, &src);
+	*p_n = n;
+	return E_OK;
+}
+
+EXPORT INT so_resolveall( CONST char *name, INT family, INT flags, T_SOADDR *addrs, INT max )
+{
+	T_SOADDR	l[RA_MAX];
+	INT		n = 0, i;
+	ER		er;
+
+	if ( name == NULL || addrs == NULL || max <= 0 ) {
+		return E_PAR;
+	}
+	er = resolve_list(name, family, flags, FALSE, l, &n);
+	if ( er < E_OK ) {
+		return er;
+	}
+	for ( i = 0; i < n && i < max; i++ ) {
+		addrs[i] = l[i];
+	}
+	return i;
+}
+
+/* One answer of so_getaddrinfo, in one block of its own */
+LOCAL struct addrinfo *ai_make( CONST T_SOADDR *a, INT port, CONST struct addrinfo *hints, CONST char *name )
 {
 	struct addrinfo		*ai;
 	struct sockaddr_in	*sin;
+	struct sockaddr_in6	*sin6;
 	INT			n = 0;
 	SZ			size;
 
 	while ( name != NULL && name[n] != '\0' ) n++;
-	size = sizeof(struct addrinfo) + sizeof(struct sockaddr_storage) + n + 1;
+	size = sizeof(struct addrinfo) + sizeof(struct sockaddr_in6) + n + 1;
 	ai = (struct addrinfo *)Kcalloc(1, (size_t)size);
 	if ( ai == NULL ) {
 		return NULL;
 	}
-	sin = (struct sockaddr_in *)( ai + 1 );
-	sin->sin_len = sizeof(*sin);
-	sin->sin_family = AF_INET;
-	sin->sin_port = so_htons((UH)port);
-	sin->sin_addr.s_addr = addr;
-	ai->ai_family = AF_INET;
-	ai->ai_addr = (struct sockaddr *)sin;
-	ai->ai_addrlen = sizeof(*sin);
+	if ( a->family == AF_INET6 ) {
+		sin6 = (struct sockaddr_in6 *)( ai + 1 );
+		sin6->sin6_len = sizeof(*sin6);
+		sin6->sin6_family = AF_INET6;
+		sin6->sin6_port = so_htons((UH)port);
+		knl_memcpy(&sin6->sin6_addr, a->addr, 16);
+		sin6->sin6_scope_id = a->scope;
+		ai->ai_addr = (struct sockaddr *)sin6;
+		ai->ai_addrlen = sizeof(*sin6);
+	} else {
+		sin = (struct sockaddr_in *)( ai + 1 );
+		sin->sin_len = sizeof(*sin);
+		sin->sin_family = AF_INET;
+		sin->sin_port = so_htons((UH)port);
+		knl_memcpy(&sin->sin_addr.s_addr, a->addr, 4);
+		ai->ai_addr = (struct sockaddr *)sin;
+		ai->ai_addrlen = sizeof(*sin);
+	}
+	ai->ai_family = a->family;
 	if ( hints != NULL ) {
 		ai->ai_socktype = hints->ai_socktype;
 		ai->ai_protocol = hints->ai_protocol;
 	}
 	if ( name != NULL ) {
-		ai->ai_canonname = (char *)ai + sizeof(struct addrinfo) + sizeof(struct sockaddr_storage);
+		ai->ai_canonname = (char *)ai + sizeof(struct addrinfo) + sizeof(struct sockaddr_in6);
 		knl_memcpy(ai->ai_canonname, name, n);
 		ai->ai_canonname[n] = '\0';
 	}
@@ -1215,17 +1800,20 @@ LOCAL struct addrinfo *ai_make( UW addr, INT port, CONST struct addrinfo *hints,
 }
 
 /*
- * An address for a name. A name that is not already a number needs a DNS
- * server, which a machine on its own does not have; the numeric forms
- * work either way. The service is a port number. IPv4 only, the first
- * address found.
+ * The addresses for a name, IPv4 and IPv6, in the order to try them. A
+ * name that is not already a number needs a DNS server, which a machine
+ * on its own does not have; the numeric forms work either way. The
+ * service is a port number. With no name, the addresses of any
+ * interface (AI_PASSIVE) or of the loopback interface, the IPv4 one
+ * first.
  */
 EXPORT ER so_getaddrinfo( CONST char *node, CONST char *service,
 			  CONST struct addrinfo *hints, struct addrinfo **res )
 {
-	UW	addr = 0;
-	INT	port = 0, i, n = 0;
-	ER	er;
+	T_SOADDR	l[RA_MAX];
+	struct addrinfo	*ai, **tail = res;
+	INT		family = AF_UNSPEC, port = 0, i, n = 0;
+	ER		er;
 
 	if ( res == NULL ) {
 		return E_PAR;
@@ -1234,7 +1822,10 @@ EXPORT ER so_getaddrinfo( CONST char *node, CONST char *service,
 	if ( node == NULL && service == NULL ) {
 		return E_NOEXS;
 	}
-	if ( hints != NULL && hints->ai_family != AF_UNSPEC && hints->ai_family != AF_INET ) {
+	if ( hints != NULL ) {
+		family = hints->ai_family;
+	}
+	if ( family != AF_UNSPEC && family != AF_INET && family != AF_INET6 ) {
 		return E_NOSPT;
 	}
 	if ( service != NULL ) {
@@ -1250,30 +1841,25 @@ EXPORT ER so_getaddrinfo( CONST char *node, CONST char *service,
 	}
 
 	if ( node == NULL ) {
-		addr = ( hints != NULL && ( hints->ai_flags & AI_PASSIVE ) != 0 )
-			? INADDR_ANY : so_htonl(INADDR_LOOPBACK);
-	} else if ( !ip4_parse(node, &addr) ) {
-		if ( hints != NULL && ( hints->ai_flags & AI_NUMERICHOST ) != 0 ) {
-			return E_NOEXS;
-		}
-		er = knl_so_dns_query(node, AF_INET, &addr, 1, &n);
-		if ( er == E_NOEXS && so_domain[0] != '\0' ) {
-			/* a name with no dot in it is looked for in the domain as well */
-			char	full[160];
-			INT	k = 0;
-			BOOL	dot = FALSE;
+		BOOL	passive = ( hints != NULL && ( hints->ai_flags & AI_PASSIVE ) != 0 );
 
-			for ( i = 0; node[i] != '\0'; i++ ) {
-				if ( node[i] == '.' ) dot = TRUE;
-			}
-			if ( !dot && i + 1 + (INT)sizeof(so_domain) < (INT)sizeof(full) ) {
-				for ( i = 0; node[i] != '\0'; i++ ) full[k++] = node[i];
-				full[k++] = '.';
-				for ( i = 0; so_domain[i] != '\0'; i++ ) full[k++] = so_domain[i];
-				full[k] = '\0';
-				er = knl_so_dns_query(full, AF_INET, &addr, 1, &n);
-			}
+		knl_memset(l, 0, sizeof(T_SOADDR) * 2);
+		if ( family != AF_INET6 ) {
+			UW	a = passive ? INADDR_ANY : so_htonl(INADDR_LOOPBACK);
+
+			l[n].family = AF_INET;
+			knl_memcpy(l[n].addr, &a, 4);
+			n++;
 		}
+		if ( family != AF_INET ) {
+			l[n].family = AF_INET6;
+			if ( !passive ) l[n].addr[15] = 1;
+			n++;
+		}
+	} else {
+		er = resolve_list(node, family,
+				  ( hints != NULL && ( hints->ai_flags & AI_ADDRCONFIG ) ) ? SO_RA_ADDRCONFIG : 0,
+				  ( hints != NULL && ( hints->ai_flags & AI_NUMERICHOST ) != 0 ), l, &n);
 		if ( er < E_OK ) {
 			return er;
 		}
@@ -1281,8 +1867,17 @@ EXPORT ER so_getaddrinfo( CONST char *node, CONST char *service,
 			return E_NOEXS;
 		}
 	}
-	*res = ai_make(addr, port, hints, node);
-	return ( *res != NULL ) ? E_OK : E_NOMEM;
+	for ( i = 0; i < n; i++ ) {
+		ai = ai_make(&l[i], port, hints, ( i == 0 ) ? node : NULL);
+		if ( ai == NULL ) {
+			so_freeaddrinfo(*res);
+			*res = NULL;
+			return E_NOMEM;
+		}
+		*tail = ai;
+		tail = &ai->ai_next;
+	}
+	return E_OK;
 }
 
 EXPORT void so_freeaddrinfo( struct addrinfo *ai )
@@ -1297,30 +1892,26 @@ EXPORT void so_freeaddrinfo( struct addrinfo *ai )
 }
 
 /*
- * The IPv4 address of a name, in network byte order: the first answer
- * of so_getaddrinfo, for a caller that wants no more than that.
+ * The IPv4 address of a name, in network byte order: the first IPv4
+ * answer, for a caller that wants no more than that.
  */
 EXPORT ER so_resolve( CONST char *name, UW *p_addr )
 {
-	struct addrinfo	hints, *res = NULL;
-	ER		er;
+	T_SOADDR	a;
+	INT		n;
 
 	if ( name == NULL || p_addr == NULL ) {
 		return E_PAR;
 	}
-	knl_memset(&hints, 0, sizeof(hints));
-	hints.ai_family = AF_INET;
-	er = so_getaddrinfo(name, NULL, &hints, &res);
-	if ( er < E_OK ) {
-		return er;
+	n = so_resolveall(name, AF_INET, 0, &a, 1);
+	if ( n < 0 ) {
+		return n;
 	}
-	if ( res == NULL || res->ai_addr == NULL || res->ai_family != AF_INET ) {
-		er = E_NOEXS;
-	} else {
-		*p_addr = (UW)((struct sockaddr_in *)res->ai_addr)->sin_addr.s_addr;
+	if ( n == 0 || a.family != AF_INET ) {
+		return E_NOEXS;
 	}
-	so_freeaddrinfo(res);
-	return er;
+	knl_memcpy(p_addr, a.addr, 4);
+	return E_OK;
 }
 
 /* One byte of an address as up to three digits, and where that ended */
@@ -1342,30 +1933,57 @@ LOCAL socklen_t put_u8( char *buf, socklen_t at, socklen_t len, UINT v )
 }
 
 /*
- * The name of an address, in numbers. A name from the network would mean
- * asking a server the other way round, which is not carried, so
- * NI_NAMEREQD is refused rather than answered wrongly.
+ * The name of an address, in numbers: a.b.c.d, or an IPv6 address in
+ * its shortest form with the zone of a link-local one after '%'. A name
+ * from the network would mean asking a server the other way round,
+ * which is not carried, so NI_NAMEREQD is refused rather than answered
+ * wrongly.
  */
 EXPORT ER so_getnameinfo( CONST struct sockaddr *sa, socklen_t salen,
 			  char *host, socklen_t hostlen,
 			  char *serv, socklen_t servlen, INT flags )
 {
 	CONST struct sockaddr_in	*sin = (CONST struct sockaddr_in *)sa;
+	CONST struct sockaddr_in6	*sin6 = (CONST struct sockaddr_in6 *)sa;
 	UW				addr;
+	UH				port;
 	socklen_t			at;
 	INT				i;
 
 	if ( sa == NULL || salen < (socklen_t)sizeof(*sin) ) {
 		return E_PAR;
 	}
-	if ( sa->sa_family != AF_INET ) {
+	if ( sa->sa_family == AF_INET6 ) {
+		if ( salen < (socklen_t)sizeof(*sin6) ) {
+			return E_PAR;
+		}
+	} else if ( sa->sa_family != AF_INET ) {
 		return E_NOSPT;
 	}
 	if ( (flags & NI_NAMEREQD) != 0 ) {
 		return E_NOSPT;		/* no way to ask for a name */
 	}
 
-	if ( host != NULL && hostlen > 0 ) {
+	if ( host != NULL && hostlen > 0 && sa->sa_family == AF_INET6 ) {
+		char	t[48 + 1 + 16];
+
+		knl_so_ip6_text(t, 48, sin6->sin6_addr.s6_addr);
+		if ( sin6->sin6_scope_id != 0 && scope6(sin6->sin6_addr.s6_addr) == SCOPE_LINK
+		  && sin6->sin6_addr.s6_addr[0] == 0xfe ) {
+			char	z[16];
+			INT	k = (INT)knl_strlen(t);
+
+			t[k++] = '%';
+			if ( so_ifindextoname(sin6->sin6_scope_id, z) == E_OK ) {
+				for ( i = 0; z[i] != '\0' && k < (INT)sizeof(t) - 1; i++ ) t[k++] = z[i];
+				t[k] = '\0';
+			} else {
+				t[put_u8(t, (socklen_t)k, sizeof(t), sin6->sin6_scope_id & 0xffff)] = '\0';
+			}
+		}
+		for ( i = 0; i < (INT)hostlen - 1 && t[i] != '\0'; i++ ) host[i] = t[i];
+		host[i] = '\0';
+	} else if ( host != NULL && hostlen > 0 ) {
 		addr = so_ntohl(sin->sin_addr.s_addr);
 		at = 0;
 		for ( i = 3; i >= 0; i-- ) {
@@ -1377,7 +1995,8 @@ EXPORT ER so_getnameinfo( CONST struct sockaddr *sa, socklen_t salen,
 		host[at] = '\0';
 	}
 	if ( serv != NULL && servlen > 0 ) {
-		at = put_u8(serv, 0, servlen, so_ntohs(sin->sin_port));
+		port = ( sa->sa_family == AF_INET6 ) ? sin6->sin6_port : sin->sin_port;
+		at = put_u8(serv, 0, servlen, so_ntohs(port));
 		serv[at] = '\0';
 	}
 
@@ -1531,6 +2150,189 @@ EXPORT ER so_getdns( UW *p_dns )
 	return E_OK;
 }
 
+/* The IPv6 addresses of the card's interface, and the router of the default route */
+EXPORT INT so_getifaddr6( T_SOIF6 *list, INT max, UB *gw )
+{
+	INT	n;
+
+	if ( !so_started || !knl_so_nb_card ) {
+		return E_OBJ;
+	}
+	if ( max < 0 || ( max > 0 && list == NULL ) ) {
+		return E_PAR;
+	}
+	n = rump_tsnet_addrs6(SO_IFNAME, list, max);
+	if ( n < 0 ) {
+		return E_OBJ;
+	}
+	if ( gw != NULL && !knl_so_gw6(gw) ) {
+		knl_memset(gw, 0, 16);
+	}
+	return ( n > max ) ? max : n;
+}
+
+LOCAL BOOL zero16( CONST UB *a )
+{
+	INT	i;
+
+	for ( i = 0; i < 16 && a[i] == 0; i++ ) ;
+	return ( i == 16 );
+}
+
+LOCAL BOOL same16( CONST UB *a, CONST UB *b )
+{
+	INT	i;
+
+	for ( i = 0; i < 16 && a[i] == b[i]; i++ ) ;
+	return ( i == 16 );
+}
+
+/* The router the IPv6 default route goes through: the settings' when fixed, else the routers' own */
+EXPORT BOOL knl_so_gw6( UB *gw )
+{
+	switch ( ip6_mode & SO_IP6_MODE ) {
+	case SO_IP6_FIXED:
+		if ( zero16(ip6_gw) ) return FALSE;
+		knl_memcpy(gw, ip6_gw, 16);
+		return TRUE;
+	case SO_IP6_AUTO:
+		return knl_so_slaac_gw(gw);
+	default:
+		return FALSE;
+	}
+}
+
+/* The nth IPv6 name server to ask: those the settings name, then those the routers named */
+EXPORT ER so_getdns6( INT n, UB *addr )
+{
+	INT	i;
+
+	if ( addr == NULL || n < 0 ) {
+		return E_PAR;
+	}
+	if ( ( ip6_mode & SO_IP6_MODE ) == SO_IP6_OFF ) {
+		return E_NOEXS;
+	}
+	for ( i = 0; i < 2; i++ ) {
+		if ( zero16(ns6_fixed[i]) ) continue;
+		if ( n-- == 0 ) {
+			knl_memcpy(addr, ns6_fixed[i], 16);
+			return E_OK;
+		}
+	}
+	return knl_so_slaac_dns(n, addr) ? E_OK : E_NOEXS;
+}
+
+EXPORT ER so_setdns6( INT n, CONST UB *addr )
+{
+	if ( n < 0 || n > 1 ) {
+		return E_PAR;
+	}
+	if ( addr == NULL ) {
+		knl_memset(ns6_fixed[n], 0, 16);
+	} else {
+		knl_memcpy(ns6_fixed[n], addr, 16);
+	}
+	return E_OK;
+}
+
+EXPORT UINT so_getip6( void )
+{
+	return ip6_mode;
+}
+
+/* An address an interface may be given: not unspecified, loopback, link-local or multicast */
+LOCAL BOOL unicast6( CONST UB *a )
+{
+	static CONST UB	lo[16] = { 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1 };
+
+	return !( zero16(a) || same16(a, lo) || a[0] == 0xff || ( a[0] == 0xfe && ( a[1] & 0xc0 ) == 0x80 ) );
+}
+
+/*
+ * IPv6 of the card's interface made as the settings say. What the old
+ * settings put there that the new ones do not keep goes first: the
+ * routers stop being listened to and what was taken from them is given
+ * up, or the fixed address and its route come off. Then IPv6 is turned
+ * on or off on the interface, and the new settings are put there.
+ */
+EXPORT ER so_setip6( UINT mode, CONST UB *addr, INT plen, CONST UB *gw )
+{
+	UINT	how = mode & SO_IP6_MODE, was = ip6_mode & SO_IP6_MODE;
+	BOOL	temp = ( how == SO_IP6_AUTO && ( mode & SO_IP6_TEMP ) != 0 );
+	UB	g[16];
+	int	e;
+
+	if ( how > SO_IP6_FIXED ) {
+		return E_PAR;
+	}
+	if ( how == SO_IP6_FIXED && ( addr == NULL || plen < 1 || plen > 128 || !unicast6(addr) ) ) {
+		return E_PAR;
+	}
+	if ( !so_started || !knl_so_nb_card ) {
+		return E_OBJ;
+	}
+	knl_memset(g, 0, 16);
+	if ( how == SO_IP6_FIXED && gw != NULL ) {
+		knl_memcpy(g, gw, 16);
+	}
+	mode = how | ( temp ? SO_IP6_TEMP : 0 );
+	if ( mode == ip6_mode && ( how != SO_IP6_FIXED
+	  || ( same16(addr, ip6_addr) && plen == ip6_plen && same16(g, ip6_gw) ) ) ) {
+		return E_OK;			/* as it is */
+	}
+
+	/* what the old settings put there */
+	if ( was == SO_IP6_AUTO && how != SO_IP6_AUTO ) {
+		knl_so_slaac_stop(TRUE);
+	}
+	if ( was == SO_IP6_FIXED ) {
+		if ( !zero16(ip6_gw) ) (void)rump_tsnet_defroute6(SO_IFNAME, NULL);
+		if ( how != SO_IP6_FIXED || !same16(addr, ip6_addr) || plen != ip6_plen ) {
+			(void)rump_tsnet_deladdr6(SO_IFNAME, ip6_addr);
+		}
+	}
+	e = rump_tsnet_ip6on(SO_IFNAME, how != SO_IP6_OFF);
+	if ( e != 0 ) {
+		tm_printf((UB *)"net: IPv6 not turned %s (%d)\n", ( how != SO_IP6_OFF ) ? "on" : "off", e);
+	}
+	ip6_mode = mode;
+	knl_memset(ip6_gw, 0, 16);
+
+	/* the new */
+	switch ( how ) {
+	case SO_IP6_FIXED:
+		knl_memcpy(ip6_addr, addr, 16);
+		ip6_plen = plen;
+		e = rump_tsnet_setaddr6(SO_IFNAME, addr, plen, 0xffffffffU, 0xffffffffU, 0);
+		if ( e != 0 ) {
+			ip6_mode = SO_IP6_LINK;		/* nothing of it there: the same settings try again */
+			return knl_so_nb_er(e);
+		}
+		if ( !zero16(g) ) {
+			e = rump_tsnet_defroute6(SO_IFNAME, g);
+			if ( e != 0 ) {
+				return knl_so_nb_er(e);
+			}
+			knl_memcpy(ip6_gw, g, 16);
+		}
+		break;
+	case SO_IP6_AUTO:
+		knl_so_slaac_temp(temp);
+		rump_tsnet_prefer_temp(temp);
+		if ( was != SO_IP6_AUTO ) {
+			return knl_so_slaac_run();
+		}
+		break;
+	default:
+		break;
+	}
+	if ( how != SO_IP6_AUTO ) {
+		rump_tsnet_prefer_temp(0);
+	}
+	return E_OK;
+}
+
 /*
  * A fixed address for the interface, all in network byte order: asking
  * the network stops, and the address, mask and gateway are set. A name
@@ -1612,6 +2414,10 @@ EXPORT ER so_main( void )
 	}
 	(void)rump_tsnet_ifup(SO_IFNAME, 1);
 
+#if CNF_NET_SLAAC
+	/* IPv6: the routers on the link are listened to, and asked to speak */
+	(void)knl_so_slaac_run();
+#endif
 #if CNF_NET_DHCP
 	/* Asking costs a task of its own and gets no answer on a machine
 	   with nothing listening, so it is off unless asked for;
@@ -1650,6 +2456,7 @@ EXPORT ER so_finish( void )
 		return E_OK;
 	}
 	knl_so_dhcp_stop();
+	knl_so_slaac_stop(FALSE);
 	if ( knl_so_nb_card ) {
 		(void)rump_tsnet_ifup(SO_IFNAME, 0);
 	}

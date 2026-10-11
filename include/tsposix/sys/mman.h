@@ -16,8 +16,9 @@
  *	without pages; mprotect to readable or writable makes the pages
  *	(zero filled when they were not there), mprotect to PROT_NONE and
  *	madvise(MADV_DONTNEED) take them away, and what they held with
- *	them. PROT_EXEC is refused (EACCES): nothing a process makes can
- *	be run.
+ *	them. PROT_EXEC with PROT_READ makes the pages executable and
+ *	read-only; with PROT_WRITE as well they are written and run by
+ *	turns, each page one or the other at any time (TS_MEM_JIT).
  */
 
 #ifndef __TSPOSIX_SYS_MMAN_H__

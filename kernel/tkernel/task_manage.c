@@ -148,8 +148,20 @@ SYSCALL ID tk_cre_tsk( CONST T_CTSK *pk_ctsk )
 /*
  * Task deletion
  *	Call from critical section
+ *
+ *	A task's stack is given back only once its processor has left it.
+ *	One that has ended goes on running on its stack for a moment after
+ *	letting go of the kernel lock, until it has pushed its frame for the
+ *	dispatcher and moved to the dispatcher's own stack; until then the
+ *	processor holds its context (runprc). tk_del_tsk waits for that, and
+ *	a task that deletes itself (tk_exd_tsk) has its stack and control
+ *	block given back by the dispatcher from its own stack
+ *	(knl_reap_task). Memory handed out again while the task was still on
+ *	it would be written over by the frame it pushes (design 4.3).
  */
-LOCAL ER knl_del_tsk( TCB *tcb )
+
+/* All of the deletion but giving back the stack and the control block */
+LOCAL ER knl_del_tsk_keep( TCB *tcb )
 {
 	ER ercd = E_OK;
 
@@ -168,6 +180,15 @@ LOCAL ER knl_del_tsk( TCB *tcb )
 		knl_stack_broken(tcb);
 	}
 
+	knl_own_note(TK_OWN_TSK, tcb->owner, -1);
+	tcb->state = TS_NONEXIST;
+
+	return ercd;
+}
+
+/* The stack and the control block given back */
+LOCAL void knl_del_tsk_give( TCB *tcb )
+{
 #if USE_IMALLOC
 	if ( (tcb->tskatr & TA_USERBUF) == 0 ) {
 		/* User buffer is not used */
@@ -179,10 +200,39 @@ LOCAL ER knl_del_tsk( TCB *tcb )
 
 	/* Return control block to FreeQue */
 	QueInsert(&tcb->tskque, &knl_free_tcb);
-	knl_own_note(TK_OWN_TSK, tcb->owner, -1);
-	tcb->state = TS_NONEXIST;
+}
 
+LOCAL ER knl_del_tsk( TCB *tcb )
+{
+	ER ercd = knl_del_tsk_keep(tcb);
+
+	if ( ercd >= E_OK ) {
+		knl_del_tsk_give(tcb);
+	}
 	return ercd;
+}
+
+/* A task that deleted itself, on each processor, until the dispatcher gives it back */
+LOCAL TCB	*knl_dead_tsk[CNF_MAX_PRCID];
+
+/*
+ * Called by the dispatcher (dispatch.S) on its own stack with interrupts
+ * disabled, after the processor has let go of the context of the task
+ * that ended
+ */
+EXPORT void knl_reap_task( void )
+{
+	INT	i = knl_pcpu()->prcid - 1;
+	TCB	*tcb;
+	UINT	s;
+
+	if ( i < 0 || i >= CNF_MAX_PRCID || ( tcb = knl_dead_tsk[i] ) == NULL ) {
+		return;
+	}
+	knl_dead_tsk[i] = NULL;
+	s = knl_lock_kernel();
+	knl_del_tsk_give(tcb);
+	knl_unlock_kernel(s);
 }
 
 #ifdef USE_FUNC_TK_DEL_TSK
@@ -200,16 +250,26 @@ SYSCALL ER tk_del_tsk( ID tskid )
 
 	tcb = get_tcb(tskid);
 
-	BEGIN_CRITICAL_SECTION;
-	state = (TSTAT)tcb->state;
-	if ( state != TS_NONEXIST && knl_not_owner(tcb->owner) ) {
-		ercd = E_ID;
-	} else if ( state != TS_DORMANT ) {
-		ercd = ( state == TS_NONEXIST )? E_NOEXS: E_OBJ;
-	} else {
-		ercd = knl_del_tsk(tcb);
+	for ( ;; ) {
+		BOOL	busy = FALSE;
+
+		BEGIN_CRITICAL_SECTION;
+		state = (TSTAT)tcb->state;
+		if ( state != TS_NONEXIST && knl_not_owner(tcb->owner) ) {
+			ercd = E_ID;
+		} else if ( state != TS_DORMANT ) {
+			ercd = ( state == TS_NONEXIST )? E_NOEXS: E_OBJ;
+		} else if ( tcb->runprc != 0 ) {
+			busy = TRUE;	/* ended, its processor not yet off its stack */
+		} else {
+			ercd = knl_del_tsk(tcb);
+		}
+		END_CRITICAL_SECTION;
+		if ( !busy ) {
+			break;
+		}
+		Asm("yield");
 	}
-	END_CRITICAL_SECTION;
 
 	return ercd;
 }
@@ -237,6 +297,10 @@ SYSCALL ER tk_sta_tsk( ID tskid, INT stacd )
 		ercd = E_ID;
 	} else if ( state != TS_DORMANT ) {
 		ercd = ( state == TS_NONEXIST )? E_NOEXS: E_OBJ;
+#ifdef knl_task_startable
+	} else if ( !knl_task_startable(tcb) ) {
+		ercd = E_SYS;		/* its context could not be made as it must be */
+#endif
 	} else {
 		knl_setup_stacd(tcb, stacd);
 		knl_make_ready(tcb);
@@ -304,6 +368,7 @@ SYSCALL void tk_ext_tsk( void )
 	knl_ter_tsk(knl_ctxtsk);
 	knl_make_dormant(knl_ctxtsk);
 	knl_unlock_kernel_keep();
+	KT_SPIN(knl_kt_exit_spin)
 
 	knl_force_dispatch();
 	/* No return */
@@ -337,8 +402,11 @@ SYSCALL void tk_exd_tsk( void )
 	DISABLE_INTERRUPT;
 	knl_lock_kernel();
 	knl_ter_tsk(knl_ctxtsk);
-	knl_del_tsk(knl_ctxtsk);
+	if ( knl_del_tsk_keep(knl_ctxtsk) >= E_OK ) {
+		knl_dead_tsk[knl_pcpu()->prcid - 1] = knl_ctxtsk;	/* given back by the dispatcher */
+	}
 	knl_unlock_kernel_keep();
+	KT_SPIN(knl_kt_exit_spin)
 
 	knl_force_dispatch();
 	/* No return */
@@ -442,6 +510,41 @@ SYSCALL ER tk_chg_pri( ID tskid, PRI tskpri )
 	return ercd;
 }
 #endif /* USE_FUNC_TK_CHG_PRI */
+
+/*
+ * Change slice time (T-Kernel 2.0): how long the task runs before it
+ * gives way to another of its priority that waits, in ms (design
+ * 4.3.1). 0 makes it give way only to a higher priority, as all tasks
+ * of the real-time band do unless given a time; in the band above,
+ * where tasks of processes and of the desktop take turns, 0 is taken
+ * as CNF_SLICE_MS. Only those tasks are made to give way at all.
+ */
+#define SLICE_MS_MAX	1000
+
+SYSCALL ER tk_chg_slt( ID tskid, RELTIM slicetime )
+{
+	TCB	*tcb;
+	ER	ercd = E_OK;
+
+	CHECK_TSKID_SELF(tskid);
+	CHECK_PAR(slicetime <= SLICE_MS_MAX);
+
+	tcb = get_tcb_self(tskid);
+
+	BEGIN_CRITICAL_SECTION;
+	if ( tcb->state == TS_NONEXIST ) {
+		ercd = E_NOEXS;
+	} else if ( knl_not_owner(tcb->owner) ) {
+		ercd = E_ID;
+	} else {
+		tcb->slicetime = (UW)slicetime;
+		tcb->slice_set = TRUE;
+		knl_reschedule();	/* turns that are due now, or no longer */
+	}
+	END_CRITICAL_SECTION;
+
+	return ercd;
+}
 
 #ifdef USE_FUNC_TK_ROT_RDQ
 /*

@@ -25,7 +25,11 @@ SRCS += kernel/sysdepend/qemu_virt/hw_setting.c \
 	device/usb/hid.c \
 	device/usb/msc.c \
 	device/usb/uac.c \
+	device/usb/uvc.c \
+	device/usb/uusb.c \
+	device/usb/vhc.c \
 	device/snd/snd.c \
+	device/cam/cam.c \
 	device/disp/disp_bochs.c
 
 ifeq ($(KTEST),1)

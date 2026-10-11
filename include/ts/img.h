@@ -39,6 +39,14 @@ extern "C" {
 IMPORT INT ts_inflate( CONST UB *in, SZ in_len, UB *out, SZ out_len );
 IMPORT INT ts_zlib_inflate( CONST UB *in, SZ in_len, UB *out, SZ out_len );
 
+/*
+ * The other way: bytes packed into a zlib stream with codes of their
+ * own, in memory that is the caller's to Kfree. 'level' 1 is quick, 9
+ * packs hardest.
+ */
+IMPORT ER  ts_zlib_deflate( CONST UB *in, SZ in_len, UB **p_out, SZ *p_len,
+			    INT level );
+
 /* How large a PNG says it is, without reading the rest */
 IMPORT ER  img_png_size( CONST UB *data, SZ size, INT *p_w, INT *p_h );
 

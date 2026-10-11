@@ -41,6 +41,12 @@ IMPORT void knl_wmobj_open( INT wid );
 IMPORT void knl_wmobj_close( INT wid );
 IMPORT void knl_wmobj_moved( INT wid, BOOL resized );
 IMPORT void knl_wmobj_event( CONST T_WMEV *ev );
+/*
+ * A key from the keyboard as it came, before it is addressed to the
+ * window with the keys: told to every window that never has the keys
+ * (WM_ATTR_NOFOCUS) and is shown, to a request with OB_N_KEYSEEN
+ */
+IMPORT void knl_wmobj_key_seen( CONST T_WMEV *ev );
 IMPORT void knl_wmobj_panel( INT pid );
 IMPORT void knl_wmobj_panel_close( INT pid );
 IMPORT void knl_wmobj_part( INT pid, INT i, UINT event, CONST T_WMEV *ev );

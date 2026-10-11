@@ -91,6 +91,9 @@ IMPORT BOOL xfu_counts( CONST TS_UUID *u );
 typedef void (*XFU_LINKCB)( void *arg, CONST TS_UUID *target );
 IMPORT INT  xfu_links( CONST UB *s, SZ n, XFU_LINKCB cb, void *arg );
 
+/* The volumes and machines the links' ids name taken out, in place: the new length */
+IMPORT SZ   xfu_links_bare( UB *s, SZ n );
+
 /* One <link> of a figure, at a place, into w */
 IMPORT void xfu_link_xml( XBUF *w, CONST TS_UUID *target, INT l, INT t, INT r, INT b, INT z );
 

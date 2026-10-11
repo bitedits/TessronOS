@@ -55,4 +55,11 @@ IMPORT void	*knl_vmap_pa( UD pa, UD npages, UINT flags );
 IMPORT void	knl_vunmap_pa( void *va, UD npages );
 IMPORT void	knl_vunmap( void *va, UD npages );
 
+/*
+ * Told of each range of the area that goes, before its pages are taken
+ * out: whatever keeps the pages' physical addresses elsewhere (the GPU's
+ * MMU) forgets them. NULL when nothing does.
+ */
+IMPORT void	(*knl_vunmap_hook)( UBINT va, UD npages );
+
 #endif /* __TK_SMEM_H__ */

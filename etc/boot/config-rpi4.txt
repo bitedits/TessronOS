@@ -1,0 +1,27 @@
+# TessronOS (Raspberry Pi 4, Raspberry Pi 400, Compute Module 4) — docs/tessronos/03-platform.md 3.6
+# どの設定も [pi4] の節に置く。[pi4] は Raspberry Pi 4 Model B、400、Compute Module 4 の
+# すべてに当てはまり、Raspberry Pi 5 には当てはまらない。このカードを Raspberry Pi 5 に
+# 挿すと、ファームウェアはカーネルを見つけられずに止まる(像は ARMv8.0-A の BCM2711 用)
+[pi4]
+arm_64bit=1
+kernel=tessronos.img
+kernel_address=0x200000
+device_tree=bcm2711-rpi-4-b.dtb
+# コンソールは 40 ピンヘッダの 8 番(TXD)・10 番(RXD)の UART0(PL011)。
+# 既定では Bluetooth が使っているので取り返す
+dtoverlay=disable-bt
+enable_uart=1
+uart_2ndstage=1
+# 画面(設計書 16.5.1): ファームウェアの用意する画面を4バイトの画素にし、
+# 上の1バイトを不透明度として読ませない
+framebuffer_depth=32
+framebuffer_ignore_alpha=1
+
+# Raspberry Pi 400: デバイスツリーだけを差し替える
+[pi400]
+device_tree=bcm2711-rpi-400.dtb
+
+# Compute Module 4(eMMC 付きと Lite、IO ボード): デバイスツリーだけを差し替える
+[cm4]
+device_tree=bcm2711-rpi-cm4.dtb
+[all]

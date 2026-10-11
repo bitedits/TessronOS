@@ -18,6 +18,14 @@
  *	33; "gpio-rp1-2" 34 to 53). The pins of the RP1 go by their GPIO
  *	number, the always-on ones by their place in the bank.
  *
+ *	On the Raspberry Pi 4 the BCM2711's one block of 58 pins is shown as
+ *	three banks, as the chip groups them: "gpio-0" is the 40 pin header,
+ *	GPIO 0 to 27; "gpio-1" 28 to 45 and "gpio-2" 46 to 57 are the
+ *	board's own wiring (the Ethernet PHY, the Bluetooth UART, the
+ *	Wi-Fi, the audio PWM) and are shown as the kernel's, except the
+ *	activity LED, GPIO 42. All of them go by their GPIO number, and
+ *	their pulls can be set and read back.
+ *
  *	Record 1 is a line "pin direction value pull" for each pin, and
  *	written such lines set the pins (include/ts/ob.h, OB_GPIO_PINS). The
  *	system owns the banks and the administrators' group may write them
@@ -43,11 +51,22 @@
 #include <tk/tkernel.h>
 #include "obj.h"
 
-#ifdef RPI5
+#if defined(RPI5) || defined(RPI4)
 
 #include <ts/gpio.h>
+#include <ts/board.h>
 
+#ifdef RPI4
+#define BANKS		3
+#define LED_BANK	1		/* the bank of GPIO_LED_ACT */
+#define LED_ON_LEVEL	1		/* lit when high */
+#define CHIP_NAME	"BCM2711"
+#else
 #define BANKS		5
+#define LED_BANK	0
+#define LED_ON_LEVEL	0		/* lit when low */
+#define CHIP_NAME	"BCM2712"
+#endif
 #define GP_TEXT_MAX	2048
 #define POLL_MS		100
 #define POLL_PRI	30		/* below everything that does work */
@@ -69,6 +88,14 @@ typedef struct {
 	UD	last;			/* the inputs as last looked at, bit per pin */
 } GPBANK;
 
+#ifdef RPI4
+/* the SoC's pins by their GPIO number, all in its bank 0 */
+LOCAL GPBANK	gp_bank[BANKS] = {
+	{ "gpio-0", FALSE, 0, 0, 28, { { 0 } }, FALSE, 0 },
+	{ "gpio-1", FALSE, 0, 28, 18, { { 0 } }, FALSE, 0 },
+	{ "gpio-2", FALSE, 0, 46, 12, { { 0 } }, FALSE, 0 },
+};
+#else
 LOCAL GPBANK	gp_bank[BANKS] = {
 	{ "gpio-aon0",  FALSE, 0, 0, 17, { { 0 } }, FALSE, 0 },
 	{ "gpio-aon1",  FALSE, 1, 0, 6, { { 0 } }, FALSE, 0 },
@@ -76,6 +103,7 @@ LOCAL GPBANK	gp_bank[BANKS] = {
 	{ "gpio-rp1-1", TRUE,  0, 28, 6, { { 0 } }, FALSE, 0 },
 	{ "gpio-rp1-2", TRUE,  0, 34, 20, { { 0 } }, FALSE, 0 },
 };
+#endif
 LOCAL ID	gp_mtx = 0;
 LOCAL ID	gp_led_key = 0;		/* the LED's bank, kept open by the kernel */
 
@@ -88,16 +116,31 @@ typedef struct {
 	BOOL	kernel;			/* a driver of the kernel uses it */
 } GPPIN;
 
-/* Whether a driver of the kernel has the pin */
+/*
+ * Whether a driver of the kernel, or the board itself, has the pin. Of
+ * the always-on pins that is the card detect on the Raspberry Pi 5 and
+ * the two that select the Wi-Fi antenna on the Compute Module 5
+ * (include/ts/board.h).
+ */
 LOCAL BOOL kernel_pin( CONST GPBANK *b, UINT pin, INT func )
 {
+#ifdef RPI4
+	/*
+	 * The Raspberry Pi 4: the console UART on the header (14, 15), and
+	 * everything past the header but the activity LED
+	 */
+	(void)b;
+	(void)func;
+	if ( pin == 14 || pin == 15 ) return TRUE;
+	return (BOOL)( pin >= 28 && pin != GPIO_LED_ACT );
+#endif
 	if ( !b->rp1 ) {
-		return (BOOL)( b->bank == 0 && pin == GIO_AON_SD_CD );
+		return (BOOL)( b->bank == 0 && pin < 32 && ( knl_board.aon_own & ( 1UL << pin ) ) != 0 );
 	}
 	if ( pin == 32 ) return TRUE;				/* the Ethernet PHY's reset */
-#if CNF_RP1_UART0
-	if ( pin == 14 || pin == 15 ) return TRUE;		/* the header UART */
-#endif
+	if ( ( CNF_RP1_UART0 || knl_board.console_rp1 ) && ( pin == 14 || pin == 15 ) ) {
+		return TRUE;					/* the header UART */
+	}
 	if ( pin >= 18 && pin <= 21 && func == RP1_FUNC_I2S0 ) return TRUE;	/* sound */
 	return FALSE;
 }
@@ -112,10 +155,19 @@ LOCAL ER pin_get( CONST GPBANK *b, UINT pin, GPPIN *p )
 		v = gpio_read(b->bank, pin);
 		if ( p->dir < 0 || v < 0 ) return E_PAR;
 		p->value = v;
+#ifdef RPI4
+		p->pull = gpio_get_pull(b->bank, pin);	/* the BCM2711 reads it back */
+		if ( p->pull < 0 ) p->pull = -1;
+#else
 		p->pull = -1;			/* the always-on block does not say */
+#endif
 		p->kernel = kernel_pin(b, pin, 0);
 		return E_OK;
 	}
+#ifdef RPI4
+	(void)st;
+	return E_PAR;			/* the board has no RP1 */
+#else
 	if ( rp1_gpio_state(pin, st) < E_OK || ( v = rp1_gpio_read(pin) ) < 0 ) {
 		return E_PAR;
 	}
@@ -131,6 +183,7 @@ LOCAL ER pin_get( CONST GPBANK *b, UINT pin, GPPIN *p )
 	}
 	p->value = v;
 	return E_OK;
+#endif
 }
 
 LOCAL INT pins_text( CONST GPBANK *b, UB *t, INT max )
@@ -220,16 +273,25 @@ LOCAL ER pin_set( CONST GPBANK *b, CONST UB *s, INT len )
 		return E_BUSY;			/* a driver of the kernel has it */
 	}
 	if ( !b->rp1 ) {
+#ifndef RPI4
 		if ( pull >= 0 ) return E_NOSPT;
+#endif
 		/* the value first, so that a pin made an output starts at it */
 		if ( val >= 0 ) er = gpio_write(b->bank, pin, (UINT)val);
 		if ( er >= E_OK && dir >= 0 ) er = gpio_set_dir(b->bank, pin, (UINT)dir);
+#ifdef RPI4
+		if ( er >= E_OK && pull >= 0 ) er = gpio_set_pull(b->bank, pin, (UINT)pull);
+#endif
 		return er;
 	}
+#ifdef RPI4
+	return E_PAR;			/* the board has no RP1 */
+#else
 	if ( val >= 0 ) er = rp1_gpio_write(pin, (UINT)val);
 	if ( er >= E_OK && dir >= 0 ) er = rp1_gpio_set_dir(pin, (UINT)dir);
 	if ( er >= E_OK && pull >= 0 ) er = rp1_gpio_set_pull(pin, (UINT)pull);
 	return er;
+#endif
 }
 
 /* ---------------------------------------------------------------- the records */
@@ -241,9 +303,15 @@ LOCAL INT gp_text( void *ctx, UB *t, INT n, INT max )
 	n = knl_oj_put(t, n, max, "<p>Record 1: a line \"pin direction value pull\" for each pin of "
 			  "the bank; written such lines set the pins, - leaving a part as it is. "
 			  "A pin with \"kernel\" after it is a driver's and is not set.</p>");
+#ifdef RPI4
+	n = knl_oj_put(t, n, max, "<p>The BCM2711's GPIO ");
+	n = knl_oj_put_num(t, n, max, b->first);
+	if ( TRUE ) {
+#else
 	n = knl_oj_put(t, n, max, b->rp1 ? "<p>The RP1's GPIO " : "<p>The BCM2712's always-on bank ");
 	n = knl_oj_put_num(t, n, max, b->rp1 ? b->first : b->bank);
 	if ( b->rp1 ) {
+#endif
 		n = knl_oj_put(t, n, max, " to ");
 		n = knl_oj_put_num(t, n, max, b->first + b->pins - 1);
 	}
@@ -255,7 +323,7 @@ LOCAL INT gp_attr( void *ctx, UB *j, INT n, INT max )
 	CONST GPBANK	*b = (CONST GPBANK *)ctx;
 
 	n = knl_oj_put(j, n, max, ",\"virtual\":false,\"chip\":");
-	n = knl_oj_put(j, n, max, b->rp1 ? "\"RP1\"" : "\"BCM2712\"");
+	n = knl_oj_put(j, n, max, b->rp1 ? "\"RP1\"" : "\"" CHIP_NAME "\"");
 	n = knl_oj_put(j, n, max, ",\"first\":");
 	n = knl_oj_put_num(j, n, max, b->first);
 	n = knl_oj_put(j, n, max, ",\"pins\":");
@@ -393,9 +461,9 @@ LOCAL void poll_task( INT stacd, void *exinf )
 /* ---------------------------------------------------------------- the LED, and the start */
 
 /*
- * The activity LED (bank 0 of the always-on block, lit when low), set
- * through its bank's object with the key the kernel keeps. E_NOEXS
- * before there is one.
+ * The activity LED (bank 0 of the always-on block, lit when low; on the
+ * Raspberry Pi 4 GPIO 42, lit when high), set through its bank's object
+ * with the key the kernel keeps. E_NOEXS before there is one.
  */
 EXPORT ER knl_obgpio_led( UINT pin, BOOL on )
 {
@@ -406,7 +474,7 @@ EXPORT ER knl_obgpio_led( UINT pin, BOOL on )
 		return E_NOEXS;
 	}
 	n = knl_oj_put_num(line, 0, sizeof(line), pin);
-	n = knl_oj_put(line, n, sizeof(line), on ? " out 0 -\n" : " out 1 -\n");
+	n = knl_oj_put(line, n, sizeof(line), ( on ? LED_ON_LEVEL : !LED_ON_LEVEL ) ? " out 1 -\n" : " out 0 -\n");
 	return ob_wri_rec(gp_led_key, OB_GPIO_PINS, 0, line, n, NULL);
 }
 
@@ -436,16 +504,18 @@ EXPORT void knl_obgpio_start( void )
 	for ( k = 0; k < BANKS; k++ ) {
 		GPBANK	*b = &gp_bank[k];
 
+#ifndef RPI4
 		if ( b->rp1 && rp1_gpio_read(b->first) < 0 ) {
 			continue;		/* the RP1's window does not answer */
 		}
+#endif
 		if ( knl_obdev_add((CONST UB *)b->name, NULL, &gp_ops, b, &b->uuid) >= E_OK ) {
 			b->there = TRUE;
 			b->last = inputs(b);
 		}
 	}
-	if ( gp_bank[0].there ) {
-		gp_led_key = ob_opn_obj(&gp_bank[0].uuid, OB_OP_READ | OB_OP_WRITE);
+	if ( gp_bank[LED_BANK].there ) {
+		gp_led_key = ob_opn_obj(&gp_bank[LED_BANK].uuid, OB_OP_READ | OB_OP_WRITE);
 		if ( gp_led_key < E_OK ) gp_led_key = 0;
 	}
 	knl_memset(&ctsk, 0, sizeof(ctsk));
@@ -459,7 +529,7 @@ EXPORT void knl_obgpio_start( void )
 	}
 }
 
-#else /* RPI5 */
+#else /* RPI5 || RPI4 */
 
 EXPORT void knl_obgpio_start( void )
 {
@@ -479,4 +549,4 @@ EXPORT ER knl_obgpio_uuid( INT k, TS_UUID *p_uuid )
 	return E_NOEXS;
 }
 
-#endif /* RPI5 */
+#endif /* RPI5 || RPI4 */

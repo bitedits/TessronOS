@@ -34,6 +34,7 @@
 #include <tk/tkernel.h>
 #include <ts/usb.h>
 #include <ts/snd.h>
+#include <ts/cam.h>
 #include <ts/hid.h>
 #include "obj.h"
 
@@ -105,6 +106,7 @@ LOCAL CONST char *kind_of( CONST T_USBDEV *d )
 	case USB_ROLE_HID:	return ( d->protocol == 1 ) ? "KB" : ( d->protocol == 2 ) ? "MOUSE" : "HID";
 	case USB_ROLE_STORAGE:	return "DISK";
 	case USB_ROLE_AUDIO:	return "AUDIO";
+	case USB_ROLE_CAMERA:	return "CAMERA";
 	default:		break;
 	}
 	switch ( d->dev_class ) {
@@ -202,6 +204,9 @@ LOCAL INT usb_text( void *ctx, UB *t, INT n, INT max )
 	if ( ( u.d.role == USB_ROLE_AUDIO || u.d.dev_class == 0x01 )
 	  && knl_obdev_uuid((CONST UB *)SND_DEVNM, &f) >= E_OK ) {
 		n = knl_obdev_link(t, n, max, &f, (CONST UB *)SND_DEVNM);
+	}
+	if ( u.d.role == USB_ROLE_CAMERA && knl_obdev_uuid((CONST UB *)CAM_DEVNM, &f) >= E_OK ) {
+		n = knl_obdev_link(t, n, max, &f, (CONST UB *)CAM_DEVNM);
 	}
 	h = (T_HIDINFO *)Kmalloc(sizeof(T_HIDINFO) * 16);
 	if ( h != NULL ) {

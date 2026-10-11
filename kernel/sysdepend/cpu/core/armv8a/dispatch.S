@@ -124,6 +124,10 @@ knl_dispatch_to_schedtsk:
 	add	x9, x8, #TCB_runprc
 	stlrb	wzr, [x9]			/* context released */
 	str	xzr, [x19, #PCPU_ctxtsk]	/* ctxtsk = NULL */
+	ldr	x2, [x19, #PCPU_tmp_stack]
+	mov	sp, x2				/* off the stack of the task that ended */
+	bl	knl_acct_leave			/* charged before its control block may go */
+	bl	knl_reap_task			/* one that deleted itself is given back now (task_manage.c) */
 	b	l_dispatch0
 	.size	knl_dispatch_to_schedtsk, . - knl_dispatch_to_schedtsk
 
@@ -148,6 +152,11 @@ knl_dispatch_entry:
 #if USE_FPU
 	SAVE_FPU x8				/* before another processor may take it */
 #endif
+#if CNF_STK_WATCH
+	mov	x0, x8
+	bl	knl_stk_snap			/* its frames' return addresses noted (smp.c) */
+	ldr	x8, [x19, #PCPU_ctxtsk]
+#endif
 	add	x9, x8, #TCB_runprc
 	stlrb	wzr, [x9]			/* context saved: release the task */
 	str	xzr, [x19, #PCPU_ctxtsk]	/* ctxtsk = NULL */
@@ -155,6 +164,7 @@ knl_dispatch_entry:
 l_dispatch0:
 	ldr	x2, [x19, #PCPU_tmp_stack]
 	mov	sp, x2				/* temporary stack of this processor */
+	bl	knl_acct_leave			/* the task that ran is charged its time (smp.c) */
 	adrp	x21, knl_lowpow_discnt
 	add	x21, x21, :lo12:knl_lowpow_discnt
 

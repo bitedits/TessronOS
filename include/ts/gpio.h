@@ -12,7 +12,8 @@
  *	General purpose pins (design 4.10.1, 7)
  *
  *	The always-on block of the BCM2712 and the pins behind the RP1, where
- *	the 40 pin header goes. These are the drivers' own calls: a program,
+ *	the 40 pin header goes; on the Raspberry Pi 4 the one block of the
+ *	BCM2711. These are the drivers' own calls: a program,
  *	and the kernel once the object layer is up, set the pins through the
  *	objects of the banks (OB_S_GPIO, peripheral_kernel/obj/obgpio.c).
  */
@@ -36,6 +37,14 @@ IMPORT ER  gpio_write( UINT bank, UINT pin, UINT value );
 IMPORT INT gpio_read( UINT bank, UINT pin );		/* 0, 1 or an error */
 IMPORT INT gpio_get_dir( UINT bank, UINT pin );		/* GPIO_DIR_* or an error */
 IMPORT INT gpio_bank_pins( UINT bank );			/* 0: no such bank */
+
+/*
+ * The pulls, on the Raspberry Pi 4 (device/gpio/gpio_bcm2711.c), whose
+ * one bank 0 holds all 58 pins by their GPIO number. There gpio_get_dir
+ * answers 2 + the alternate function of a pin that has one.
+ */
+IMPORT ER  gpio_set_pull( UINT bank, UINT pin, UINT pull );
+IMPORT INT gpio_get_pull( UINT bank, UINT pin );	/* GPIO_PULL_* or an error */
 
 /* The activity LED of the board */
 IMPORT ER   gpio_led( BOOL on );

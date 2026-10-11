@@ -58,7 +58,7 @@ typedef struct {
 #define FD_BLOCKS	2880		/* tools/mkfat.py make floppy */
 
 LOCAL VOL	vol[NVOL] = {
-#ifdef RPI5
+#if KT_BOARD
 	{ "FAT12", "", 0, "/fat12", "/fat12", 12, 25, "TessronOS FAT12 test file.\n", TRUE, FALSE },
 	{ "FAT16", "", 0, "/fat16", "/fat16", 16, 58, "TessronOS FAT16 test file.\n", TRUE, FALSE },
 #else
@@ -352,7 +352,7 @@ LOCAL void test_mount( void )
 
 	for ( i = 0; i < NVOL; i++ ) {
 		v = &vol[i];
-#ifdef RPI5
+#if KT_BOARD
 		if ( v->usb_blocks != 0 || ( v->dev != NULL && v->dev[0] == '\0' ) ) {
 			tm_printf((UB *)"  %s: not on the Raspberry Pi 5\n", v->label);
 			continue;
@@ -1143,7 +1143,7 @@ LOCAL ER sf_read( void *exinf, UD start, UD nsect, void *buf )
  */
 LOCAL void test_superfloppy( void )
 {
-	T_PARTTBL	tbl;
+	static T_PARTTBL	tbl;	/* a table of every partition: not on the stack */
 	DiskInfo	di;
 	UB		sec[BLK_SECTOR_SIZE];
 	SZ		asz;

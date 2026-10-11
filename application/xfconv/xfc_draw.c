@@ -289,7 +289,13 @@ static void draw_vobj( XWIN *w, INT i )
 
 		xfc_size_text(e->size, b, sizeof(b));
 		if ( e->faint ) snprintf(sz, sizeof(sz), "媒体なし");
+		else if ( e->btron[0] != 0 ) snprintf(sz, sizeof(sz), "%s  BTRON「%s」", b, e->btron);
 		else if ( e->mount[0] != 0 ) snprintf(sz, sizeof(sz), "%s  %s%s", b, e->mount, e->ro ? " 読込みのみ" : "");
+		else if ( strcmp(e->fmt, "TSFS") == 0 ) snprintf(sz, sizeof(sz), "%s  TSFS（実身のディスク）", b);
+		else if ( strcmp(e->fmt, "blank") == 0 ) snprintf(sz, sizeof(sz), "%s  初期化されていません", b);
+		else if ( e->nofs && e->fmt[0] != 0 && strcmp(e->fmt, "partitioned") != 0 )
+			snprintf(sz, sizeof(sz), "%s  %s（扱えない形式）", b, e->fmt);
+		else if ( e->fmt[0] != 0 && strcmp(e->fmt, "partitioned") != 0 ) snprintf(sz, sizeof(sz), "%s  %s", b, e->fmt);
 		else snprintf(sz, sizeof(sz), "%s", b);
 	}
 	if ( sz[0] != 0 ) {

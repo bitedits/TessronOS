@@ -49,29 +49,9 @@
 #include <ts/tsfsbtree.h>
 #include <ts/tsfsjrnl.h>
 #include "tstdlib.h"
+#include "tsfsfmt.h"
 
-/* ---------------------------------------------------------------- layout */
-/*
- *	 0	the common head: kind "TFBT", its own block number, the
- *		volume, the tree as owner, the transaction, the CRC
- *	64	type (leaf or node)
- *	65	level (0 at the leaves)
- *	66	number of keys
- *	72	next leaf, 0 at the last one
- *	80	leftmost child (internal nodes)
- *	88	the tree (TSFSBT_OBJ, TSFSBT_GC, TSFSBT_ORPHAN)
- *	96	the keys and their values
- */
-#define OFF_TYPE	64
-#define OFF_LEVEL	65
-#define OFF_NKEYS	66
-#define OFF_NEXT	72
-#define OFF_CHILD0	80
-#define OFF_TREE	88
-
-#define ENT(buf, i)	((buf) + TSFSBT_HDR_SIZE + (i) * TSFSBT_ENT_SIZE)
-#define ENT_KEY(buf, i)	(ENT(buf, i))
-#define ENT_VAL(buf, i)	(ENT(buf, i) + 16)
+/* The layout of a node is in tsfsfmt.h. */
 
 /* ---------------------------------------------------------------- bytes */
 

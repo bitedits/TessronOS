@@ -32,6 +32,7 @@
 #include <ts/wm.h>
 #include <ts/part.h>
 #include <ts/hid.h>
+#include <ts/disp.h>
 #include <ts/tadview.h>
 #include "../../peripheral_kernel/obj/obj.h"
 #include "../../outer_kernel/wm/wmobj.h"
@@ -1109,6 +1110,96 @@ LOCAL CONST char ob_win_json[] = "{\"rect\":[40,50,360,290]}";
 LOCAL CONST char ob_win_draw[] =
 	"<tad version=\"1.0\" encoding=\"UTF-8\"><document><p>window</p></document></tad>";
 
+/* A pixel of the screen as it is shown */
+LOCAL UW screen_px( INT x, INT y )
+{
+	T_DISPSPEC	spec;
+	UB		*fb;
+
+	if ( ts_disp_ref(&spec) < E_OK || ( fb = (UB *)ts_disp_buffer() ) == NULL ) return 0xFFFFFFFF;
+	if ( x < 0 || y < 0 || x >= (INT)spec.width || y >= (INT)spec.height ) return 0xFFFFFFFF;
+	return ((UW *)( fb + (UBINT)y * spec.pitch ))[x] & 0x00FFFFFF;
+}
+
+/*
+ * The right bar's knob as the screen shows it, after the bars were
+ * written with nothing else drawn: a point in the knob, then the same
+ * point once the knob has gone to the other end, must look different.
+ * A window of its own, with a frame, a name and bars on the right and
+ * at the foot
+ */
+LOCAL CONST char ob_bar_json[] = "{\"rect\":[420,60,700,300],\"attr\":27}";
+
+LOCAL void bar_on_screen( void )
+{
+	T_OBCRE		c;
+	TS_UUID		u;
+	T_OBWBARS	bs;
+	T_OBWPOS	wp;
+	SZ		asz = 0;
+	INT		kw, wid, x, y, ky = -1;
+	UINT		which = 0;
+	UW		in_knob, after;
+
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_WINDOW;
+	c.sub = OB_S_WINDOW;
+	c.name = (CONST UB *)"ob bars";
+	c.json = (CONST UB *)ob_bar_json;
+	c.jsonsz = sizeof(ob_bar_json) - 1;
+	KT_ASSERT_ER(ob_cre_obj(&c, &u), E_OK);
+	kw = ob_opn_obj(&u, OB_OP_ALL);
+	KT_ASSERT(kw > 0);
+	if ( kw <= 0 ) {
+		(void)ob_del_obj(&u);
+		return;
+	}
+	wid = number_of(kw);
+	(void)wm_raise(wid);
+	(void)wm_focus(wid);		/* a window without the input draws its knob as its track */
+	knl_memset(&wp, 0, sizeof(wp));
+	(void)ob_rea_rec(kw, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
+	knl_memset(&bs, 0, sizeof(bs));
+	bs.bar[OB_BAR_R].hi = 3000;
+	bs.bar[OB_BAR_R].chi = 300;
+	KT_ASSERT_ER(ob_wri_rec(kw, OB_WR_BARS, 0, &bs, 2 * sizeof(T_OBWBAR), &asz), E_OK);
+	(void)wm_update();
+	x = ( wp.wright + wp.right ) / 2;
+	for ( y = wp.wtop; y < wp.wbottom && ky < 0; y++ ) {
+		if ( wm_bar_at(wid, x, y, &which) == WM_BARHIT_KNOB && which == WM_BAR_R ) {
+			ky = y + 4;
+		}
+	}
+	KT_ASSERT(ky >= 0);
+	if ( ky < 0 ) {
+		ob_cls_obj(kw);
+		(void)ob_del_obj(&u);
+		return;
+	}
+	/*
+	 * With the pointer laid once, an update builds only what changed, as
+	 * on the desktop (the tests keep it off, and then every update builds
+	 * the whole screen)
+	 */
+	wm_show_pointer(TRUE);
+	KT_ASSERT_ER(wm_composite(), E_OK);
+	in_knob = screen_px(x, ky);
+	bs.bar[OB_BAR_R].clo = 2700;
+	bs.bar[OB_BAR_R].chi = 3000;
+	KT_ASSERT_ER(ob_wri_rec(kw, OB_WR_BARS, 0, &bs, 2 * sizeof(T_OBWBAR), &asz), E_OK);
+	(void)wm_update();
+	KT_ASSERT_EQ(wm_bar_at(wid, x, ky, &which), WM_BARHIT_BEFORE);
+	after = screen_px(x, ky);
+	tm_printf((UB *)"  the bar on the screen at %d,%d: knob 0x%06x, then 0x%06x\n", x, ky,
+		  in_knob, after);
+	KT_ASSERT(in_knob != after);
+	wm_show_pointer(FALSE);
+	KT_ASSERT_ER(wm_composite(), E_OK);
+	ob_cls_obj(kw);
+	KT_ASSERT_ER(ob_del_obj(&u), E_OK);
+	wm_update();
+}
+
 LOCAL void test_window( void )
 {
 	T_OBCRE		c;
@@ -1236,7 +1327,7 @@ LOCAL void test_window( void )
 		if ( dr != NULL ) {
 			/* the record: the drop, the kernel's grants none (it needs none) */
 			KT_ASSERT_ER(ob_rea_rec(kw, OB_WR_DROP, 0, dr, sizeof(*dr), &asz), E_OK);
-			KT_ASSERT_EQ(asz, sizeof(*dr) - sizeof(T_OBDROPV) * ( OB_DROP_MAX - 2 ));
+			KT_ASSERT_EQ(asz, sizeof(*dr) - OB_DROP_TEXT - sizeof(T_OBDROPV) * ( OB_DROP_MAX - 2 ));
 			KT_ASSERT_EQ(dr->n, 2);
 			KT_ASSERT_EQ(dr->x, 7);
 			KT_ASSERT_EQ(ts_uuid_cmp(&dr->v[1].target, &ch), 0);
@@ -1286,6 +1377,7 @@ LOCAL void test_window( void )
 		KT_ASSERT_ER(wm_bar(wid, WM_BAR_R, &wb), E_OK);
 		KT_ASSERT_EQ(wb.clo, 600);
 		KT_ASSERT_EQ(wb.chi, 840);
+		bar_on_screen();
 		knl_memset(&bs, 0, sizeof(bs));
 		KT_ASSERT_ER(ob_rea_rec(kw, OB_WR_BARS, 0, &bs, sizeof(bs), &asz), E_OK);
 		KT_ASSERT_EQ(asz, sizeof(bs));
@@ -2768,7 +2860,7 @@ LOCAL void test_sound_object( void )
 	/* the USB audio device taken out and put back: the sound device's
 	   object is told its medium went and came, as a disk's is. Only
 	   the QEMU machine has a monitor to do that with */
-#ifndef RPI5
+#if !KT_BOARD
 	{
 		TS_UUID	ch;
 		T_OBNTF	req;
@@ -3086,7 +3178,11 @@ LOCAL void test_package( void )
 	 */
 	for ( k = 0; k + 6 < (INT)size[1]; k++ ) {
 		if ( data[1][k] == 'R' && data[1][k + 1] == '1' && data[1][k + 2] == '.'
-		  && data[1][k + 3] == '0' && data[1][k + 4] == '0' ) {
+		  && data[1][k + 3] >= '0' && data[1][k + 3] <= '9'
+		  && data[1][k + 4] >= '0' && data[1][k + 4] <= '9'
+		  && data[1][k + 5] >= '0' && data[1][k + 5] <= '9' ) {
+			data[1][k + 3] = '0';
+			data[1][k + 4] = '0';
 			data[1][k + 5] = '0';
 		}
 	}
@@ -3102,6 +3198,9 @@ LOCAL void test_package( void )
 	KT_ASSERT(pp != NULL && dt_ver_num(pp->version) == 1000);
 	KT_ASSERT_ER(dt_pkg_install(&pkg, FALSE, &got, &how), E_LIMIT);
 	(void)ob_del_obj(&pkg);
+
+	/* a record the next version does not bring, left by this one */
+	KT_ASSERT_ER(om_obj_record_put(&clk, 2, OB_RT_SYSDATA, 0, (CONST UB *)"stale", 5), E_OK);
 
 	/* R1.001, in the package and in the program's metadata */
 	for ( i = 0; man[i] != 0; i++ ) {
@@ -3122,6 +3221,12 @@ LOCAL void test_package( void )
 	KT_ASSERT_EQ((INT)how, DT_PKG_UPDATED);
 	pp = dt_prog_find((CONST UB *)"clock");
 	KT_ASSERT(pp != NULL && dt_ver_num(pp->version) == 1001);
+	/* the records the package brings (0 and 1), the left one deleted */
+	{
+		T_OBREC	recs[8];
+
+		KT_ASSERT_EQ(om_obj_records(&clk, recs, 8), 2);
+	}
 
 	/* deleted: the registry does not know it, and its object is gone */
 	KT_ASSERT_ER(dt_prog_remove(&clk), E_OK);

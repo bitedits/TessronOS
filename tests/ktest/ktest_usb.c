@@ -35,6 +35,7 @@
 #include <ts/hid.h>
 #include <ts/blk.h>
 #include <ts/fs.h>
+#include <ts/proc.h>
 
 #define MAXDEV		32
 
@@ -63,7 +64,7 @@ LOCAL T_USBDEV *find_dev( UINT role, UINT speed )
 	return NULL;
 }
 
-#ifndef RPI5
+#if !KT_BOARD
 LOCAL T_USBDEV *find_by_handle( INT h )
 {
 	INT	i;
@@ -76,7 +77,7 @@ LOCAL T_USBDEV *find_by_handle( INT h )
 
 	return NULL;
 }
-#endif /* RPI5 */
+#endif /* KT_BOARD */
 
 /* ---------------------------------------------------------------- controllers */
 
@@ -98,7 +99,7 @@ LOCAL void test_hc( void )
 		KT_ASSERT(hc.ctx_size == 32 || hc.ctx_size == 64);
 		/* a message interrupt each, edge triggered (design 10.13); the
 		   RP1's controllers are polled */
-#ifndef RPI5
+#if !KT_BOARD
 		KT_ASSERT(hc.intno != 0);
 #endif
 		tm_printf((UB*)"  xhci%d %d.%d, %d ports, %d slots, interrupt %d\n", i,
@@ -109,7 +110,7 @@ LOCAL void test_hc( void )
 	KT_ASSERT_ER(ts_usb_ref_hc(0, NULL), E_PAR);
 }
 
-#ifndef RPI5
+#if !KT_BOARD
 /* every root port answers; the USB 3 ones say so */
 LOCAL void test_ports( void )
 {
@@ -138,11 +139,11 @@ LOCAL void test_ports( void )
 	KT_ASSERT_ER(ts_usb_ref_port(0, hc.nports, &p), E_PAR);
 	KT_ASSERT_ER(ts_usb_ref_port(9, 0, &p), E_NOEXS);
 }
-#endif /* RPI5 */
+#endif /* KT_BOARD */
 
 /* ---------------------------------------------------------------- the tree */
 
-#ifndef RPI5
+#if !KT_BOARD
 LOCAL CONST char *role_name( UINT r )
 {
 	switch ( r ) {
@@ -150,6 +151,7 @@ LOCAL CONST char *role_name( UINT r )
 	case USB_ROLE_HID:	return "hid";
 	case USB_ROLE_STORAGE:	return "storage";
 	case USB_ROLE_AUDIO:	return "audio";
+	case USB_ROLE_CAMERA:	return "camera";
 	default:		return "-";
 	}
 }
@@ -218,7 +220,7 @@ LOCAL void test_tree( void )
 	KT_ASSERT_EQ(ts_usb_lst_dev(devs, 2), ndev);
 	load_tree();
 }
-#endif /* RPI5 */
+#endif /* KT_BOARD */
 
 /* A device answers a request over its control endpoint */
 LOCAL void test_control( void )
@@ -266,7 +268,7 @@ LOCAL void test_control( void )
 
 /* ---------------------------------------------------------------- HID */
 
-#ifndef RPI5
+#if !KT_BOARD
 LOCAL void drain_hid( void )
 {
 	T_HIDEV	ev;
@@ -337,7 +339,7 @@ LOCAL void test_hid( void )
 	KT_ASSERT(hs2.reports > hs.reports);
 	drain_hid();
 }
-#endif /* RPI5 */
+#endif /* KT_BOARD */
 
 /*
  * Report descriptors of the kinds of pointer there are, read as the
@@ -557,7 +559,7 @@ LOCAL void test_hid_desc( void )
 
 /* ---------------------------------------------------------------- disks */
 
-#ifndef RPI5
+#if !KT_BOARD
 LOCAL CONST char *disk_of( UINT speed )
 {
 	T_USBDEV	*d;
@@ -769,11 +771,11 @@ LOCAL void test_msc_hs_fs( void )
 		tk_cls_dev(dd, 0);
 	}
 }
-#endif /* RPI5 */
+#endif /* KT_BOARD */
 
 /* ---------------------------------------------------------------- hot-plug */
 
-#ifndef RPI5
+#if !KT_BOARD
 /* Wait for the device list to change from gen, up to ms */
 LOCAL BOOL wait_gen( UW gen, INT ms )
 {
@@ -809,6 +811,62 @@ LOCAL INT count_role( UINT role )
  * change endpoint reports it) and on a root port (the controller's port
  * change event does): the stack lets go of it and brings it up again.
  */
+#define SVCPROG		"/boot/SVCPROG.ELF"
+#define SP_USBDEV	37		/* as tests/uprog/svcprog.c */
+
+/*
+ * A device of a program's own (SVC class 12): an FTDI serial converter
+ * (QEMU's usb-serial, which no class driver takes) is plugged into the
+ * hub's fourth port, its line reading /dev/zero of the host (a line
+ * with no end: QEMU takes the device out when its line ends); a process
+ * lists it, opens it, makes requests on its control endpoint, writes
+ * and reads its bulk endpoints (svcprog's SP_USBDEV). Then it is taken
+ * out.
+ */
+LOCAL void test_usb_prog( void )
+{
+	T_USBSTAT	st;
+	T_CPRC		cprc;
+	T_PSTS		psts;
+	UW		arg[8], gen;
+	ID		pid;
+
+	if ( ts_usb_hc_count() <= 0 ) KT_SKIP("no controller");
+	KT_ASSERT_ER(ts_usb_stat(&st), E_OK);
+	gen = st.gen;
+	tm_printf((UB*)"KTEST QMP {\"execute\":\"chardev-add\",\"arguments\":{\"id\":\"usr1\","
+		  "\"backend\":{\"type\":\"file\",\"data\":{\"in\":\"/dev/zero\",\"out\":\"/dev/null\"}}}}\n");
+	tk_dly_tsk(300);
+	tm_printf((UB*)"KTEST QMP {\"execute\":\"device_add\",\"arguments\":"
+		  "{\"driver\":\"usb-serial\",\"bus\":\"xhci.0\",\"port\":\"4.4\",\"chardev\":\"usr1\",\"id\":\"usr\"}}\n");
+	if ( !wait_gen(gen, 5000) ) {
+		KT_SKIP("no QEMU monitor to plug a device in with");
+	}
+	tk_dly_tsk(500);
+
+	knl_memset(arg, 0, sizeof(arg));
+	arg[0] = SP_USBDEV;
+	cprc.pri    = KT_PRI_HIGH;
+	cprc.prcatr = 0;
+	cprc.stksz  = 0;
+	cprc.arg    = arg;
+	cprc.argsz  = sizeof(arg);
+	pid = ts_cre_prc(SVCPROG, &cprc);
+	KT_ASSERT(pid > 0);
+	if ( pid > 0 ) {
+		psts.exitcd = -1;
+		KT_ASSERT_ER(ts_wai_prc(pid, &psts, 30000), E_OK);
+		KT_ASSERT_EQ(psts.exitcd, 0);
+	}
+
+	KT_ASSERT_ER(ts_usb_stat(&st), E_OK);
+	gen = st.gen;
+	tm_printf((UB*)"KTEST QMP {\"execute\":\"device_del\",\"arguments\":{\"id\":\"usr\"}}\n");
+	KT_ASSERT(wait_gen(gen, 5000));
+	tk_dly_tsk(300);
+	tm_printf((UB*)"KTEST QMP {\"execute\":\"chardev-remove\",\"arguments\":{\"id\":\"usr1\"}}\n");
+}
+
 LOCAL void test_hotplug( void )
 {
 	T_USBSTAT	st;
@@ -972,7 +1030,7 @@ LOCAL void test_msc_whole( void )
 		KT_ASSERT_ER(fs_detach("/usbwhole"), EX_OK);
 	}
 }
-#endif /* RPI5 */
+#endif /* KT_BOARD */
 
 EXPORT void ktest_usb( void )
 {
@@ -988,4 +1046,5 @@ EXPORT void ktest_usb( void )
 	KT_RUN_EXCEPT_RPI5(test_msc_whole, "a USB disk there is the user's");
 	KT_RUN_EXCEPT_RPI5(test_hotplug, "devices are taken out through the QEMU monitor");
 	KT_RUN_EXCEPT_RPI5(test_hotplug_disk, "devices are taken out through the QEMU monitor");
+	KT_RUN_EXCEPT_RPI5(test_usb_prog, "a device is plugged in through the QEMU monitor");
 }

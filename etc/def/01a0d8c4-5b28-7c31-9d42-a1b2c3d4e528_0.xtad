@@ -1,0 +1,12 @@
+<tad version="1.0" encoding="UTF-8" filename="メディア">
+<document>
+<p>メディア</p>
+<p>ブラウザのメディア。頁のメディアセッションに伝える操作。メニューの定義。</p>
+</document>
+<menu>
+<item code="mplay">再生/一時停止</item>
+<item code="mprev">前の曲</item>
+<item code="mnext">次の曲</item>
+<item code="mstop">停止</item>
+</menu>
+</tad>

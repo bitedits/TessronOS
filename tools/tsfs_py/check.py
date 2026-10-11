@@ -40,7 +40,7 @@ from .layout import (BLOCK_SIZE, JRNL_AREA_BLOCKS, KNOWN_INCOMPAT,
 from . import meta as metamod
 from .obj import ICON_MAX, OB_ICON, is_icon
 from .obj import (DATA_INLINE_MAX, F_DELETABLE, F_EDITABLE, F_GARBAGE,
-                  F_ORPHAN, F_READABLE, F_RELINK, FORM_INLINE, FORM_NONE,
+                  F_ORPHAN, F_READABLE, F_RELINK, F_TRASH, FORM_INLINE, FORM_NONE,
                   FORM_RUN, FORM_TREE, INL_MASK, INL_UNITS, INLINE_UNIT,
                   LK_EXTERNAL, LK_SIZE, LinkEntry, MAX_EXTENTS, MAX_LINK,
                   MAX_REC, MAX_RES, MB_PAY, OB_INLINE, OB_LINK, OB_META,
@@ -49,7 +49,7 @@ from .obj import (DATA_INLINE_MAX, F_DELETABLE, F_EDITABLE, F_GARBAGE,
                   RID_PLACE, RS_SIZE, ResEntry, blks_for, unpack_table)
 
 KNOWN_FLAGS = (F_EDITABLE | F_DELETABLE | F_READABLE | F_GARBAGE | F_ORPHAN
-               | F_RELINK)
+               | F_RELINK | F_TRASH)
 
 
 class Report(object):

@@ -95,6 +95,18 @@ IMPORT void mn_winlist_fill( ID mid );
 IMPORT BOOL mn_winlist_do( CONST T_MNSEL *sel );
 
 /*
+ * The rest of the tail every window's menu ends with (SYSDEF_MENU_TAIL):
+ * 小物 and 実行, which only the desktop knows how to fill and to act on.
+ * The desktop sets the two while it runs; the menu of a process is
+ * filled and its choice there acted on through them.
+ */
+typedef void	(*FP_MNFILL)( ID mid );
+typedef BOOL	(*FP_MNDO)( CONST T_MNSEL *sel );
+IMPORT void mn_tail_hooks( FP_MNFILL fill, FP_MNDO act );
+IMPORT void mn_tail_fill( ID mid );
+IMPORT BOOL mn_tail_do( CONST T_MNSEL *sel );
+
+/*
  * For a program running as a process: the menu shown at (x, y) of the
  * work area of its window (the key of a window it may write), opened by
  * a press at `when` (T_OBNTM.when), and waited for. E_OK and the item

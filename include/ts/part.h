@@ -46,7 +46,7 @@ extern "C" {
 #include <ts/wm.h>
 
 #define WM_PART_MAX	200		/* parts in one panel: the words on it are parts too */
-#define WM_POOL_BYTES	2048		/* the names of every list, field and tag in one panel */
+#define WM_POOL_BYTES	8192		/* the names of every list, field and tag in one panel: a list of a few hundred disks */
 #define WM_SB_MAX	6		/* fields in one box along a line */
 #define WM_ITEM_MAX	32		/* items in one menu */
 #define WM_LABEL_MAX	128		/* bytes of a label, with its terminator:
@@ -102,6 +102,7 @@ extern "C" {
 #define P_ASCII		0x00800000U	/* a box that takes letters, digits and signs only */
 #define P_BASE		0x01000000U	/* words on a base line four above their rectangle's foot */
 #define P_GONE		0x02000000U	/* put away: not shown and not worked until shown again */
+#define P_DOWN		0x04000000U	/* a panel of tags whose tags stand down the sheet's left side */
 
 /* What each field of a box along a line is (sbf) */
 #define SBF_ZERO	0x01		/* shown with noughts to its width */
@@ -120,6 +121,8 @@ extern "C" {
 #define WM_PT_SWATCH	12		/* a colour, chosen by pressing it */
 #define TG_PARTS	13		/* a panel of tags over sheets of parts */
 #define WM_PT_LINE	14		/* a line from the rectangle's head and left to its foot and right */
+#define WM_PT_ICON	15		/* an object's icon, as its link shows it: the object's UUID
+					   is the part's words, set as a box's are; none shows nothing */
 
 /* And the names this system's own code says */
 #define WM_PT_BOX	TB_PARTS
@@ -210,6 +213,11 @@ typedef struct {
 	 * being one tag; 'value' is the one shown, and sbv[] keeps, for
 	 * each upper tag with a lower row in turn, the one last shown in
 	 * that row.
+	 *
+	 * With P_DOWN the tags stand one under another down the left
+	 * side of 'inner' instead, all as wide as the widest name, and
+	 * there is no lower row: a ＠ or ＋ before a name is left out and
+	 * the tag stands in the column like the rest.
 	 *
 	 * Any part of the panel says which tag it belongs under in
 	 * 'sheet', and is shown only while that tag is: nought is under
@@ -310,6 +318,15 @@ IMPORT ER  wm_panel_set_field( INT pid, INT num, INT field, INT value );
 IMPORT ER  wm_panel_text( INT pid, INT num, UB *buf, INT max );
 IMPORT ER  wm_panel_set_text( INT pid, INT num, CONST UB *s );
 
+/*
+ * Letters (UTF-8, n bytes) put into the box that has the keys in a panel
+ * of window wid, at its caret, as a conversion's committed letters are
+ * put: what was being converted there committed first, the letters
+ * chosen in it replaced. A box of digits or of ASCII takes only those.
+ * TRUE when a box took them; the box's program is told that it changed.
+ */
+IMPORT BOOL wm_panel_type( INT wid, CONST UB *s, INT n );
+
 /* ---------------------------------------------------------------- menus */
 
 typedef struct {
@@ -364,6 +381,7 @@ IMPORT INT  knl_menu_wait( void );	/* ms until a row's list is due, -1 none */
 /* Where a panel ended up, and how tall one row of a menu is */
 IMPORT ER  wm_panel_rect( INT pid, T_DPRECT *out );
 IMPORT INT wm_panel_wid( INT pid );
+IMPORT INT wm_panel_front( void );	/* the window of the panel in front that is not a menu, 0 none */
 IMPORT INT wm_menu_row_h( void );
 
 /*

@@ -21,7 +21,9 @@
  *	(make MOZC=1, the engine from tools/mozc) converts to kanji; without
  *	it a converter of romaji to kana stands in, with the same calls, so
  *	that the port is the same either way. mozc runs in a task of its own
- *	and the calls wait for it.
+ *	and the calls wait for it. Either converts a reading to the words the
+ *	person registered for it (ユーザ辞書): mozc among its own candidates,
+ *	the romaji converter with those words alone, then the kana.
  *
  *	The composition is tsmozc_out (ts/tsmozc.h): UTF-8, the clauses as
  *	byte offsets. Keys are BTRON key codes, TSMOZC_K_* for those that
@@ -72,6 +74,8 @@ IMPORT INT  kc_key( INT kid, UINT code, UINT stat, T_KCOUT *out );
  */
 IMPORT UINT kc_code_key( UINT key, UINT mods );
 IMPORT UINT kc_kana_key( UINT key, BOOL shift );
+IMPORT UINT kc_kana_key_m( UINT key, UINT mods );	/* in the kana layout chosen */
+IMPORT CONST char *kc_kana_label( UINT key, BOOL shift );
 
 /* Candidate n (from 1) chosen from the list shown */
 IMPORT INT  kc_choose( INT kid, INT n, T_KCOUT *out );
@@ -83,6 +87,14 @@ IMPORT INT  kc_choose( INT kid, INT n, T_KCOUT *out );
  */
 IMPORT INT  kc_list( INT kid, UB *buf, INT size, INT *p_count, INT *p_first,
 		     INT *p_total );
+
+/*
+ * The user dictionary (SYSDEF_DICT_USER, ts/udic.h) read again and given
+ * to the converter. The converter reads it as it starts and watches its
+ * object, so a program that writes the object need not call this; the
+ * kernel's test does, so as not to wait for the notice.
+ */
+IMPORT ER   kc_words_reload( void );
 
 #ifdef __cplusplus
 }

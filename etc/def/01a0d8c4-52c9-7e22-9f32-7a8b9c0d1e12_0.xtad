@@ -1,11 +1,11 @@
 <tad version="1.0" encoding="UTF-8" filename="システム環境設定のデータボックス">
 <document>
 <p>システム環境設定のデータボックス</p>
-<p>システム環境設定の窓のパネルと、尋ねるパネルの定義。</p>
+<p>システム環境設定の窓のパネルと、尋ねるパネルの定義。〈画面〉の〈ウィンドウ〉はウィンドウの見た目(透明度、色、角の丸み、影、ぼかし、開閉の動き、移動中の表示)と、ウィンドウの合成にGPUを使うかどうか(GPUで合成)を設定する。〈機器〉の〈電源管理〉は、再起動と電源の切断のほか、プロセッサのクロックの上限、今のクロックと電源の状態、ウォッチドッグを扱う。〈機器情報〉のサウンドは、音の出力先(自動、I2SのDAC、HDMI0、HDMI1、つながっているUSBオーディオ機器)を選び、試聴、音量、出力を止めずに流し続けるかどうかを扱う。</p>
 </document>
 <databox>
 <panel num="1" rect="0,0,600,470" title="システム環境設定" kind="bare">
-<tags num="100" rect="0,0,600,470" inner="4,28,596,466" value="1"><tag>＠機器</tag><tag>機器情報</tag><tag>＋電源管理</tag><tag>＠画面</tag><tag>背景</tag><tag>＋配色</tag><tag>書体</tag><tag>バージョン</tag></tags>
+<tags num="100" rect="0,0,600,470" inner="4,28,596,466" value="1"><tag>＠機器</tag><tag>機器情報</tag><tag>＋電源管理</tag><tag>＠画面</tag><tag>背景</tag><tag>＋配色</tag><tag>＋ウィンドウ</tag><tag>書体</tag><tag>バージョン</tag></tags>
 <list num="1" sheet="1" rect="12,64,480,454"/>
 <button num="2" sheet="1" rect="496,64,584,88" emph="true">表示</button>
 <text sheet="2" x="16" y="89">現在の電源：</text>
@@ -16,29 +16,95 @@
 <box num="5" sheet="2" rect="184,138,588,164" off="true"/>
 <button num="6" sheet="2" rect="184,192,304,216">再起動</button>
 <button num="7" sheet="2" rect="320,192,440,216">電源を切る</button>
+<text sheet="2" x="16" y="255">プロセッサの上限：</text>
+<select num="75" sheet="2" rect="184,232,588,320" double="true" value="2"><name>１５００ＭＨｚ</name><name>１８００ＭＨｚ（標準）</name><name>２０００ＭＨｚ</name><name>２２００ＭＨｚ</name><name>最大</name></select>
+<text sheet="2" x="16" y="342">電源が弱いと、高いクロックでは止まりやすくなります</text>
+<text sheet="2" x="16" y="376">現在のクロック：</text>
+<box num="76" sheet="2" rect="184,357,588,383" off="true"/>
+<text sheet="2" x="16" y="406">電源の状態：</text>
+<box num="77" sheet="2" rect="184,387,588,413" off="true"/>
+<text sheet="2" x="16" y="446">ウォッチドッグ：</text>
+<switch num="78" sheet="2" rect="184,427,264,453">使う</switch>
+<serial num="79" sheet="2" rect="272,426,476,454"><f w="4" lo="5" hi="3600"/> 秒で再起動</serial>
+<button num="80" sheet="2" rect="496,428,588,452" emph="true">設定</button>
 <list num="8" sheet="3" rect="12,64,588,386"/>
 <text sheet="3" x="16" y="412">配置：</text>
 <select num="9" sheet="3" rect="104,394,434,428" across="true" value="1"><name>並べる</name><name>中央</name><name>拡大</name></select>
 <text sheet="3" x="16" y="454">名前を選ぶとただちに背景が変わります</text>
 <list num="11" sheet="4" rect="12,64,588,416"/>
 <text sheet="4" x="16" y="448">すでに開いているウィンドウは、開き直すと反映されることがあります</text>
-<list num="13" sheet="5" rect="12,40,588,416"/>
-<box num="14" sheet="5" rect="12,424,588,450" off="true"/>
-<text sheet="6" x="16" y="59">システムバージョン：</text>
-<box num="15" sheet="6" rect="184,40,588,66" off="true"/>
-<text sheet="6" x="16" y="89">カーネル：</text>
-<box num="16" sheet="6" rect="184,70,588,96" off="true"/>
-<text sheet="6" x="16" y="119">作成日時：</text>
-<box num="17" sheet="6" rect="184,100,588,126" off="true"/>
-<text sheet="6" x="16" y="149">機種：</text>
-<box num="18" sheet="6" rect="184,130,588,156" off="true"/>
-<text sheet="6" x="16" y="179">プロセッサ：</text>
-<box num="19" sheet="6" rect="184,160,588,186" off="true"/>
-<text sheet="6" x="16" y="209">メモリ：</text>
-<box num="20" sheet="6" rect="184,190,588,216" off="true"/>
-<list num="21" sheet="6" rect="12,228,588,422"/>
-<text sheet="6" x="16" y="452">パッケージ（.tpk）を落とすとインストール・更新</text>
-<button num="46" sheet="6" rect="480,434,588,458">詳細情報</button>
+<text sheet="5" x="16" y="78">効果：</text>
+<switch num="50" sheet="5" rect="184,59,284,85">使う</switch>
+<switch num="74" sheet="5" rect="400,59,588,85">GPUで合成</switch>
+<text sheet="5" x="16" y="106">透明度：</text>
+<text sheet="5" x="190" y="106">低</text>
+<text sheet="5" x="428" y="106">高</text>
+<volume num="51" sheet="5" rect="212,89,420,111" across="true" lo="100" hi="0" value="0"/>
+<box num="52" sheet="5" rect="456,87,588,113" off="true"/>
+<text sheet="5" x="16" y="134">透かす範囲：</text>
+<select num="53" sheet="5" rect="184,114,484,142" across="true" value="1"><name>枠だけ</name><name>ウィンドウ全体</name></select>
+<text sheet="5" x="16" y="162">枠の色：</text>
+<select num="54" sheet="5" rect="184,142,588,170" across="true" value="1"><name>配色</name><name>青</name><name>墨</name><name>白</name></select>
+<text sheet="5" x="16" y="190">枠の色の濃さ：</text>
+<text sheet="5" x="190" y="190">薄</text>
+<text sheet="5" x="428" y="190">濃</text>
+<volume num="55" sheet="5" rect="212,173,420,195" across="true" lo="100" hi="0" value="0"/>
+<box num="56" sheet="5" rect="456,171,588,197" off="true"/>
+<text sheet="5" x="16" y="218">タイトルの色：</text>
+<select num="57" sheet="5" rect="184,198,588,226" across="true" value="1"><name>配色</name><name>青</name><name>墨</name><name>白</name></select>
+<text sheet="5" x="16" y="246">タイトルの色の濃さ：</text>
+<text sheet="5" x="190" y="246">薄</text>
+<text sheet="5" x="428" y="246">濃</text>
+<volume num="58" sheet="5" rect="212,229,420,251" across="true" lo="100" hi="0" value="0"/>
+<box num="59" sheet="5" rect="456,227,588,253" off="true"/>
+<text sheet="5" x="16" y="274">角の丸み：</text>
+<text sheet="5" x="190" y="274">小</text>
+<text sheet="5" x="428" y="274">大</text>
+<volume num="60" sheet="5" rect="212,257,420,279" across="true" lo="100" hi="0" value="0"/>
+<box num="61" sheet="5" rect="456,255,588,281" off="true"/>
+<text sheet="5" x="16" y="302">影の濃さ：</text>
+<text sheet="5" x="190" y="302">薄</text>
+<text sheet="5" x="428" y="302">濃</text>
+<volume num="62" sheet="5" rect="212,285,420,307" across="true" lo="100" hi="0" value="0"/>
+<box num="63" sheet="5" rect="456,283,588,309" off="true"/>
+<text sheet="5" x="16" y="330">影のずれ：</text>
+<serial num="64" sheet="5" rect="184,310,424,338"><f w="2" lo="0" hi="16"/> ドット右、<f w="2" lo="0" hi="16"/> ドット下</serial>
+<text sheet="5" x="16" y="358">影の広がり：</text>
+<text sheet="5" x="190" y="358">小</text>
+<text sheet="5" x="428" y="358">大</text>
+<volume num="65" sheet="5" rect="212,341,420,363" across="true" lo="100" hi="0" value="0"/>
+<box num="66" sheet="5" rect="456,339,588,365" off="true"/>
+<text sheet="5" x="16" y="386">ぼかし：</text>
+<text sheet="5" x="190" y="386">小</text>
+<text sheet="5" x="428" y="386">大</text>
+<volume num="67" sheet="5" rect="212,369,420,391" across="true" lo="100" hi="0" value="0"/>
+<box num="68" sheet="5" rect="456,367,588,393" off="true"/>
+<text sheet="5" x="16" y="414">開閉の動き：</text>
+<text sheet="5" x="190" y="414">短</text>
+<text sheet="5" x="428" y="414">長</text>
+<volume num="69" sheet="5" rect="212,397,420,419" across="true" lo="100" hi="0" value="0"/>
+<box num="70" sheet="5" rect="456,395,588,421" off="true"/>
+<text sheet="5" x="16" y="442">移動中の表示：</text>
+<select num="71" sheet="5" rect="184,422,400,450" across="true" value="1"><name>中身ごと</name><name>枠線だけ</name></select>
+<button num="72" sheet="5" rect="404,424,490,448">初期値</button>
+<button num="73" sheet="5" rect="496,424,588,448">取り消し</button>
+<list num="13" sheet="6" rect="12,40,588,416"/>
+<box num="14" sheet="6" rect="12,424,588,450" off="true"/>
+<text sheet="7" x="16" y="59">システムバージョン：</text>
+<box num="15" sheet="7" rect="184,40,588,66" off="true"/>
+<text sheet="7" x="16" y="89">カーネル：</text>
+<box num="16" sheet="7" rect="184,70,588,96" off="true"/>
+<text sheet="7" x="16" y="119">作成日時：</text>
+<box num="17" sheet="7" rect="184,100,588,126" off="true"/>
+<text sheet="7" x="16" y="149">機種：</text>
+<box num="18" sheet="7" rect="184,130,588,156" off="true"/>
+<text sheet="7" x="16" y="179">プロセッサ：</text>
+<box num="19" sheet="7" rect="184,160,588,186" off="true"/>
+<text sheet="7" x="16" y="209">メモリ：</text>
+<box num="20" sheet="7" rect="184,190,588,216" off="true"/>
+<list num="21" sheet="7" rect="12,228,588,422"/>
+<text sheet="7" x="16" y="452">パッケージ（.tpk）を落とすとインストール・更新</text>
+<button num="46" sheet="7" rect="480,434,588,458">詳細情報</button>
 <text sheet="8" x="16" y="83">画面サイズ／色数</text>
 <list num="23" sheet="8" rect="12,94,380,420"/>
 <text num="24" sheet="8" x="396" y="113">色数：１６７７万色</text>
@@ -78,12 +144,23 @@
 <text sheet="13" x="16" y="209">これはかな入力／ローマ字入力の設定ではありません（ユーザ環境設定で設定します）</text>
 <button num="41" sheet="13" rect="400,434,488,458">取り消し</button>
 <button num="42" sheet="13" rect="496,434,584,458" emph="true">設定</button>
-<text sheet="14" x="16" y="89">出力：</text>
-<box num="43" sheet="14" rect="184,70,588,96" off="true"/>
-<text sheet="14" x="16" y="119">標本化周波数：</text>
-<box num="44" sheet="14" rect="184,100,588,126" off="true"/>
-<text sheet="14" x="16" y="149">チャネル：</text>
-<box num="45" sheet="14" rect="184,130,588,156" off="true"/>
+<text sheet="14" x="16" y="59">出力先：</text>
+<list num="47" sheet="14" rect="184,40,588,196"/>
+<text sheet="14" x="16" y="223">現在の出力：</text>
+<box num="43" sheet="14" rect="184,204,588,230" off="true"/>
+<text sheet="14" x="16" y="253">標本化周波数：</text>
+<box num="44" sheet="14" rect="184,234,588,260" off="true"/>
+<text sheet="14" x="16" y="283">チャネル：</text>
+<box num="45" sheet="14" rect="184,264,588,290" off="true"/>
+<text sheet="14" x="16" y="318">音量：</text>
+<text sheet="14" x="190" y="318">小</text>
+<text sheet="14" x="428" y="318">大</text>
+<volume num="49" sheet="14" rect="212,301,420,323" across="true" lo="100" hi="0" value="0"/>
+<box num="81" sheet="14" rect="456,299,588,325" off="true"/>
+<button num="48" sheet="14" rect="184,338,304,362">試聴</button>
+<switch num="82" sheet="14" rect="184,372,480,398">出力を止めずに流し続ける</switch>
+<text sheet="14" x="16" y="422">出力先を選ぶとただちに切り替わり、次の起動にも使われます</text>
+<text sheet="14" x="16" y="444">選んだ出力先がないときは自動で選んだ先から出ます</text>
 <button num="22" sheet="14" rect="496,434,584,458" emph="true">確認</button>
 </panel>
 <panel num="10" rect="0,0,460,106" title="システム環境設定">

@@ -221,7 +221,8 @@ LOCAL void row( T_WMPANEL *def, INT i, CONST char *name, CONST UB *val )
 LOCAL T_WMPANEL *build( void )
 {
 	CONST T_PRCFLT	*f = &ft->f;
-	BOOL		kcall = (BOOL)( f->kind == TS_FLT_KCALL );
+	BOOL		kpan = (BOOL)( f->kind == TS_FLT_KPAN );
+	BOOL		kcall = (BOOL)( f->kind == TS_FLT_KCALL || kpan );
 	T_WMPANEL	*def = dt_pn_new(FT_W, FT_H);
 	T_WMPART	*pt;
 	UB		b[WM_LABEL_MAX], nm[OB_NAME_MAX + 1];
@@ -234,7 +235,8 @@ LOCAL T_WMPANEL *build( void )
 	def->kind = WM_PNL_BARE;
 	ft->nline = 0;
 
-	head = kcall ? "プログラムがシステムコールに不正なアドレスを渡したため、終了しました"
+	head = kpan ? "カーネルがプログラムのメモリに確かめずに触れたため、プログラムを終了しました"
+	     : kcall ? "プログラムがシステムコールに不正なアドレスを渡したため、終了しました"
 		     : "プログラムがプロセッサの例外を起こしたため、終了しました";
 	(void)dt_pn_add(def, WM_PT_LABEL, 0, 14, 8, FT_W - 28, 22, head);
 	(void)put(ft->line[ft->nline++], 0, WM_LABEL_MAX, head);
@@ -301,7 +303,7 @@ LOCAL void ft_close( void )
 	}
 	(void)wm_close(w->wid);
 	Kfree(w);
-	wm_composite();
+	wm_update();
 }
 
 /*
@@ -378,7 +380,7 @@ LOCAL void show( CONST T_PRCFLT *f, UW others )
 	}
 	wm_raise(ft->wid);
 	wm_panel_draw(ft->pid);
-	wm_composite();
+	wm_update();
 }
 
 /* ---------------------------------------------------------------- the desktop's side */
@@ -441,11 +443,12 @@ EXPORT BOOL dt_fault_event( CONST T_WMEV *ev )
 			o.top = py - ft->grab_dy;
 			o.right = o.left + ( w.outer.right - w.outer.left );
 			o.bottom = o.top + ( w.outer.bottom - w.outer.top );
-			if ( wm_move(ft->wid, &o) >= E_OK ) wm_composite();
+			if ( dt_carry_window(ft->wid, &o) ) wm_update();
 			return FALSE;
 		}
 		if ( ev->type == HID_EV_BTN_UP ) {
 			ft->moving = FALSE;
+			if ( dt_carry_end(ft->wid) ) wm_update();
 			return TRUE;
 		}
 	}
@@ -471,7 +474,7 @@ EXPORT BOOL dt_fault_event( CONST T_WMEV *ev )
 				if ( wm_pict_close(ft->wid, px, py, ev->when) ) {
 					ft_close();
 				} else {
-					wm_composite();
+					wm_update();
 				}
 				return TRUE;
 			}
@@ -479,11 +482,11 @@ EXPORT BOOL dt_fault_event( CONST T_WMEV *ev )
 			ft->moving = TRUE;
 			ft->grab_dx = px - w.outer.left;
 			ft->grab_dy = py - w.outer.top;
-			wm_composite();
+			wm_update();
 			return TRUE;
 		}
 		if ( ev->code != 0 ) {
-			wm_composite();
+			wm_update();
 			return TRUE;
 		}
 	}

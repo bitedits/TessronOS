@@ -49,11 +49,15 @@ ZLIB=$EXT/zlib+
 UTF8=$PB/third_party/utf8_range
 LISTS=${LISTS:-$HOME/mozc-btron-thirdparty}
 OUT=${OUT:-$HOME/tessronos-mozc}
+# The instruction set: the kernel's (build_make/common.mk). The Raspberry Pi
+# 4 family takes ARMv8.0-A with CRC32 (MARCH=armv8-a+crc,
+# OUT=~/tessronos-mozc-v80), which has no LSE atomics
+MARCH=${MARCH:-armv8.2-a}
 GEN=$OUT/gen
 JOBS=${JOBS:-$(nproc)}
 mkdir -p "$OUT" "$GEN"
 
-BASE="-march=armv8.2-a -O2 -mno-outline-atomics -fno-pic -fno-stack-protector \
+BASE="-march=$MARCH -O2 -mno-outline-atomics -fno-pic -fno-stack-protector \
  -ffunction-sections -fdata-sections -funsigned-char \
  -D_POSIX_THREADS -D_POSIX_TIMERS -D_POSIX_MONOTONIC_CLOCK \
  -D_POSIX_THREAD_PRIORITY_SCHEDULING -DABSL_FORCE_WAITER_MODE=2 \

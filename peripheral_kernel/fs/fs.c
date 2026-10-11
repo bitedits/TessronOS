@@ -32,14 +32,48 @@
 #include <tk/tkernel.h>
 #include <ts/fs.h>
 #include <ts/ob.h>
+#include <ts/psx.h>
+#include <ts/time.h>
 
-#define FS_MAX_FIMP	4
+#define FS_MAX_FIMP	16
 
 LOCAL CONST T_FIMP	*fs_fimp[FS_MAX_FIMP];
 LOCAL INT		fs_nfimp = 0;
-LOCAL T_MOUNT		fs_mount[FS_MAX_MOUNT];
-LOCAL T_FILE		fs_file[FS_MAX_FILE];
+
+/*
+ * The mount table: an entry is made the first time one more mount is
+ * wanted than there are entries, and is kept, free or in use, for the
+ * life of the system. A descriptor points at its mount, and a pointer
+ * that stays good after the mount is let go is what makes a descriptor
+ * on a mount whose device went safe to look at. fs_nmount is how many
+ * entries have been made; both are looked at under fs_mtxid.
+ */
+LOCAL T_MOUNT		*fs_mount[FS_MAX_MOUNT];
+LOCAL INT		fs_nmount = 0;
 LOCAL ID		fs_mtxid = 0;		/* mount table and descriptors */
+
+/*
+ * Descriptors and open files (design 5.8.2). A descriptor is a slot
+ * with its owner that names an open file; the open file holds the
+ * offset and the flags, as POSIX's open file description, and is shared
+ * by the descriptors fs_dup makes and those handed to a child
+ * (knl_fs_give). An open file goes -- the fimp's close -- once no
+ * descriptor names it and no call is at work on it. Both tables are
+ * looked at under fs_mtxid.
+ */
+typedef struct {
+	T_FILE	*f;
+	ID	owner;			/* the process, 0 for the kernel */
+	BOOL	used;
+} FSLOT;
+
+LOCAL FSLOT		fs_slot[FS_MAX_FILE];
+LOCAL T_FILE		fs_file[FS_MAX_FILE];
+LOCAL ID		fs_flgid = 0;		/* knl_fs_wake: set and cleared at once */
+
+/* Pipes are open files of a mount that no path reaches (pipefs.c) */
+LOCAL T_MOUNT		fs_pipe_mount;
+IMPORT ER		knl_pipe_init( void );
 
 /* ---------------------------------------------------------------- strings */
 
@@ -95,12 +129,108 @@ LOCAL void str_ncpy( char *dst, CONST char *src, INT max )
 
 /* ---------------------------------------------------------------- tables */
 
-LOCAL T_FILE *fd_to_file( INT fd )
+/* The open file a descriptor names, held busy until fd_put; NULL when none */
+LOCAL T_FILE *fd_get( INT fd )
 {
-	if ( fd < 0 || fd >= FS_MAX_FILE || !fs_file[fd].used ) {
+	T_FILE	*f = NULL;
+
+	if ( fd < 0 || fd >= FS_MAX_FILE ) {
 		return NULL;
 	}
-	return &fs_file[fd];
+	tk_loc_mtx(fs_mtxid, TMO_FEVR);
+	if ( fs_slot[fd].used && fs_slot[fd].f != NULL ) {
+		f = fs_slot[fd].f;
+		f->busy++;
+	}
+	tk_unl_mtx(fs_mtxid);
+
+	return f;
+}
+
+LOCAL void mount_reap( T_MOUNT *m );
+
+/*
+ * An open file no descriptor names and no call works on any more: the
+ * fimp's close, then the entry free. Called without the lock.
+ */
+LOCAL ER file_last( T_FILE *f )
+{
+	T_MOUNT	*m = f->mount;
+	ER	er;
+
+	if ( m->gone ) {
+		er = EX_IO;
+	} else {
+		er = ( m->fimp->close != NULL ) ? m->fimp->close(f) : EX_OK;
+	}
+	tk_loc_mtx(fs_mtxid, TMO_FEVR);
+	f->owner = 0;
+	f->obj = NULL;
+	f->used = FALSE;
+	if ( m != &fs_pipe_mount ) {
+		mount_reap(m);
+	}
+	tk_unl_mtx(fs_mtxid);
+	knl_fs_wake();
+
+	return er;
+}
+
+LOCAL void fd_put( T_FILE *f )
+{
+	BOOL	last;
+
+	tk_loc_mtx(fs_mtxid, TMO_FEVR);
+	f->busy--;
+	last = ( f->refs == 0 && f->busy == 0 );
+	if ( last ) f->busy = 1;		/* this caller closes it */
+	tk_unl_mtx(fs_mtxid);
+	if ( last ) {
+		(void)file_last(f);
+	}
+}
+
+/* A free open file, taken; NULL when there is none. Under the lock */
+LOCAL T_FILE *file_new( void )
+{
+	INT	i;
+
+	for ( i = 0; i < FS_MAX_FILE; i++ ) {
+		if ( !fs_file[i].used ) {
+			T_FILE	*f = &fs_file[i];
+
+			knl_memset(f, 0, sizeof(*f));
+			f->used = TRUE;
+			f->mode = FS_IFREG;
+			return f;
+		}
+	}
+	return NULL;
+}
+
+/*
+ * A free descriptor for owner naming f, f's count of them up; -1 when
+ * there is none, or the owner holds FS_PRC_FILE already. Under the lock.
+ */
+LOCAL INT slot_new( T_FILE *f, ID owner )
+{
+	INT	i, n = 0, fd = -1;
+
+	for ( i = 0; i < FS_MAX_FILE; i++ ) {
+		if ( !fs_slot[i].used ) {
+			if ( fd < 0 ) fd = i;
+		} else if ( owner > 0 && fs_slot[i].owner == owner ) {
+			n++;
+		}
+	}
+	if ( fd < 0 || n >= FS_PRC_FILE ) {
+		return -1;
+	}
+	fs_slot[fd].used = TRUE;
+	fs_slot[fd].owner = owner;
+	fs_slot[fd].f = f;
+	f->refs++;
+	return fd;
 }
 
 /*
@@ -116,8 +246,8 @@ LOCAL T_MOUNT *find_mount( CONST char *path, CONST char **rest )
 	if ( path[0] != '/' ) {
 		return NULL;
 	}
-	for ( i = 0; i < FS_MAX_MOUNT; i++ ) {
-		T_MOUNT *m = &fs_mount[i];
+	for ( i = 0; i < fs_nmount; i++ ) {
+		T_MOUNT *m = fs_mount[i];
 		INT	j;
 
 		if ( !m->used || m->gone ) continue;
@@ -223,16 +353,17 @@ LOCAL BOOL mount_rdonly( CONST T_MOUNT *m )
 EXPORT ER fs_main( void )
 {
 	T_CMTX	cmtx;
+	T_CFLG	cflg;
 	INT	i;
 
 	if ( fs_mtxid > 0 ) {
 		return E_OK;
 	}
-	for ( i = 0; i < FS_MAX_MOUNT; i++ ) {
-		fs_mount[i].used = FALSE;
-		fs_mount[i].gone = FALSE;
+	fs_nmount = 0;
+	for ( i = 0; i < FS_MAX_FILE; i++ ) {
+		fs_file[i].used = FALSE;
+		fs_slot[i].used = FALSE;
 	}
-	for ( i = 0; i < FS_MAX_FILE; i++ ) fs_file[i].used = FALSE;
 	fs_nfimp = 0;
 
 	cmtx.exinf = NULL;
@@ -241,8 +372,19 @@ EXPORT ER fs_main( void )
 	if ( fs_mtxid <= 0 ) {
 		return (ER)fs_mtxid;
 	}
+	cflg.exinf = NULL;
+	cflg.flgatr = TA_TFIFO | TA_WMUL;
+	cflg.iflgptn = 0;
+	fs_flgid = tk_cre_flg(&cflg);
+	if ( fs_flgid <= 0 ) {
+		return (ER)fs_flgid;
+	}
 
-	return E_OK;
+	knl_memset(&fs_pipe_mount, 0, sizeof(fs_pipe_mount));
+	fs_pipe_mount.fimp = &knl_fimp_pipe;
+	fs_pipe_mount.used = TRUE;
+
+	return knl_pipe_init();
 }
 
 EXPORT ER fs_regist( CONST T_FIMP *fimp )
@@ -305,20 +447,30 @@ LOCAL ER attach( CONST char *fimpnm, CONST char *devnm, CONST char *path, UINT f
 
 	tk_loc_mtx(fs_mtxid, TMO_FEVR);
 
-	for ( i = 0; i < FS_MAX_MOUNT; i++ ) {
-		CONST char	*d = (CONST char *)fs_mount[i].dev;
+	for ( i = 0; i < fs_nmount; i++ ) {
+		T_MOUNT		*e = fs_mount[i];
+		CONST char	*d = (CONST char *)e->dev;
 
-		if ( fs_mount[i].used && ( str_same((CONST char *)fs_mount[i].path, path)
+		if ( e->used && ( str_same((CONST char *)e->path, path)
 		  || ( devnm != NULL && ( str_same(d, devnm)
 					|| ( whole && d[0] != '\0' && dev_overlap(d, devnm) ) ) ) ) ) {
 			er = EX_BUSY;
 			goto exit;
 		}
-		if ( !fs_mount[i].used && m == NULL ) m = &fs_mount[i];
+		if ( !e->used && m == NULL ) m = e;
 	}
 	if ( m == NULL ) {
-		er = EX_NOSPC;
-		goto exit;
+		/* every entry is in use: one more, kept from now on */
+		if ( fs_nmount >= FS_MAX_MOUNT ) {
+			er = EX_NOSPC;
+			goto exit;
+		}
+		m = (T_MOUNT *)Kcalloc(1, sizeof(T_MOUNT));
+		if ( m == NULL ) {
+			er = EX_NOMEM;
+			goto exit;
+		}
+		fs_mount[fs_nmount++] = m;
 	}
 
 	if ( devnm != NULL ) {
@@ -363,8 +515,8 @@ LOCAL T_MOUNT *mount_by( CONST char *path, CONST char *devnm )
 {
 	INT	i;
 
-	for ( i = 0; i < FS_MAX_MOUNT; i++ ) {
-		T_MOUNT	*m = &fs_mount[i];
+	for ( i = 0; i < fs_nmount; i++ ) {
+		T_MOUNT	*m = fs_mount[i];
 
 		if ( !m->used || m->gone ) continue;
 		if ( path != NULL && str_same((CONST char *)m->path, path) ) return m;
@@ -486,8 +638,8 @@ EXPORT INT knl_fs_revoke( CONST char *devnm )
 		return 0;
 	}
 	tk_loc_mtx(fs_mtxid, TMO_FEVR);
-	for ( i = 0; i < FS_MAX_MOUNT; i++ ) {
-		T_MOUNT	*m = &fs_mount[i];
+	for ( i = 0; i < fs_nmount; i++ ) {
+		T_MOUNT	*m = fs_mount[i];
 
 		if ( !m->used || m->gone || !str_same((CONST char *)m->dev, devnm) ) continue;
 		m->gone = TRUE;
@@ -511,7 +663,7 @@ EXPORT INT knl_fs_open_as( CONST char *path, UINT oflags, ID owner )
 	CONST char	*rest;
 	T_MOUNT		*m;
 	T_FILE		*f = NULL;
-	INT		i, n, fd = -1;
+	INT		fd = -1;
 	ER		er;
 
 	if ( path == NULL || str_len(path) >= FS_PATH_MAX ) {
@@ -529,39 +681,35 @@ EXPORT INT knl_fs_open_as( CONST char *path, UINT oflags, ID owner )
 		tk_unl_mtx(fs_mtxid);
 		return EX_ROFS;
 	}
-	for ( i = 0, n = 0; i < FS_MAX_FILE; i++ ) {
-		if ( !fs_file[i].used ) {
-			if ( f == NULL ) { f = &fs_file[i]; fd = i; }
-		} else if ( owner > 0 && fs_file[i].owner == owner ) {
-			n++;
-		}
+	f = file_new();
+	if ( f != NULL ) {
+		fd = slot_new(f, owner);
+		if ( fd < 0 ) f->used = FALSE;
 	}
-	if ( f == NULL || n >= FS_PRC_FILE ) {
+	if ( fd < 0 ) {
 		tk_unl_mtx(fs_mtxid);
 		return EX_MFILE;
 	}
-	f->used   = TRUE;		/* reserved while the fimp works */
 	f->owner  = owner;
 	f->mount  = m;
 	f->oflags = oflags;
-	f->offset = 0;
-	f->size   = 0;
-	f->mode   = FS_IFREG;
-	f->ino    = 0;
-	f->priv   = 0;
-	f->hint_idx  = 0;		/* it has not been read along yet */
-	f->hint_clus = 0;
+	f->busy   = 1;			/* the fimp works on it: not closed meanwhile */
 	tk_unl_mtx(fs_mtxid);
 
 	er = ( m->fimp->open != NULL ) ? m->fimp->open(m, rest, oflags, f) : EX_NOTSUP;
 	if ( er < EX_OK ) {
+		tk_loc_mtx(fs_mtxid, TMO_FEVR);
+		fs_slot[fd].used = FALSE;
+		fs_slot[fd].f = NULL;
 		f->owner = 0;
 		f->used = FALSE;
+		tk_unl_mtx(fs_mtxid);
 		return (INT)er;
 	}
 	if ( (oflags & O_APPEND) != 0 ) {
 		f->offset = f->size;
 	}
+	fd_put(f);
 
 	return fd;
 }
@@ -572,55 +720,225 @@ EXPORT INT fs_open( CONST char *path, UINT oflags )
 }
 
 /*
- * A descriptor on a mount that is gone is let go without the fimp,
- * whose volume is no longer there; EX_IO says that what was written
- * last may not have reached it. The last one lets the mount go.
+ * The descriptor goes. When it was the last of its open file and no
+ * call is at work on that, the file is closed: on a mount that is gone
+ * without the fimp, whose volume is no longer there (EX_IO says that
+ * what was written last may not have reached it). The last one lets the
+ * mount go.
  */
 EXPORT ER fs_close( INT fd )
 {
-	T_FILE	*f = fd_to_file(fd);
-	T_MOUNT	*m;
-	ER	er;
+	T_FILE	*f;
+	BOOL	last;
 
-	if ( f == NULL ) {
+	if ( fd < 0 || fd >= FS_MAX_FILE ) {
 		return EX_BADF;
 	}
-	m = f->mount;
-	if ( m->gone ) {
-		er = EX_IO;
-	} else {
-		er = ( m->fimp->close != NULL ) ? m->fimp->close(f) : EX_OK;
-	}
 	tk_loc_mtx(fs_mtxid, TMO_FEVR);
-	f->owner = 0;
-	f->used = FALSE;
-	mount_reap(m);
+	if ( !fs_slot[fd].used || fs_slot[fd].f == NULL ) {
+		tk_unl_mtx(fs_mtxid);
+		return EX_BADF;
+	}
+	f = fs_slot[fd].f;
+	fs_slot[fd].used = FALSE;
+	fs_slot[fd].f = NULL;
+	fs_slot[fd].owner = 0;
+	f->refs--;
+	last = ( f->refs == 0 && f->busy == 0 );
+	if ( last ) f->busy = 1;
 	tk_unl_mtx(fs_mtxid);
 
-	return er;
+	if ( !last ) {
+		knl_fs_wake();			/* a pipe's end may be one fewer */
+		return EX_OK;
+	}
+	return file_last(f);
 }
 
 /* Whether a descriptor is open and belongs to that owner */
 EXPORT BOOL knl_fs_mine( INT fd, ID owner )
 {
-	T_FILE	*f = fd_to_file(fd);
+	BOOL	yes;
 
-	return ( f != NULL && f->owner == owner );
+	if ( fd < 0 || fd >= FS_MAX_FILE || fs_mtxid <= 0 ) {
+		return FALSE;
+	}
+	tk_loc_mtx(fs_mtxid, TMO_FEVR);
+	yes = ( fs_slot[fd].used && fs_slot[fd].owner == owner );
+	tk_unl_mtx(fs_mtxid);
+	return yes;
 }
 
-/* A process is ending: whatever it left open is closed */
+/*
+ * A process is ending: whatever it left open is closed. The table is
+ * looked through under one hold of the lock, a handful of the process's
+ * descriptors at a time, and they are closed with the lock let go. Taking
+ * the lock once per entry made every ending a few thousand turns of a
+ * lock that the other endings and every file call also want, and with
+ * many processes ending at once they queued behind each other for
+ * minutes, the reaper among them.
+ */
+#define FS_END_BATCH	32
+
 EXPORT void knl_fs_prc_end( ID pid )
 {
-	INT	fd;
+	INT	fd = 0, n, i;
+	INT	got[FS_END_BATCH];
 
 	if ( pid <= 0 || fs_mtxid <= 0 ) {
 		return;
 	}
-	for ( fd = 0; fd < FS_MAX_FILE; fd++ ) {
-		if ( knl_fs_mine(fd, pid) ) {
-			(void)fs_close(fd);
+	while ( fd < FS_MAX_FILE ) {
+		n = 0;
+		tk_loc_mtx(fs_mtxid, TMO_FEVR);
+		for ( ; fd < FS_MAX_FILE && n < FS_END_BATCH; fd++ ) {
+			if ( fs_slot[fd].used && fs_slot[fd].owner == pid ) {
+				got[n++] = fd;
+			}
+		}
+		tk_unl_mtx(fs_mtxid);
+
+		for ( i = 0; i < n; i++ ) {
+			(void)fs_close(got[i]);
 		}
 	}
+}
+
+/* A second descriptor of the same open file, for owner */
+EXPORT INT knl_fs_dup_as( INT fd, ID owner )
+{
+	INT	nfd = EX_BADF;
+
+	if ( fd < 0 || fd >= FS_MAX_FILE ) {
+		return EX_BADF;
+	}
+	tk_loc_mtx(fs_mtxid, TMO_FEVR);
+	if ( fs_slot[fd].used && fs_slot[fd].f != NULL ) {
+		nfd = slot_new(fs_slot[fd].f, owner);
+		if ( nfd < 0 ) nfd = EX_MFILE;
+	}
+	tk_unl_mtx(fs_mtxid);
+
+	return nfd;
+}
+
+EXPORT INT fs_dup( INT fd )
+{
+	return knl_fs_dup_as(fd, 0);
+}
+
+/*
+ * Descriptors of 'from' given to 'to' as well: each of the open files
+ * gets one more descriptor, owned by 'to'. All or none.
+ */
+EXPORT ER knl_fs_give( CONST INT *fds, INT n, ID from, ID to, INT *out )
+{
+	INT	i, j;
+	ER	er = EX_OK;
+
+	if ( n < 0 || ( n > 0 && ( fds == NULL || out == NULL ) ) ) {
+		return EX_INVAL;
+	}
+	tk_loc_mtx(fs_mtxid, TMO_FEVR);
+	for ( i = 0; i < n; i++ ) {
+		INT	fd = fds[i];
+
+		if ( fd < 0 || fd >= FS_MAX_FILE || !fs_slot[fd].used || fs_slot[fd].owner != from ) {
+			er = EX_BADF;
+			break;
+		}
+		out[i] = slot_new(fs_slot[fd].f, to);
+		if ( out[i] < 0 ) {
+			er = EX_MFILE;
+			break;
+		}
+	}
+	if ( er < EX_OK ) {
+		for ( j = 0; j < i; j++ ) {
+			fs_slot[out[j]].f->refs--;	/* the caller's still name them */
+			fs_slot[out[j]].used = FALSE;
+			fs_slot[out[j]].f = NULL;
+		}
+	}
+	tk_unl_mtx(fs_mtxid);
+
+	return er;
+}
+
+/*
+ * A pipe: two open files of the pipe fimp, the reading end in fd[0], the
+ * writing end in fd[1], owned by owner.
+ */
+IMPORT ER knl_pipe_make( T_FILE *rd, T_FILE *wr );
+
+EXPORT ER knl_fs_pipe_as( INT fd[2], ID owner )
+{
+	T_FILE	*r = NULL, *w = NULL;
+	INT	a = -1, b = -1;
+	ER	er;
+
+	tk_loc_mtx(fs_mtxid, TMO_FEVR);
+	r = file_new();
+	w = ( r != NULL ) ? file_new() : NULL;
+	if ( w != NULL ) {
+		a = slot_new(r, owner);
+		b = ( a >= 0 ) ? slot_new(w, owner) : -1;
+	}
+	if ( b < 0 ) {
+		if ( a >= 0 ) { fs_slot[a].used = FALSE; fs_slot[a].f = NULL; }
+		if ( r != NULL ) r->used = FALSE;
+		if ( w != NULL ) w->used = FALSE;
+		tk_unl_mtx(fs_mtxid);
+		return EX_MFILE;
+	}
+	r->mount = w->mount = &fs_pipe_mount;
+	r->owner = w->owner = owner;
+	r->oflags = O_RDONLY;
+	w->oflags = O_WRONLY;
+	r->mode = w->mode = FS_IFIFO;
+	tk_unl_mtx(fs_mtxid);
+
+	er = knl_pipe_make(r, w);
+	if ( er < EX_OK ) {
+		tk_loc_mtx(fs_mtxid, TMO_FEVR);
+		fs_slot[a].used = fs_slot[b].used = FALSE;
+		fs_slot[a].f = fs_slot[b].f = NULL;
+		r->used = w->used = FALSE;
+		tk_unl_mtx(fs_mtxid);
+		return er;
+	}
+	fd[0] = a;
+	fd[1] = b;
+	return EX_OK;
+}
+
+EXPORT ER fs_pipe( INT fd[2] )
+{
+	return knl_fs_pipe_as(fd, 0);
+}
+
+/* ---------------------------------------------------------------- waiting */
+
+/* Everyone waiting in a slice is woken to look again */
+EXPORT void knl_fs_wake( void )
+{
+	if ( fs_flgid > 0 ) {
+		tk_set_flg(fs_flgid, 1);
+		tk_clr_flg(fs_flgid, 0);
+	}
+}
+
+/*
+ * One slice of a wait for something knl_fs_wake tells: FALSE when the
+ * caller is to stop waiting -- a signal to be handed over, or the end
+ * of its process.
+ */
+EXPORT BOOL knl_fs_wait_slice( TMO ms )
+{
+	UINT	ptn;
+
+	(void)tk_wai_flg(fs_flgid, 1, TWF_ORW, &ptn, ms);
+	return !knl_psx_intr();
 }
 
 /* The descriptor's mount went with its device: nothing is asked of the fimp */
@@ -628,69 +946,83 @@ EXPORT void knl_fs_prc_end( ID pid )
 
 EXPORT INT fs_read( INT fd, void *buf, SZ len )
 {
-	T_FILE	*f = fd_to_file(fd);
+	T_FILE	*f = fd_get(fd);
+	INT	r;
 
 	if ( f == NULL || buf == NULL ) {
+		if ( f != NULL ) fd_put(f);
 		return EX_BADF;
 	}
 	if ( GONE(f) ) {
-		return EX_IO;
+		r = EX_IO;
+	} else if ( (f->oflags & O_ACCMODE) == O_WRONLY ) {
+		r = EX_BADF;
+	} else if ( f->mode == FS_IFDIR ) {
+		r = EX_ISDIR;
+	} else if ( len == 0 ) {
+		r = 0;
+	} else {
+		r = ( f->mount->fimp->read != NULL ) ? f->mount->fimp->read(f, buf, len) : EX_NOTSUP;
 	}
-	if ( (f->oflags & O_ACCMODE) == O_WRONLY ) {
-		return EX_BADF;
-	}
-	if ( f->mode == FS_IFDIR ) {
-		return EX_ISDIR;
-	}
-	if ( len == 0 ) {
-		return 0;
-	}
-	return ( f->mount->fimp->read != NULL ) ? f->mount->fimp->read(f, buf, len) : EX_NOTSUP;
+	fd_put(f);
+	return r;
 }
 
 EXPORT INT fs_write( INT fd, CONST void *buf, SZ len )
 {
-	T_FILE	*f = fd_to_file(fd);
+	T_FILE	*f = fd_get(fd);
+	INT	r;
 
 	if ( f == NULL || buf == NULL ) {
+		if ( f != NULL ) fd_put(f);
 		return EX_BADF;
 	}
 	if ( GONE(f) ) {
-		return EX_IO;
+		r = EX_IO;
+	} else if ( (f->oflags & O_ACCMODE) == O_RDONLY ) {
+		r = EX_BADF;
+	} else if ( f->mode == FS_IFDIR ) {
+		r = EX_ISDIR;
+	} else if ( len == 0 ) {
+		r = 0;
+	} else {
+		if ( (f->oflags & O_APPEND) != 0 && f->mode == FS_IFREG ) {
+			f->offset = f->size;
+		}
+		r = ( f->mount->fimp->write != NULL ) ? f->mount->fimp->write(f, buf, len) : EX_NOTSUP;
 	}
-	if ( (f->oflags & O_ACCMODE) == O_RDONLY ) {
-		return EX_BADF;
-	}
-	if ( f->mode == FS_IFDIR ) {
-		return EX_ISDIR;
-	}
-	if ( len == 0 ) {
-		return 0;
-	}
-	return ( f->mount->fimp->write != NULL ) ? f->mount->fimp->write(f, buf, len) : EX_NOTSUP;
+	fd_put(f);
+	return r;
 }
 
 EXPORT D fs_lseek( INT fd, D offset, INT whence )
 {
-	T_FILE	*f = fd_to_file(fd);
+	T_FILE	*f = fd_get(fd);
 	D	pos;
 
 	if ( f == NULL ) {
 		return EX_BADF;
 	}
 	if ( GONE(f) ) {
+		fd_put(f);
 		return EX_IO;
+	}
+	if ( f->mode == FS_IFIFO ) {
+		fd_put(f);
+		return EX_INVAL;		/* ESPIPE */
 	}
 	switch ( whence ) {
 	  case SEEK_SET_:	pos = offset;				break;
 	  case SEEK_CUR_:	pos = (D)f->offset + offset;		break;
 	  case SEEK_END_:	pos = (D)f->size + offset;		break;
-	  default:		return EX_INVAL;
+	  default:		pos = EX_INVAL;				break;
 	}
-	if ( pos < 0 ) {
-		return EX_INVAL;
+	if ( pos >= 0 ) {
+		f->offset = (UD)pos;
+	} else if ( whence >= SEEK_SET_ && whence <= SEEK_END_ ) {
+		pos = EX_INVAL;
 	}
-	f->offset = (UD)pos;
+	fd_put(f);
 
 	return pos;
 }
@@ -708,7 +1040,16 @@ EXPORT ER fs_stat( CONST char *path, T_FSTAT *st )
 	if ( m == NULL ) {
 		return EX_NOENT;
 	}
-	er = ( m->fimp->stat != NULL ) ? m->fimp->stat(m, rest, st) : EX_NOTSUP;
+	if ( m->fimp->stat != NULL ) {
+		er = m->fimp->stat(m, rest, st);
+	} else if ( m->fimp->xstat != NULL ) {
+		T_FSXSTAT	x;
+
+		er = m->fimp->xstat(m, rest, &x);
+		if ( er >= EX_OK ) *st = x.st;
+	} else {
+		er = EX_NOTSUP;
+	}
 	if ( er >= EX_OK ) {
 		mount_obj(m, &st->dev);
 	}
@@ -719,37 +1060,109 @@ EXPORT ER fs_stat( CONST char *path, T_FSTAT *st )
 
 EXPORT ER fs_fstat( INT fd, T_FSTAT *st )
 {
-	T_FILE	*f = fd_to_file(fd);
+	T_FSXSTAT	x;
+	ER		er;
 
-	if ( f == NULL || st == NULL ) {
+	if ( st == NULL ) {
 		return EX_BADF;
 	}
-	if ( GONE(f) ) {
-		return EX_IO;
+	er = fs_fxstat(fd, &x);
+	if ( er >= EX_OK ) {
+		*st = x.st;
 	}
-	st->mode  = f->mode | FS_IRWXU;
-	st->size  = f->size;
-	st->mtime = 0;
-	st->ino   = f->ino;
-	mount_obj(f->mount, &st->dev);
+	return er;
+}
 
-	return EX_OK;
+/* What the layer fills in where a fimp said nothing */
+LOCAL void xstat_fill( T_FSXSTAT *x )
+{
+	if ( x->nlink == 0 ) x->nlink = 1;
+	if ( x->atime == 0 ) x->atime = x->st.mtime;
+	if ( x->ctime == 0 ) x->ctime = x->st.mtime;
+	if ( x->blksize == 0 ) x->blksize = 4096;
+}
+
+EXPORT ER fs_fxstat( INT fd, T_FSXSTAT *st )
+{
+	T_FILE	*f = fd_get(fd);
+	ER	er = EX_OK;
+
+	if ( f == NULL || st == NULL ) {
+		if ( f != NULL ) fd_put(f);
+		return EX_BADF;
+	}
+	knl_memset(st, 0, sizeof(*st));
+	if ( GONE(f) ) {
+		er = EX_IO;
+	} else if ( f->mount->fimp->fxstat != NULL ) {
+		er = f->mount->fimp->fxstat(f, st);
+	} else {
+		st->st.mode  = f->mode | FS_IRWXU;
+		st->st.size  = f->size;
+		st->st.mtime = 0;
+		st->st.ino   = f->ino;
+	}
+	if ( er >= EX_OK ) {
+		if ( f->mount != &fs_pipe_mount ) {
+			mount_obj(f->mount, &st->st.dev);
+		}
+		xstat_fill(st);
+	}
+	fd_put(f);
+
+	return er;
+}
+
+EXPORT ER fs_xstat( CONST char *path, T_FSXSTAT *st )
+{
+	CONST char	*rest;
+	T_MOUNT		*m;
+	ER		er;
+
+	if ( path == NULL || st == NULL ) {
+		return EX_INVAL;
+	}
+	m = mount_get(path, &rest);
+	if ( m == NULL ) {
+		return EX_NOENT;
+	}
+	knl_memset(st, 0, sizeof(*st));
+	if ( m->fimp->xstat != NULL ) {
+		er = m->fimp->xstat(m, rest, st);
+	} else if ( m->fimp->stat != NULL ) {
+		er = m->fimp->stat(m, rest, &st->st);
+		if ( er >= EX_OK ) {
+			st->st.mode = ( st->st.mode & FS_IFMT ) | ( ( st->st.mode & FS_IFDIR ) ? 0755 : 0644 );
+		}
+	} else {
+		er = EX_NOTSUP;
+	}
+	if ( er >= EX_OK ) {
+		mount_obj(m, &st->st.dev);
+		xstat_fill(st);
+	}
+	mount_put(m);
+
+	return er;
 }
 
 EXPORT ER fs_ftruncate( INT fd, UD len )
 {
-	T_FILE	*f = fd_to_file(fd);
+	T_FILE	*f = fd_get(fd);
+	ER	er;
 
 	if ( f == NULL ) {
 		return EX_BADF;
 	}
 	if ( (f->oflags & O_ACCMODE) == O_RDONLY ) {
-		return EX_BADF;
+		er = EX_BADF;
+	} else if ( GONE(f) ) {
+		er = EX_IO;
+	} else {
+		er = ( f->mount->fimp->truncate != NULL ) ? f->mount->fimp->truncate(f, len) : EX_NOTSUP;
 	}
-	if ( GONE(f) ) {
-		return EX_IO;
-	}
-	return ( f->mount->fimp->truncate != NULL ) ? f->mount->fimp->truncate(f, len) : EX_NOTSUP;
+	fd_put(f);
+	return er;
 }
 
 EXPORT ER fs_truncate( CONST char *path, UD len )
@@ -769,18 +1182,120 @@ EXPORT ER fs_truncate( CONST char *path, UD len )
 
 EXPORT INT fs_getdents( INT fd, T_DIRENT *buf, INT nent )
 {
-	T_FILE	*f = fd_to_file(fd);
+	T_FILE	*f = fd_get(fd);
+	INT	r;
 
 	if ( f == NULL || buf == NULL || nent <= 0 ) {
+		if ( f != NULL ) fd_put(f);
 		return EX_BADF;
 	}
 	if ( GONE(f) ) {
-		return EX_IO;
+		r = EX_IO;
+	} else if ( f->mode != FS_IFDIR ) {
+		r = EX_NOTDIR;
+	} else {
+		r = ( f->mount->fimp->getdents != NULL ) ? f->mount->fimp->getdents(f, buf, nent) : EX_NOTSUP;
 	}
-	if ( f->mode != FS_IFDIR ) {
-		return EX_NOTDIR;
+	fd_put(f);
+	return r;
+}
+
+EXPORT ER fs_ioctl( INT fd, UINT cmd, void *arg )
+{
+	T_FILE	*f = fd_get(fd);
+	ER	er;
+
+	if ( f == NULL ) {
+		return EX_BADF;
 	}
-	return ( f->mount->fimp->getdents != NULL ) ? f->mount->fimp->getdents(f, buf, nent) : EX_NOTSUP;
+	if ( GONE(f) ) {
+		er = EX_IO;
+	} else if ( f->mount->fimp->ioctl != NULL ) {
+		er = f->mount->fimp->ioctl(f, cmd, arg);
+	} else {
+		er = EX_NOTTY;
+	}
+	fd_put(f);
+	return er;
+}
+
+/* The flags of the open file: the access, O_APPEND and FS_O_NONBLOCK; only the last two are set */
+EXPORT INT fs_fcntl( INT fd, INT cmd, INT arg )
+{
+	T_FILE	*f = fd_get(fd);
+	INT	r = EX_INVAL;
+
+	if ( f == NULL ) {
+		return EX_BADF;
+	}
+	switch ( cmd ) {
+	  case FS_F_GETFL:
+		r = (INT)( f->oflags & ( O_ACCMODE | O_APPEND | FS_O_NONBLOCK ) );
+		break;
+	  case FS_F_SETFL:
+		f->oflags = ( f->oflags & ~(UINT)( O_APPEND | FS_O_NONBLOCK ) )
+			  | ( (UINT)arg & ( O_APPEND | FS_O_NONBLOCK ) );
+		r = EX_OK;
+		knl_fs_wake();
+		break;
+	  default:
+		break;
+	}
+	fd_put(f);
+	return r;
+}
+
+/*
+ * Which of the descriptors are ready: a fimp without poll is always
+ * ready for what was asked (a file on a volume never waits). Looked at
+ * again whenever knl_fs_wake says something changed, and at least every
+ * 100ms; a signal to be handed over stops the wait (EX_INTR).
+ */
+EXPORT INT fs_poll( T_FSPOLL *fds, INT n, TMO tmout )
+{
+	UD	start = 0, now;
+	INT	i, ready;
+
+	if ( n < 0 || ( n > 0 && fds == NULL ) ) {
+		return EX_INVAL;
+	}
+	(void)ts_get_mono(&start);
+	for ( ;; ) {
+		ready = 0;
+		for ( i = 0; i < n; i++ ) {
+			T_FILE	*f;
+			UINT	ev = fds[i].events | FS_POLL_ERR | FS_POLL_HUP;
+
+			fds[i].revents = 0;
+			if ( fds[i].fd < 0 ) continue;
+			f = fd_get(fds[i].fd);
+			if ( f == NULL ) {
+				fds[i].revents = FS_POLL_NVAL;
+			} else {
+				if ( GONE(f) ) {
+					fds[i].revents = FS_POLL_ERR;
+				} else if ( f->mount->fimp->poll != NULL ) {
+					fds[i].revents = f->mount->fimp->poll(f, ev) & ev;
+				} else {
+					fds[i].revents = fds[i].events & ( FS_POLL_IN | FS_POLL_OUT );
+				}
+				fd_put(f);
+			}
+			if ( fds[i].revents != 0 ) ready++;
+		}
+		if ( ready > 0 || tmout == TMO_POL ) {
+			return ready;
+		}
+		if ( tmout != TMO_FEVR ) {
+			(void)ts_get_mono(&now);
+			if ( (D)( now - start ) / 1000000 >= (D)tmout ) {
+				return 0;
+			}
+		}
+		if ( !knl_fs_wait_slice(100) ) {
+			return EX_INTR;
+		}
+	}
 }
 
 /* ---------------------------------------------------------------- names */
@@ -862,6 +1377,58 @@ EXPORT ER fs_rename( CONST char *from, CONST char *to )
 	return er;
 }
 
+/* A second name for a file, on the same mount */
+EXPORT ER fs_link( CONST char *from, CONST char *to )
+{
+	CONST char	*rfrom, *rto;
+	T_MOUNT		*mf, *mt;
+	ER		er;
+
+	if ( from == NULL || to == NULL ) {
+		return EX_INVAL;
+	}
+	mf = mount_get(from, &rfrom);
+	if ( mf == NULL ) {
+		return EX_NOENT;
+	}
+	mt = mount_get(to, &rto);
+	if ( mt == NULL ) {
+		er = EX_NOENT;
+	} else if ( mf != mt ) {
+		er = EX_NOTSUP;			/* EXDEV */
+	} else if ( mount_rdonly(mf) ) {
+		er = EX_ROFS;
+	} else {
+		er = ( mf->fimp->link != NULL ) ? mf->fimp->link(mf, rfrom, rto) : EX_PERM;
+	}
+	if ( mt != NULL ) mount_put(mt);
+	mount_put(mf);
+
+	return er;
+}
+
+EXPORT ER fs_chmod( CONST char *path, UINT mode )
+{
+	CONST char	*rest;
+	T_MOUNT		*m;
+	ER		er;
+
+	if ( path == NULL ) {
+		return EX_INVAL;
+	}
+	m = mount_get(path, &rest);
+	if ( m == NULL ) {
+		return EX_NOENT;
+	}
+	if ( mount_rdonly(m) ) {
+		er = EX_ROFS;
+	} else {
+		er = ( m->fimp->chmod != NULL ) ? m->fimp->chmod(m, rest, mode & 07777) : EX_OK;
+	}
+	mount_put(m);
+	return er;
+}
+
 EXPORT ER fs_statvfs( CONST char *path, T_FSSTAT *st )
 {
 	CONST char	*rest;
@@ -886,11 +1453,16 @@ EXPORT ER fs_sync( void )
 	INT	i;
 	ER	er = EX_OK, e;
 
-	for ( i = 0; i < FS_MAX_MOUNT; i++ ) {
-		T_MOUNT *m = &fs_mount[i];
+	for ( i = 0; ; i++ ) {
+		T_MOUNT *m;
 		BOOL	go;
 
 		tk_loc_mtx(fs_mtxid, TMO_FEVR);
+		if ( i >= fs_nmount ) {
+			tk_unl_mtx(fs_mtxid);
+			break;
+		}
+		m = fs_mount[i];
 		go = ( m->used && !m->gone && m->fimp->sync != NULL && !mount_rdonly(m) );
 		if ( go ) m->busy++;
 		tk_unl_mtx(fs_mtxid);
@@ -918,8 +1490,8 @@ EXPORT INT fs_mounts( T_FSMNT *buf, INT max )
 		return EX_INVAL;
 	}
 	tk_loc_mtx(fs_mtxid, TMO_FEVR);
-	for ( i = 0; i < FS_MAX_MOUNT; i++ ) {
-		T_MOUNT	*m = &fs_mount[i];
+	for ( i = 0; i < fs_nmount; i++ ) {
+		T_MOUNT	*m = fs_mount[i];
 
 		if ( !m->used || m->gone ) continue;
 		if ( n < max ) {
@@ -964,6 +1536,25 @@ EXPORT BOOL knl_fs_media_path( CONST char *path )
 		return FALSE;
 	}
 	return TRUE;
+}
+
+/* How many entries of the mount table have been made, and how many are in use now */
+EXPORT INT knl_fs_slots( INT *p_used )
+{
+	INT	i, n, used = 0;
+
+	if ( fs_mtxid <= 0 ) {
+		if ( p_used != NULL ) *p_used = 0;
+		return 0;
+	}
+	tk_loc_mtx(fs_mtxid, TMO_FEVR);
+	n = fs_nmount;
+	for ( i = 0; i < n; i++ ) {
+		if ( fs_mount[i]->used ) used++;
+	}
+	tk_unl_mtx(fs_mtxid);
+	if ( p_used != NULL ) *p_used = used;
+	return n;
 }
 
 #ifdef USE_KTEST

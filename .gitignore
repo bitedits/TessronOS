@@ -44,3 +44,6 @@ etc/font/*
 
 # Claude Code の作業木
 .claude/
+
+# 公開しない設計書・作業のチェックリスト・開発日記
+docs/private/

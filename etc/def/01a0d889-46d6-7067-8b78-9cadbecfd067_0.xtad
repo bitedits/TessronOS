@@ -1,0 +1,18 @@
+<tad version="1.0" encoding="UTF-8" filename="基本表計算の文字色">
+<document>
+<p>基本表計算の文字色</p>
+<p>基本表計算のセルの文字色。メニューの定義。</p>
+</document>
+<menu>
+<item code="colour" value="0">黒色</item>
+<item code="colour" value="255">青色</item>
+<item code="colour" value="15597568">赤色</item>
+<item code="colour" value="16738740">ピンク色</item>
+<item code="colour" value="16747520">橙色</item>
+<item code="colour" value="32768">緑色</item>
+<item code="colour" value="10145074">黄緑色</item>
+<item code="colour" value="49151">水色</item>
+<item code="colour" value="16776960">黄色</item>
+<item code="colour" value="16777215">白色</item>
+</menu>
+</tad>

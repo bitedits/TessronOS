@@ -1,0 +1,31 @@
+<tad version="1.0" encoding="UTF-8" filename="強制終了のデータボックス">
+<document>
+<p>強制終了のデータボックス</p>
+<p>強制終了の窓のパネルと、デスクトップの立ち上げ直しを尋ねるパネルの定義。窓は動いているプロセスを一覧に並べ、選んだものの状態を下に示す。既定の押しボタンは〈取消し〉。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,560,340" title="強制終了" kind="bare">
+<text x="12" y="26">終わらせるプログラムを選んでください：</text>
+<list num="10" rect="12,34,548,190" value="1"/>
+<text x="12" y="220">状態：</text>
+<box num="21" rect="104,198,548,226" off="true"/>
+<text x="12" y="254">ウインドウ：</text>
+<box num="22" rect="104,232,196,260" off="true"/>
+<text x="212" y="254">ＣＰＵ時間：</text>
+<box num="23" rect="312,232,412,260" off="true"/>
+<text x="424" y="254">メモリ：</text>
+<box num="24" rect="480,232,548,260" off="true"/>
+<box num="25" rect="12,268,548,296" off="true"/>
+<button num="31" rect="12,308,252,332">デスクトップを立ち上げ直す</button>
+<button num="32" rect="352,308,448,332">強制終了</button>
+<button num="33" rect="456,308,548,332" emph="true">取消し</button>
+</panel>
+<panel num="10" rect="0,0,480,150" title="強制終了" kind="warn">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<text num="3" x="24" y="84"> </text>
+<button num="103" rect="232,114,360,138">立ち上げ直す</button>
+<button num="102" rect="368,114,456,138" answer="cancel" emph="true">取消し</button>
+</panel>
+</databox>
+</tad>

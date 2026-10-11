@@ -15,8 +15,9 @@
  *	are written against; the library turns them into the stack's.
  *
  *	A socket is a descriptor of its own range (from TS_SOCK_FD_BASE), so
- *	read, write, close and poll reach it as a file's would. IPv4 streams
- *	and datagrams only: AF_INET6 and AF_UNIX are refused (EAFNOSUPPORT).
+ *	read, write, close and poll reach it as a file's would. Streams and
+ *	datagrams of IPv4 (AF_INET) and IPv6 (AF_INET6); AF_UNIX is refused
+ *	(EAFNOSUPPORT).
  */
 
 #ifndef __TSPOSIX_SYS_SOCKET_H__

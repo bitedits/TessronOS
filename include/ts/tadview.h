@@ -177,10 +177,20 @@ typedef struct t_tvdoc {
 	INT		columns, colsp;
 
 	/*
+	 * 縦書き: the document says its lines run down (<text direction="2">,
+	 * the 文字方向 of TAD). Each line then runs from the top down, the
+	 * lines follow one another from the right to the left, and a page
+	 * is as wide as the paper rather than as tall (design 17.20).
+	 */
+	BOOL		vert;
+
+	/*
 	 * How whoever shows it wants it shown; the record does not say.
 	 * With page_h set it is laid on pages that tall, each inside the
 	 * margins, a page break going on to the next; without, it runs on
-	 * in one length with no margins, as a window shows it. 'detail'
+	 * in one length with no margins, as a window shows it. Written
+	 * downwards, page_h is the paper's width and the pages follow one
+	 * another to the left. 'detail'
 	 * draws the marks of breaks, tabs, pages and notes; 'show_hidden'
 	 * shows the links that are marked hidden.
 	 */
@@ -297,7 +307,7 @@ typedef struct {
 #define TV_MAX_SHAPE	256
 #define TV_MAX_LTYPE	16		/* kinds of line a figure defines */
 #define TV_DASH_MAX	16
-#define TV_MAX_DOC	32
+#define TV_MAX_DOC	TV_MAX_SHAPE	/* each piece of text is a shape too: a page of a table's cells is one each */
 
 typedef struct t_tvfig {
 	T_DPRECT	view, draw;
@@ -513,7 +523,27 @@ typedef struct {
 	 */
 	ER	(*icon)( CONST T_VOBJ *v, CONST UW **p_px, INT *p_w, INT *p_h,
 			 void *arg );
+
+	/*
+	 * Where the object is (design 7.6): TV_ST_GONE when it cannot be
+	 * found, its disk not being attached -- the link is drawn as a 虚身,
+	 * pale, and opened shows nothing -- and TV_ST_OTHER when it is on
+	 * another volume than the object being drawn (tv_draw_host), the
+	 * link marked in its corner. NULL, or 0, for neither.
+	 */
+	UINT	(*state)( CONST T_VOBJ *v, void *arg );
 } T_TVSRC;
+
+#define TV_ST_GONE	0x0001
+#define TV_ST_OTHER	0x0002
+
+/*
+ * The object whose window is being drawn, by the task drawing it: the
+ * links in it to objects of other volumes are marked. NULL when done.
+ * Another task drawing meanwhile is not taken for it.
+ */
+IMPORT void tv_draw_host( CONST TS_UUID *id );
+IMPORT BOOL tv_host_of( TS_UUID *p_id );
 
 /*
  * A picture the record names, laid into a box at the box's size. The
@@ -575,6 +605,40 @@ IMPORT INT tv_doc_draw( INT gid, CONST T_TVDOC *d, CONST T_DPRECT *r,
 			INT scroll_y, CONST T_TAD *src, UW paper );
 
 /*
+ * A document written downwards (T_TVDOC.vert) is drawn into the same
+ * box from its right edge: its lines run from the box's top to its
+ * bottom, the first at the right, and the scroll is how far to the left
+ * the text has been wound -- how much of it has gone past the right edge.
+ * What comes back is how wide it came to. Every place these calls take
+ * and give -- a point asked about, the box of a place, the box of a link
+ * -- is in the box's own coordinates either way, so a caller of the
+ * horizontal kind needs to know only which way the scroll goes. The box
+ * of a place (tv_doc_caret_box) is then as wide as its line and two
+ * pixels tall.
+ */
+
+/*
+ * 印刷: the pages of a document laid on its paper, one sheet at a time,
+ * as a printer or a file of pages is given them. tv_doc_pages says how
+ * many sheets the text takes on the paper the document names (A4 when it
+ * names none); tv_doc_draw_page draws sheet 'pg', counting from 0, into
+ * a box as large as the paper -- the paper, the overlays laid on it (a
+ * figure laid on every sheet, such as the squares of 原稿用紙, then the
+ * text, then a header and a footer) -- in the paper's own pixels, a
+ * point to a pixel. The document need not be laid on pages already.
+ */
+IMPORT INT tv_doc_pages( CONST T_TVDOC *d, CONST T_TAD *src );
+IMPORT ER  tv_doc_draw_page( INT gid, CONST T_TVDOC *d, INT pg,
+			     CONST T_DPRECT *sheet, CONST T_TAD *src, UW paper );
+
+/*
+ * Whether a document has an overlay that is laid over the whole sheet --
+ * a figure, such as the squares of 原稿用紙 -- put on by <docoverlay>.
+ * Such a document is best shown on its paper.
+ */
+IMPORT BOOL tv_doc_has_sheet( CONST T_TVDOC *d );
+
+/*
  * A record of xmlTAD drawn into a box as whatever it is -- a document
  * set out from the top, a figure from its corner -- on the work area's
  * colour. This is what draws a window whose drawing record is written
@@ -622,6 +686,8 @@ IMPORT ER  tv_fig_size( CONST T_TVFIG *f, INT *p_w, INT *p_h );
 IMPORT void tv_doc_detail( BOOL on );
 /* What documents are drawn magnified by, in eighths, until set again */
 IMPORT void tv_doc_zoom( INT z );
+/* Whether documents are laid on their paper (TRUE) or over what is there, until set again */
+IMPORT void tv_doc_ground( BOOL on );
 IMPORT ER  tv_doc_caret_at( CONST T_TVDOC *d, CONST T_DPRECT *r, INT scroll_y,
 			    CONST T_TAD *src, INT x, INT y, INT *p_para,
 			    INT *p_pos );

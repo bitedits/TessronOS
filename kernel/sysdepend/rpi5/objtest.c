@@ -179,7 +179,7 @@ LOCAL void check_kernel_pins( void )
 
 	if ( knl_obgpio_uuid(0, &a) >= E_OK ) e1 = put(&a, OB_GPIO_PINS, "5 out 1 -\n");
 	if ( knl_obgpio_uuid(3, &b) >= E_OK ) e2 = put(&b, OB_GPIO_PINS, "32 out 0 -\n");
-	tm_sprintf((UB *)s, (UB *)"card detect %d, PHY reset %d", (INT)e1, (INT)e2);
+	tm_sprintf((UB *)s, (UB *)"always-on pin 5 %d, PHY reset %d", (INT)e1, (INT)e2);
 	note("kernel pins", e1 == E_BUSY && e2 == E_BUSY, s);
 }
 

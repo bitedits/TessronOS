@@ -133,6 +133,11 @@ EXPORT void ed_model( DTWIN *d )
 			d->doc->page_h = !d->paper_frame ? 0
 				       : ( d->doc->paper_h > 0 ) ? d->doc->paper_h
 				       : DT_PAPER_H;
+			if ( d->paper_frame && d->doc->vert ) {
+				/* 縦書き: the pages follow one another across */
+				d->doc->page_h = ( d->doc->paper_w > 0 ) ? d->doc->paper_w
+					       : DT_PAPER_W;
+			}
 		}
 	} else {
 		tv_fig(d->rec, &d->fig);
@@ -328,7 +333,7 @@ LOCAL void after( DTWIN *d )
 	ed_model(d);
 	d->dirty = TRUE;
 	dt_draw_all();
-	wm_composite();
+	wm_update();
 }
 
 /* One stack's newest record put back, and the present one kept on the other */
@@ -556,10 +561,16 @@ LOCAL INT handle_at( DTWIN *d, INT x, INT y )
 
 /* ---------------------------------------------------------------- changes */
 
-EXPORT void ed_delete( DTWIN *d )
+/*
+ * The links and shapes taken, deleted. 'device': a disk's link deleted
+ * from the first window takes its disk away (dt_disk_on_delete); one
+ * that cannot be taken away now stays, not taken. Cutting moves a link
+ * to the tray rather than deleting it, and leaves the disk as it is.
+ */
+LOCAL void del_picked( DTWIN *d, BOOL device )
 {
 	TS_UUID	*gone;
-	INT	i, n = 0;
+	INT	i, n = 0, np;
 	T_VOBJ	v;
 
 	if ( d->fig == NULL || d->npick == 0 || d->sealed ) {
@@ -570,9 +581,15 @@ EXPORT void ed_delete( DTWIN *d )
 		return;
 	}
 	/* the identities first: deleting one moves the others' numbers */
-	for ( i = 0; i < d->fig->nsh && n < d->npick; i++ ) {
+	np = d->npick;
+	for ( i = 0; i < d->fig->nsh && n < np; i++ ) {
 		if ( d->pick[i] != 0 && is_link(d, i) && !is_protected(d, i)
 		  && tad_lnk_get(d->rec, d->fig->sh[i].link, &v) >= E_OK ) {
+			if ( device && d == dt_first_win() && !dt_disk_on_delete(d, &v) ) {
+				d->pick[i] = 0;
+				d->npick--;
+				continue;
+			}
 			gone[n++] = v.vobjid;
 		}
 	}
@@ -586,6 +603,11 @@ EXPORT void ed_delete( DTWIN *d )
 		after(d);
 	}
 	Kfree(gone);
+}
+
+EXPORT void ed_delete( DTWIN *d )
+{
+	del_picked(d, TRUE);
 }
 
 /* A set's name: what it holds and how many */
@@ -657,7 +679,7 @@ EXPORT void ed_cut( DTWIN *d )
 		}
 	}
 	ed_copy(d);
-	ed_delete(d);
+	del_picked(d, FALSE);
 }
 
 /*
@@ -699,6 +721,7 @@ EXPORT void ed_paste( DTWIN *d, BOOL take )
 	first = tad_lnk_count(d->rec);
 	ed_pasted++;
 	off = ED_STEP * ed_pasted;
+	(void)dt_tray_pictures(&d->id, d->rec, frag);	/* the pictures the set carries, beside the record */
 	(void)df_paste_frag(d, frag, off);
 	for ( i = 0; i < nlinks; i++ ) {
 		if ( tad_lnk_get(frag, i, &v) < E_OK ) {
@@ -1438,7 +1461,7 @@ EXPORT BOOL ed_press( DTWIN *d, INT x, INT y, BOOL add, UD when )
 		hold_y0 = hold_py = y;
 		hold_moved = FALSE;
 		band_shown = FALSE;
-		wm_composite();
+		wm_update();
 		return TRUE;
 	}
 
@@ -1456,7 +1479,7 @@ EXPORT BOOL ed_press( DTWIN *d, INT x, INT y, BOOL add, UD when )
 		hold_y0 = hold_py = y;
 		hold_moved = FALSE;
 		band_shown = FALSE;
-		wm_composite();
+		wm_update();
 		return TRUE;
 	}
 
@@ -1656,6 +1679,56 @@ LOCAL void copy_name( CONST T_VOBJ *v, UB *out, INT max )
 		out[n + k] = tail[k];
 	}
 	out[n + k] = 0;
+}
+
+/*
+ * The same, let go over a program's window that takes links (a
+ * process's): the name asked for over that window, the object copied
+ * -- or made from the template carried out of the 原紙箱 -- and a link
+ * to it dropped there, as links carried out of a figure are. FALSE
+ * when the window takes no links.
+ */
+LOCAL BOOL copy_drop( DTWIN *d, CONST T_VOBJ *v, INT sx, INT sy )
+{
+	UB		start[WM_LABEL_MAX], name[WM_LABEL_MAX];
+	CONST char	*base = dt_base_name(&v->target);
+	TS_UUID		w, nid;
+	DTWIN		*host;
+	T_VOBJ		c;
+	ID		taker = 0;
+	INT		wid = wm_at(sx, sy), k;
+
+	if ( wid <= 0 || dt_win_of(wid) != NULL || wm_obj_uuid(wid, &w) < E_OK
+	  || !knl_ob_taker(&w, OB_E_DROP, &taker) ) {
+		return FALSE;
+	}
+	if ( base != NULL ) {
+		for ( k = 0; base[k] != 0 && k < WM_LABEL_MAX - 1; k++ ) start[k] = (UB)base[k];
+		start[k] = 0;
+	} else {
+		copy_name(v, start, WM_LABEL_MAX);
+	}
+	host = dt_host_of(&w);
+	wm_obj_quiet(TRUE);		/* the keys that answer are the panel's, not the program's */
+	k = ( host != NULL && dt_ask_name(host, "新しい実身の名称を入力してください", start, name, WM_LABEL_MAX) );
+	wm_obj_quiet(FALSE);
+	if ( !k ) {
+		return TRUE;
+	}
+	if ( om_store_copy(&v->target, name, TRUE, &nid) < E_OK ) {
+		(void)wm_msg_put("実身を作れませんでした");
+		return TRUE;
+	}
+	if ( base != NULL ) {
+		(void)om_store_set_maker(&nid);	/* made by the user, from the template */
+	}
+	c = *v;
+	c.target = nid;
+	knl_memset(&c.vobjid, 0, sizeof(c.vobjid));
+	c.name[0] = 0;
+	c.dlen = 0;
+	(void)dt_drop_links(d, sx, sy, &c, 1);
+	return TRUE;
 }
 
 /*
@@ -1890,13 +1963,13 @@ EXPORT void ed_release( INT sx, INT sy )
 		hold_which = -1;
 		hold_moved = FALSE;
 		band_shown = FALSE;
-		wm_composite();		/* the outline's last place, taken off */
+		wm_update();		/* the outline's last place, taken off */
 		if ( how == HOLD_TWICE ) {
 			dt_open_vobj(d, &v2);
-		} else {
+		} else if ( t != NULL || !copy_drop(d, &v2, sx, sy) ) {
 			make_copy(d, t, &v2);
 		}
-		wm_composite();
+		wm_update();
 		return;
 	}
 	if ( t == NULL && hold_moved && hold_how == HOLD_MOVE && !d->sealed
@@ -1907,7 +1980,7 @@ EXPORT void ed_release( INT sx, INT sy )
 		hold_which = -1;
 		hold_moved = FALSE;
 		band_shown = FALSE;
-		wm_composite();
+		wm_update();
 		return;
 	}
 	if ( d->sealed ) {
@@ -1922,12 +1995,20 @@ EXPORT void ed_release( INT sx, INT sy )
 				 &v) >= E_OK ) {
 			hold_d = NULL;
 			hold_how = HOLD_NONE;
-			wm_composite();
+			wm_update();
 			if ( d->tool != DT_TOOL_NONE ) {
 				dt_tool_carry(d, t, &v);
 			} else {
 				make_copy(d, t, &v);
 			}
+		} else if ( hold_moved && hold_how == HOLD_MOVE && t == NULL && d->tool == DT_TOOL_NONE
+			 && is_link(d, hold_which)
+			 && tad_lnk_get(d->rec, d->fig->sh[hold_which].link, &v) >= E_OK ) {
+			/* over a program's window: the new object's link dropped there */
+			hold_d = NULL;
+			hold_how = HOLD_NONE;
+			wm_update();
+			(void)copy_drop(d, &v, sx, sy);
 		}
 		dt_draw(d);
 	} else if ( hold_moved && hold_how == HOLD_MOVE && t != NULL && t != d
@@ -1991,7 +2072,7 @@ EXPORT void ed_release( INT sx, INT sy )
 				}
 				Kfree(keep);
 				dt_draw(d);
-				wm_composite();
+				wm_update();
 			}
 			break;
 
@@ -2058,5 +2139,5 @@ EXPORT void ed_release( INT sx, INT sy )
 	hold_which = -1;
 	hold_moved = FALSE;
 	band_shown = FALSE;
-	wm_composite();
+	wm_update();
 }

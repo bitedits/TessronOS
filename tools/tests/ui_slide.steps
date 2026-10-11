@@ -1,0 +1,55 @@
+# スライド (design 11.11), for tools/ui_run.py: the sample of TADjs Desktop
+# (実時間TADデモ) shown a slide at a time, to the end and closed. The menu of
+# the second button opens with the item chosen last on the pointer's row,
+# the rows 20 pixels apart: 閉じる, line, 次へ進む, 前に戻る, ジャンプ, line,
+# 再表示, 背景色変更, line, 印刷..., ウインドウ, 小物, 実行.
+open 72c584f2-af6c-45cb-8dfc-3f181d13cd0a
+expect slide: 1 of 3
+wait 300
+shot slide_1
+click 640 400
+expect slide: 2 of 3
+wait 300
+shot slide_2
+# the menu, put away with Escape; then ジャンプ (Ctrl+J) taken with Enter: the slide it was on
+click 640 400 1
+expect desktop: menu
+wait 500
+shot slide_menu
+key 29
+wait 300
+key 0D 01
+wait 500
+shot slide_jump
+key 28
+expect slide: 2 of 3
+wait 300
+# 前に戻る of the menu (閉じる under the pointer, 前に戻る three rows below)
+click 640 400 1
+expect desktop: menu
+wait 300
+click 648 460
+expect desktop: chosen slide.prev
+expect slide: 1 of 3
+wait 300
+# 次へ進む (前に戻る under the pointer, 次へ進む the row above), twice
+click 640 400 1
+wait 300
+click 648 380
+expect slide: 2 of 3
+wait 300
+click 640 400 1
+wait 300
+click 648 400
+expect slide: 3 of 3
+wait 300
+shot slide_3
+key 4F
+wait 300
+shot slide_end
+click 640 400
+expect slide: closed
+wait 300
+shot slide_closed
+# nothing it did was refused for want of a right
+absent !OACV!

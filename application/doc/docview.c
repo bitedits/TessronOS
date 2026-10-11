@@ -259,7 +259,74 @@ typedef struct {
 	BOOL		mark_asking;
 	INT		mark_x, mark_y;
 	T_TVMARK	mark;
+
+	/*
+	 * 縦書き. The walk is the same either way and works in places of
+	 * its own: x along a line, y across the lines, as a text written
+	 * across has them. Written downwards, a place (x, y) of the walk is
+	 * the point (vr - 1 - y, x) of the box -- x runs down the box, y runs
+	 * to the left from its right edge 'vr' -- and every rectangle the
+	 * walk puts down or answers is turned so on its way out. Only the
+	 * letters themselves are drawn another way: down the line, in their
+	 * vertical forms.
+	 */
+	BOOL		vert;
+	INT		vr;
 } LAY;
+
+/* A rectangle of the walk's places, as it stands in the box */
+LOCAL void ph_rect( CONST LAY *l, T_DPRECT *rc )
+{
+	T_DPRECT	o = *rc;
+
+	if ( !l->vert ) {
+		return;
+	}
+	rc->left = l->vr - o.bottom;
+	rc->right = l->vr - o.top;
+	rc->top = o.left;
+	rc->bottom = o.right;
+}
+
+/* A point of the box, as a place of the walk */
+LOCAL void lg_point( CONST LAY *l, INT px, INT py, INT *p_x, INT *p_y )
+{
+	if ( !l->vert ) {
+		*p_x = px;
+		*p_y = py;
+		return;
+	}
+	*p_x = py;
+	*p_y = l->vr - 1 - px;
+}
+
+/* A line between two places of the walk */
+LOCAL void lg_line( CONST LAY *l, INT x0, INT y0, INT x1, INT y1, UW col )
+{
+	if ( l->vert ) {
+		dp_line(l->gid, l->vr - 1 - y0, x0, l->vr - 1 - y1, x1, col);
+	} else {
+		dp_line(l->gid, x0, y0, x1, y1, col);
+	}
+}
+
+/* A rectangle of the walk's places filled */
+LOCAL void lg_fill( CONST LAY *l, CONST T_DPRECT *rc, UW col )
+{
+	T_DPRECT	o = *rc;
+
+	ph_rect(l, &o);
+	dp_fill_rect(l->gid, &o, col);
+}
+
+LOCAL void lg_pixel( CONST LAY *l, INT x, INT y, UW col )
+{
+	if ( l->vert ) {
+		dp_put_pixel(l->gid, l->vr - 1 - y, x, col);
+	} else {
+		dp_put_pixel(l->gid, x, y, col);
+	}
+}
 
 #define LM_PLAIN	0		/* drawing, measuring, or finding a link */
 #define LM_CARET_AT	1		/* the place under a point */
@@ -285,12 +352,25 @@ EXPORT void tv_doc_zoom( INT z )
 	dv_zoom = ( z > 0 ) ? z : 8;
 }
 
+/*
+ * Whether a document is laid on its paper. Off, its letters go over
+ * whatever is there already: a text that is drawn by itself onto a
+ * picture of the rest (the player of 実時間制御TAD, design 19.5).
+ */
+LOCAL BOOL	dv_ground = TRUE;
+
+EXPORT void tv_doc_ground( BOOL on )
+{
+	dv_ground = on;
+}
+
 #define DZ(v)	( ( dv_zoom == 8 ) ? (v) : (v) * dv_zoom / 8 )
 
 LOCAL INT num_text( INT n, UB *out );
 LOCAL INT page_no( CONST T_TVRUN *r, INT pg );
 LOCAL INT var_text( CONST LAY *l, CONST T_TVRUN *r, UB *out );
 LOCAL void overlays( LAY *l, CONST T_TVDOC *d, INT h );
+LOCAL void sheets( LAY *l, CONST T_TVDOC *d, INT h );
 
 /* 詳細: the flags and rulers settings are shown by */
 #define FLAG_W		20		/* a flag in a line: its box and its point */
@@ -333,6 +413,14 @@ LOCAL void run_font( LAY *l, CONST T_TVRUN *r )
 	}
 	if ( ( r->style & TV_ST_BOLD ) != 0 )   st |= FN_ST_BOLD;
 	if ( ( r->style & TV_ST_ITALIC ) != 0 ) st |= FN_ST_ITALIC;
+	/*
+	 * Down the line the letters take their vertical forms, but not
+	 * those turned (回転), which are the letters across turned, nor
+	 * those set across in one box (縦中横).
+	 */
+	if ( l->vert && r->turn == 0 && ( r->style & TV_ST_COMB ) == 0 ) {
+		st |= FN_ST_VERT;
+	}
 	l->fid = fid;
 	if ( fid <= 0 ) {
 		return;
@@ -417,6 +505,10 @@ LOCAL INT text_w( LAY *l, CONST T_TVRUN *r, CONST UB *s, INT n )
 	if ( n <= 0 || l->fid <= 0 ) {
 		return 0;
 	}
+	/* 縦中横: whatever it holds, one box down the line */
+	if ( l->vert && ( r->style & TV_ST_COMB ) != 0 ) {
+		return run_px(r) + run_space(r);
+	}
 	if ( n >= (INT)sizeof(buf) ) {
 		b = (UB *)Kmalloc((SZ)n + 1);
 		if ( b == NULL ) {
@@ -431,7 +523,7 @@ LOCAL INT text_w( LAY *l, CONST T_TVRUN *r, CONST UB *s, INT n )
 	}
 	b[n] = 0;
 	turn_on(l, r);
-	w = fn_width(l->fid, b);
+	w = l->vert ? fn_vwidth(l->fid, b) : fn_width(l->fid, b);
 	turn_off(l, r);
 	if ( b != buf ) {
 		Kfree(b);
@@ -443,6 +535,41 @@ LOCAL INT text_w( LAY *l, CONST T_TVRUN *r, CONST UB *s, INT n )
 	return w + chars * run_space(r);
 }
 
+/*
+ * 縦中横: the letters of a run set across in one box down the line, the
+ * box as tall as the letters' size and its middle on the line's middle.
+ * Letters wider together than the box are drawn narrower to fit it.
+ */
+LOCAL void comb_put( LAY *l, CONST T_TVRUN *r, CONST UB *s, INT n, INT x,
+		     INT base, UW col )
+{
+	UB	buf[64];
+	INT	i, em = run_px(r), tw;
+	UINT	st = 0;
+	T_FNMET	met;
+
+	for ( i = 0; i < n && i < (INT)sizeof(buf) - 1; i++ ) {
+		buf[i] = s[i];
+	}
+	buf[i] = 0;
+	if ( ( r->style & TV_ST_BOLD ) != 0 )   st |= FN_ST_BOLD;
+	if ( ( r->style & TV_ST_ITALIC ) != 0 ) st |= FN_ST_ITALIC;
+	tw = fn_width(l->fid, buf);
+	if ( tw > em && tw > 0 ) {
+		INT	xpx = em * em / tw;
+
+		(void)fn_set_style(l->fid, st, ( xpx > 0 ) ? xpx : 1);
+		l->set_fid = 0;			/* the face is not as it was set */
+		tw = fn_width(l->fid, buf);
+	}
+	if ( fn_metrics(l->fid, &met) < E_OK ) {
+		met.ascent = em;
+		met.descent = em / 4;
+	}
+	(void)fn_draw(l->gid, l->fid, l->vr - 1 - base - tw / 2,
+		      x + em / 2 + ( met.ascent - met.descent ) / 2, buf, col);
+}
+
 /* Text put down in the face now set: each letter, and the spacing after it */
 LOCAL void text_put( LAY *l, CONST T_TVRUN *r, CONST UB *s, INT n, INT x,
 		     INT base, UW col )
@@ -451,6 +578,28 @@ LOCAL void text_put( LAY *l, CONST T_TVRUN *r, CONST UB *s, INT n, INT x,
 	INT	i, sp = run_space(r);
 
 	if ( n <= 0 || l->fid <= 0 || l->gid < 0 ) {
+		return;
+	}
+	if ( l->vert && ( r->style & TV_ST_COMB ) != 0 ) {
+		comb_put(l, r, s, n, x, base, col);
+		return;
+	}
+	if ( l->vert ) {
+		/* down the line, letter by letter, the spacing after each */
+		turn_on(l, r);
+		for ( i = 0; i < n; ) {
+			INT	k = 1;
+
+			while ( i + k < n && k < (INT)sizeof(buf) - 1
+			     && ( s[i + k] & 0xC0U ) == 0x80U ) {
+				k++;
+			}
+			knl_memcpy(buf, s + i, (SZ)k);
+			buf[k] = 0;
+			x += fn_vdraw(l->gid, l->fid, l->vr - 1 - base, x, buf, col) + sp;
+			i += k;
+		}
+		turn_off(l, r);
 		return;
 	}
 	turn_on(l, r);
@@ -589,6 +738,7 @@ LOCAL void piece( LAY *l, CONST T_TVRUN *r, INT pi, INT pos, INT units,
 						 : x + w;
 			rc.top = top;
 			rc.bottom = top + h;
+			ph_rect(l, &rc);
 			dp_set_mode(l->gid, DP_MODE_XOR);
 			dp_fill_rect(l->gid, &rc, 0x00FFFFFFU);
 			dp_set_mode(l->gid, DP_MODE_COPY);
@@ -830,7 +980,11 @@ LOCAL INT gather( LAY *l, CONST T_TVDOC *d, CONST T_TVPARA *p, ITEM *it, INT max
 		run_font(l, r);
 		asc = px;
 		desc = px / 4;
-		if ( l->fid > 0 && fn_metrics(l->fid, &met) >= E_OK ) {
+		if ( l->vert ) {
+			/* down the line a letter's box is centred on the line */
+			asc = px - px / 2;
+			desc = px / 2;
+		} else if ( l->fid > 0 && fn_metrics(l->fid, &met) >= E_OK ) {
 			asc = met.ascent;
 			desc = met.descent;
 		}
@@ -887,7 +1041,7 @@ LOCAL INT gather( LAY *l, CONST T_TVDOC *d, CONST T_TVPARA *p, ITEM *it, INT max
 				t->w = text_w(l, r, r->text + i, j - i);
 				t->asc = asc;
 				t->desc = desc;
-				if ( r->turn != 0 ) {
+				if ( r->turn != 0 && !l->vert ) {
 					/* the letter's box as it is turned, and what
 					   stands over and under it as before */
 					turned_extent(l, r, r->text + i, j - i, &t->asc, &t->desc);
@@ -917,6 +1071,16 @@ LOCAL INT gather( LAY *l, CONST T_TVDOC *d, CONST T_TVPARA *p, ITEM *it, INT max
 			it[n].fpos = fpos;  it[n].units = 1;
 			it[n].w = w + 2;
 			it[n].asc = h;  it[n].desc = 0;  it[n].shift = 0;
+			if ( l->vert ) {
+				/*
+				 * Down the line it stays upright, as it is
+				 * across, and stands centred on the line: its
+				 * height goes down the line, its width across.
+				 */
+				it[n].w = h + 2;
+				it[n].asc = w - w / 2;
+				it[n].desc = w / 2;
+			}
 			it[n].flags = IT_BREAK_OK;
 			n++;
 			fpos++;
@@ -1013,6 +1177,8 @@ LOCAL void draw_text_item( LAY *l, CONST T_TVRUN *r, CONST ITEM *t, INT x,
 	CONST UB	*s = r->text + t->off;
 	UW		col = r->colour;
 	INT		px = run_px(r), b = base + t->shift;
+	INT		up = l->vert ? px - px / 2 : px;	/* the letters' box over */
+	INT		dn = l->vert ? px / 2 : px / 4;		/* and under the base line */
 	T_DPRECT	rc;
 
 	rc.left = x;
@@ -1020,7 +1186,7 @@ LOCAL void draw_text_item( LAY *l, CONST T_TVRUN *r, CONST ITEM *t, INT x,
 	rc.top = top;
 	rc.bottom = top + h;
 	if ( r->back != TAD_COL_NONE ) {
-		dp_fill_rect(l->gid, &rc, r->back);
+		lg_fill(l, &rc, r->back);
 	}
 	if ( ( r->style & TV_ST_MESH ) != 0 ) {
 		/* 網掛: every other pixel of the ground in grey */
@@ -1028,12 +1194,12 @@ LOCAL void draw_text_item( LAY *l, CONST T_TVRUN *r, CONST ITEM *t, INT x,
 
 		for ( yy = rc.top; yy < rc.bottom; yy++ ) {
 			for ( xx = rc.left + ( yy & 1 ); xx < rc.right; xx += 2 ) {
-				dp_put_pixel(l->gid, xx, yy, 0x00A0A0A0U);
+				lg_pixel(l, xx, yy, 0x00A0A0A0U);
 			}
 		}
 	}
 	if ( ( r->style & TV_ST_INVERT ) != 0 ) {
-		dp_fill_rect(l->gid, &rc, col);
+		lg_fill(l, &rc, col);
 		col = ( col == 0x00FFFFFFU ) ? 0x00000000U : 0x00FFFFFFU;
 	}
 	if ( ( r->style & TV_ST_SHADOW ) != 0 ) {
@@ -1054,18 +1220,26 @@ LOCAL void draw_text_item( LAY *l, CONST T_TVRUN *r, CONST ITEM *t, INT x,
 	} else {
 		text_put(l, r, s, t->len, x, b, col);
 	}
+	/*
+	 * The lines: across a line under and over the letters; down a line
+	 * the side under is the left, the side over the right.
+	 */
 	if ( ( r->style & TV_ST_UNDER ) != 0 ) {
-		dp_line(l->gid, x, b + 2, x + t->w - 1, b + 2, col);
+		INT	u = l->vert ? b + dn + 1 : b + 2;
+
+		lg_line(l, x, u, x + t->w - 1, u, col);
 	}
 	if ( ( r->style & TV_ST_OVER ) != 0 ) {
-		dp_line(l->gid, x, b - px, x + t->w - 1, b - px, col);
+		lg_line(l, x, b - up, x + t->w - 1, b - up, col);
 	}
 	if ( ( r->style & TV_ST_STRIKE ) != 0 ) {
-		dp_line(l->gid, x, b - px / 3, x + t->w - 1, b - px / 3, col);
+		INT	m = l->vert ? b : b - px / 3;
+
+		lg_line(l, x, m, x + t->w - 1, m, col);
 	}
 	if ( ( r->style & TV_ST_BOX ) != 0 ) {
-		dp_line(l->gid, x, b - px - 1, x + t->w, b - px - 1, col);
-		dp_line(l->gid, x, b + px / 4 + 1, x + t->w, b + px / 4 + 1, col);
+		lg_line(l, x, b - up - 1, x + t->w, b - up - 1, col);
+		lg_line(l, x, b + dn + 1, x + t->w, b + dn + 1, col);
 	}
 	if ( r->bouten != 0 ) {
 		/* 傍点: a dot, or a sesame, over or under each letter */
@@ -1076,16 +1250,16 @@ LOCAL void draw_text_item( LAY *l, CONST T_TVRUN *r, CONST ITEM *t, INT x,
 
 			while ( i + k < t->len && ( s[i + k] & 0xC0U ) == 0x80U ) k++;
 			cw = text_w(l, r, s + i, k);
-			dy = ( ( r->bouten & 3 ) == 2 ) ? b + px / 4 + 3 : b - px - 3;
+			dy = ( ( r->bouten & 3 ) == 2 ) ? b + dn + 3 : b - up - 3;
 			if ( ( r->bouten >> 4 ) == 1 ) {
-				dp_line(l->gid, cx + cw / 2 - 1, dy - 1, cx + cw / 2 + 1,
+				lg_line(l, cx + cw / 2 - 1, dy - 1, cx + cw / 2 + 1,
 					dy + 1, col);
 			} else {
 				T_DPRECT	d;
 
 				d.left = cx + cw / 2 - 1;  d.right = d.left + 3;
 				d.top = dy - 1;  d.bottom = dy + 2;
-				dp_fill_rect(l->gid, &d, col);
+				lg_fill(l, &d, col);
 			}
 			cx += cw;
 			i += k;
@@ -1102,18 +1276,20 @@ LOCAL void box_ends( LAY *l, CONST T_TVDOC *d, CONST ITEM *it, INT a, INT e,
 	for ( k = a; k < e; k++ ) {
 		CONST T_TVRUN	*r = &d->run[it[k].ri];
 		INT		px = run_px(r);
+		INT		up = l->vert ? px - px / 2 : px;
+		INT		dn = l->vert ? px / 2 : px / 4;
 
 		if ( ( r->style & TV_ST_BOX ) == 0 ) {
 			continue;
 		}
 		if ( k == a || it[k - 1].ri != it[k].ri ) {
-			dp_line(l->gid, shift_x + it[k].x, base - px - 1,
-				shift_x + it[k].x, base + px / 4 + 1, r->colour);
+			lg_line(l, shift_x + it[k].x, base - up - 1,
+				shift_x + it[k].x, base + dn + 1, r->colour);
 		}
 		if ( k + 1 == e || it[k + 1].ri != it[k].ri ) {
 			INT	xr = shift_x + it[k].x + it[k].w;
 
-			dp_line(l->gid, xr, base - px - 1, xr, base + px / 4 + 1,
+			lg_line(l, xr, base - up - 1, xr, base + dn + 1,
 				r->colour);
 		}
 	}
@@ -1153,6 +1329,23 @@ LOCAL void draw_ruby( LAY *l, CONST T_TVDOC *d, CONST ITEM *it, INT a, INT e,
 				buf[m] = r->ruby[m];
 			}
 			buf[m] = 0;
+			if ( l->vert ) {
+				/*
+				 * Down the line: the ruby down its right side
+				 * (over) or its left (under), in the vertical
+				 * forms, centred along what it belongs to.
+				 */
+				INT	half = run_px(r) / 2, axis;
+
+				(void)fn_set_style(fid, FN_ST_VERT, 0);
+				rw = fn_vwidth(fid, buf);
+				axis = r->ruby_below ? base + half + px / 2 + 1
+						     : base - ( run_px(r) - half ) - ( px - px / 2 ) - 1;
+				(void)fn_vdraw(l->gid, fid, l->vr - 1 - axis,
+					       x0 + ( ( x1 - x0 ) - rw ) / 2, buf, r->colour);
+				k = j;
+				continue;
+			}
 			rw = fn_width(fid, buf);
 			(void)fn_metrics(fid, &met);
 			(void)fn_draw(l->gid, fid, x0 + ( ( x1 - x0 ) - rw ) / 2,
@@ -1177,7 +1370,7 @@ LOCAL void draw_ruby( LAY *l, CONST T_TVDOC *d, CONST ITEM *it, INT a, INT e,
 LOCAL void mark_found( LAY *l, INT kind, INT pi, INT run, INT index,
 		       T_TADNODE *node, CONST T_DPRECT *b )
 {
-	if ( !l->mark_asking || l->mark.kind != TV_MARK_NONE
+	if ( !l->mark_asking || l->mark.kind != TV_MARK_NONE || l->vert
 	  || l->mark_x < b->left || l->mark_x >= b->right
 	  || l->mark_y < b->top || l->mark_y >= b->bottom ) {
 		return;
@@ -1239,7 +1432,8 @@ LOCAL void flag_draw( LAY *l, INT x, INT w, INT cy, CONST char *sym )
 	b.right = x + w - 6;
 	b.top = cy - FLAG_H / 2;
 	b.bottom = b.top + FLAG_H;
-	if ( l->gid < 0 || l->mode != LM_PLAIN
+	/* down the line a flag keeps its room and is not drawn */
+	if ( l->gid < 0 || l->mode != LM_PLAIN || l->vert
 	  || b.bottom < l->top || b.top > l->bottom ) {
 		return;
 	}
@@ -1398,6 +1592,25 @@ LOCAL void ruler( LAY *l, CONST T_TVDOC *d, INT pi, INT dx, INT top )
 			0x00604010U, TRUE);
 }
 
+/*
+ * Whether a thing may hang past the end of a line (ぶら下げ): a letter
+ * the paragraph's 禁則 forbids at the head of a line, when its kind K is
+ * 3, ぶら下がり -- the comma and the full stop of 原稿用紙, written in
+ * the last square with the letter before them rather than at the top of
+ * the next line.
+ */
+LOCAL BOOL hangs( CONST T_TVDOC *d, CONST T_TVPARA *p, CONST ITEM *t )
+{
+	CONST T_TVRUN	*r = &d->run[t->ri];
+
+	if ( p->khead_kind < 0 || ( p->khead_kind >> 4 ) != 3
+	  || r->kind != TV_RUN_TEXT || t->len <= 0 ) {
+		return FALSE;
+	}
+
+	return in_letters(p->khead, p->khead_len, utf8_at(r->text + t->off, NULL));
+}
+
 LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 {
 	CONST T_TVPARA	*p = &d->para[pi];
@@ -1429,11 +1642,11 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 		INT	yy = l->y + y - l->scroll, xx;
 
 		for ( xx = l->x0; xx < l->x1; xx += 6 ) {
-			dp_line(l->gid, xx, yy, xx + 2, yy, 0x00808080U);
+			lg_line(l, xx, yy, xx + 2, yy, 0x00808080U);
 		}
 	}
 	/* 詳細: a tab format given here is shown as a ruler above it */
-	if ( l->detail && p->fmt != NULL ) {
+	if ( l->detail && p->fmt != NULL && !l->vert ) {
 		INT	rtop, rdx;
 
 		y = page_fit(l, y, RULER_ROOM);
@@ -1444,7 +1657,9 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 
 	/* a paragraph with nothing in it is still a line */
 	if ( n == 0 ) {
-		INT	h = para_size + para_size / 2, top;
+		/* as tall as its lines are when their pitch is given in pixels */
+		INT	h = ( p->gap_abs && p->gap > 0 ) ? p->gap
+			  : para_size + para_size / 2, top;
 
 		y = page_fit(l, y, h);
 		{
@@ -1476,6 +1691,19 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 
 			if ( ( it[k].flags & IT_TAB ) != 0 ) {
 				w = tab_to(p, left, x, r->size) - x;
+			}
+			if ( k > a && x + w > limit && w > 0 && x <= limit
+			  && hangs(d, p, &it[k]) ) {
+				/*
+				 * ぶら下げ: a letter that may not begin a line
+				 * stands past the end of this one, and the line
+				 * ends after it.
+				 */
+				it[k].x = x;
+				it[k].w = w;
+				x += w;
+				e = k + 1;
+				break;
 			}
 			if ( k > a && x + w > limit && w > 0 ) {
 				INT	j = k - 1;
@@ -1520,7 +1748,7 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 				if ( sz > big ) big = sz;
 			} else if ( r->kind == TV_RUN_LINK || r->kind == TV_RUN_IMAGE
 				 || r->kind == TV_RUN_FIGURE ) {
-				if ( it[k].asc > big ) big = it[k].asc;
+				if ( it[k].asc + it[k].desc > big ) big = it[k].asc + it[k].desc;
 			}
 			if ( ( it[k].flags & IT_SPACE ) != 0 ) {
 				spaces++;
@@ -1553,6 +1781,16 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 			col_dx = dx;
 		}
 		base = top + ( pitch - ( asc + desc ) ) / 2 + asc;
+		if ( l->vert && p->gap_abs && asc + desc <= pitch ) {
+			/*
+			 * Down the line with a pitch given in pixels -- the
+			 * squares of 原稿用紙 -- the letters stand on the
+			 * line's middle whatever stands beside them, so that
+			 * a ruby goes into the room between the lines rather
+			 * than moving its letters out of their squares.
+			 */
+			base = top + pitch / 2;
+		}
 		l->last_pitch = pitch;
 
 		/* alignment */
@@ -1597,19 +1835,25 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 			INT		ix = shift_x + it[k].x;
 			CONST UB	*s = ( r->kind == TV_RUN_TEXT )
 					     ? r->text + it[k].off : NULL;
+			T_DPRECT	tb;
 
 			run_font(l, r);
 			switch ( r->kind ) {
 			case TV_RUN_LINK:
 			case TV_RUN_IMAGE:
 			case TV_RUN_FIGURE:
-				if ( l->thing_asking ) {
-					T_DPRECT	tb;
-
+				{
+					/*
+					 * Its box: on the base line across; down the
+					 * line, centred on the line, upright.
+					 */
 					tb.left = ix;
 					tb.top = base - it[k].asc;
 					tb.right = ix + it[k].w - 2;
-					tb.bottom = base;
+					tb.bottom = base + it[k].desc;
+					ph_rect(l, &tb);
+				}
+				if ( l->thing_asking ) {
 					if ( ( l->thing_want < 0
 					       && l->thing_x >= tb.left && l->thing_x < tb.right
 					       && l->thing_y >= tb.top && l->thing_y < tb.bottom )
@@ -1624,16 +1868,11 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 					  && top + pitch >= l->top && top <= l->bottom
 					  && r->link >= 0 && r->link < d->nfig ) {
 						T_TVFIG		*f = d->figs[r->link];
-						T_DPRECT	box;
 						INT		keep = f->zoom;
 
-						box.left = ix;
-						box.top = base - it[k].asc;
-						box.right = ix + it[k].w - 2;
-						box.bottom = base;
 						/* its view, magnified as the text is */
 						f->zoom = dv_zoom;
-						(void)tv_fig_draw_at(l->gid, f, &box,
+						(void)tv_fig_draw_at(l->gid, f, &tb,
 								     DZ(f->view.left), DZ(f->view.top),
 								     l->src, TAD_COL_NONE, 1);
 						f->zoom = keep;
@@ -1641,17 +1880,11 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 						l->set_fid = 0;
 					}
 				} else if ( r->kind == TV_RUN_LINK ) {
-					put_link(l, r->link, ix, base - it[k].asc,
-						 it[k].w - 2, it[k].asc);
+					put_link(l, r->link, tb.left, tb.top,
+						 tb.right - tb.left, tb.bottom - tb.top);
 				} else if ( l->gid >= 0 && l->mode == LM_PLAIN
 					 && top + pitch >= l->top && top <= l->bottom ) {
-					T_DPRECT	box;
-
-					box.left = ix;
-					box.top = base - it[k].asc;
-					box.right = ix + it[k].w - 2;
-					box.bottom = base;
-					tv_draw_picture(l->gid, &box, r->href);
+					tv_draw_picture(l->gid, &tb, r->href);
 				}
 				break;
 			case TV_RUN_TEXT:
@@ -1664,13 +1897,13 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 
 						if ( it[k].off == 0 && ( ri == p->first
 							|| d->run[ri - 1].space != r->space ) ) {
-							dp_line(l->gid, ix, base - hh, ix, base + 2,
+							lg_line(l, ix, base - hh, ix, base + 2,
 								FLAG_EDGE);
 						}
 						if ( it[k].off + it[k].len == r->len
 						  && ( ri + 1 >= p->first + p->n
 						       || d->run[ri + 1].space != r->space ) ) {
-							dp_line(l->gid, ix + it[k].w - 1, base - hh,
+							lg_line(l, ix + it[k].w - 1, base - hh,
 								ix + it[k].w - 1, base + 2, FLAG_EDGE);
 						}
 					}
@@ -1747,16 +1980,16 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 					INT	mh = r->size / 2;
 
 					if ( r->kind == TV_RUN_BREAK ) {
-						dp_line(l->gid, ix + 2, base - mh, ix + 2,
+						lg_line(l, ix + 2, base - mh, ix + 2,
 							base, 0x008080FFU);
-						dp_line(l->gid, ix + 2, base, ix + 6, base,
+						lg_line(l, ix + 2, base, ix + 6, base,
 							0x008080FFU);
 					} else if ( r->kind == TV_RUN_TAB ) {
-						dp_line(l->gid, ix + 1, base - mh / 2,
+						lg_line(l, ix + 1, base - mh / 2,
 							ix + it[k].w - 2, base - mh / 2,
 							0x008080FFU);
 					} else if ( r->kind == TV_RUN_INDENT ) {
-						dp_line(l->gid, ix, base - mh, ix, base,
+						lg_line(l, ix, base - mh, ix, base,
 							0x0080C080U);
 					}
 				}
@@ -1780,8 +2013,8 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 				/* the end of the paragraph */
 				INT	ex = shift_x + it[e - 1].x + it[e - 1].w + 2;
 
-				dp_line(l->gid, ex, base - 6, ex, base, 0x0080C080U);
-				dp_line(l->gid, ex - 3, base - 3, ex, base, 0x0080C080U);
+				lg_line(l, ex, base - 6, ex, base, 0x0080C080U);
+				lg_line(l, ex - 3, base - 3, ex, base, 0x0080C080U);
 			}
 		}
 		y += pitch;
@@ -1836,7 +2069,29 @@ LOCAL void lay_init( LAY *l, INT gid, CONST T_TVDOC *d, CONST T_DPRECT *r,
 	l->y = r->top;
 	l->detail = (BOOL)( dv_detail || d->detail );
 	l->show_hidden = d->show_hidden;
-	if ( d->page_h > 0
+	if ( d->vert ) {
+		/*
+		 * 縦書き: the lines run down the box and follow one another
+		 * from its right edge; on pages, a page is as wide as the
+		 * paper, its first line inside the right margin, and each
+		 * line runs between the top and the bottom margins.
+		 */
+		l->vert = TRUE;
+		l->vr = r->right;
+		l->x0 = r->top;
+		l->x1 = r->bottom;
+		l->y = 0;
+		if ( d->page_h > 0
+		  && d->page_h - d->margin[0] - d->margin[2] >= 32
+		  && r->bottom - r->top - d->margin[1] - d->margin[3] >= 32 ) {
+			l->page_h = d->page_h;
+			l->mtop = d->margin[2];
+			l->mbottom = d->margin[0];
+			l->x0 += d->margin[1];
+			l->x1 -= d->margin[3];
+			l->full_x1 = l->x1;
+		}
+	} else if ( d->page_h > 0
 	  && d->page_h - d->margin[1] - d->margin[3] >= 32
 	  && r->right - r->left - d->margin[0] - d->margin[2] >= 32 ) {
 		l->page_h = d->page_h;
@@ -1845,6 +2100,8 @@ LOCAL void lay_init( LAY *l, INT gid, CONST T_TVDOC *d, CONST T_DPRECT *r,
 		l->x0 += d->margin[0];
 		l->x1 -= d->margin[2];
 		l->full_x1 = l->x1;
+	}
+	if ( l->page_h > 0 ) {
 		if ( d->columns > 1 && d->columns <= 8 ) {
 			INT	sp = ( d->colsp > 0 ) ? d->colsp : 14;
 			INT	w = ( l->x1 - l->x0 - ( d->columns - 1 ) * sp )
@@ -1859,6 +2116,11 @@ LOCAL void lay_init( LAY *l, INT gid, CONST T_TVDOC *d, CONST T_DPRECT *r,
 	}
 	l->top = r->top;
 	l->bottom = r->bottom;
+	if ( l->vert ) {
+		/* what is worth drawing, across the lines: the box's width */
+		l->top = 0;
+		l->bottom = r->right - r->left;
+	}
 	l->scroll = scroll_y;
 	l->fid = fn_system();
 	l->found = -1;
@@ -1884,8 +2146,7 @@ EXPORT ER tv_doc_caret_at( CONST T_TVDOC *d, CONST T_DPRECT *r, INT scroll_y,
 	}
 	lay_init(&l, -1, d, r, scroll_y, src);
 	l.mode = LM_CARET_AT;
-	l.ask_x = x;
-	l.ask_y = y;
+	lg_point(&l, x, y, &l.ask_x, &l.ask_y);
 	(void)lay_out(&l, d);
 	if ( l.best < 0 ) {
 		return E_NOEXS;
@@ -1913,6 +2174,7 @@ EXPORT ER tv_doc_caret_box( CONST T_TVDOC *d, CONST T_DPRECT *r,
 	if ( !l.got ) {
 		return E_NOEXS;
 	}
+	ph_rect(&l, &l.box);
 	*box = l.box;
 
 	return E_OK;
@@ -1975,11 +2237,22 @@ EXPORT INT tv_doc_draw( INT gid, CONST T_TVDOC *d, CONST T_DPRECT *r,
 	 * written here, so that a document laid on a dark scheme is laid
 	 * on that scheme's paper.
 	 */
-	if ( gid >= 0 ) {
+	if ( gid >= 0 && dv_ground ) {
 		dp_fill_rect(gid, r, ( paper == TV_PAPER_LOOK )
 				     ? wm_look(WM_LOOK_WORK) : paper);
 	}
 	lay_init(&l, gid, d, r, scroll_y, src);
+	if ( gid >= 0 && l.page_h > 0 && tv_doc_has_sheet(d) ) {
+		/*
+		 * What is laid over the whole sheet goes under the text, on
+		 * every page there is: how many there are is known from
+		 * laying the text out once without drawing it.
+		 */
+		LAY	m;
+
+		lay_init(&m, -1, d, r, scroll_y, src);
+		sheets(&l, d, lay_out(&m, d));
+	}
 	h = lay_out(&l, d);
 	if ( gid >= 0 && l.page_h > 0 && d->over_on != 0 ) {
 		overlays(&l, d, h);
@@ -1989,6 +2262,67 @@ EXPORT INT tv_doc_draw( INT gid, CONST T_TVDOC *d, CONST T_DPRECT *r,
 	}
 
 	return h;
+}
+
+/* The paper a document names, or A4 upright when it names none */
+LOCAL void paper_of( CONST T_TVDOC *d, INT *p_w, INT *p_h )
+{
+	*p_w = ( d->paper_w > 0 ) ? d->paper_w : 595;
+	*p_h = ( d->paper_h > 0 ) ? d->paper_h : 842;
+}
+
+/* The document as laid on its paper: a copy of the model with its pages set */
+LOCAL void on_paper( CONST T_TVDOC *d, T_TVDOC *c, T_DPRECT *r )
+{
+	INT	w, h;
+
+	paper_of(d, &w, &h);
+	*c = *d;
+	c->page_h = d->vert ? w : h;
+	r->left = 0;
+	r->top = 0;
+	r->right = w;
+	r->bottom = h;
+}
+
+EXPORT INT tv_doc_pages( CONST T_TVDOC *d, CONST T_TAD *src )
+{
+	T_TVDOC		c;
+	T_DPRECT	r;
+	LAY		l;
+	INT		h, per;
+
+	if ( d == NULL ) {
+		return 0;
+	}
+	on_paper(d, &c, &r);
+	lay_init(&l, -1, &c, &r, 0, src);
+	h = lay_out(&l, &c);
+	per = l.page_h;
+	if ( per <= 0 ) {
+		return 1;
+	}
+
+	return ( h > 0 ) ? ( h + per - 1 ) / per : 1;
+}
+
+EXPORT ER tv_doc_draw_page( INT gid, CONST T_TVDOC *d, INT pg,
+			    CONST T_DPRECT *sheet, CONST T_TAD *src, UW paper )
+{
+	T_TVDOC		c;
+	T_DPRECT	r;
+
+	if ( d == NULL || sheet == NULL || pg < 0 ) {
+		return E_PAR;
+	}
+	on_paper(d, &c, &r);
+	r.left = sheet->left;
+	r.top = sheet->top;
+	r.right = sheet->left + ( r.right - r.left );
+	r.bottom = sheet->top + ( r.bottom - r.top );
+	(void)tv_doc_draw(gid, &c, &r, pg * c.page_h, src, paper);
+
+	return E_OK;
 }
 
 /*
@@ -2014,6 +2348,11 @@ EXPORT INT tv_doc_height( CONST T_TVDOC *d, INT width, CONST T_TAD *src )
 	r.top = 0;
 	r.right = width;
 	r.bottom = 0;
+	if ( d->vert ) {
+		/* written downwards: its lines that long, and how wide it comes to */
+		r.right = 0;
+		r.bottom = width;
+	}
 	lay_init(&l, -1, d, &r, 0, src);
 	l.y = 0;
 
@@ -2081,7 +2420,7 @@ LOCAL INT roman_text( INT n, BOOL small, UB *out )
 /*
  * 変数参照: what a variable stands for as it is drawn, into out (64
  * bytes): 0 the record's name; 100 the year's last two figures, 101
- * the era, 110/111 the month (two figures), 112/113 its name in small
+ * the era, 102 the whole year, 110/111 the month (two figures), 112/113 its name in small
  * and capital letters, 120/121 the day; 200/201/202 the page's number
  * in figures, small and capital Roman numerals; 250/251/252 the number
  * of pages the same ways. A page's number off the pages is 1; any
@@ -2116,6 +2455,9 @@ LOCAL INT var_text( CONST LAY *l, CONST T_TVRUN *r, UB *out )
 	case 100:
 		m = num_text(tm.tm_year % 100, out);
 		return m;
+	case 102:
+		/* the whole year, as ヘッダ/フッタ's %y asks for it */
+		return num_text(tm.tm_year + 1900, out);
 	case 101: {
 		INT		y = tm.tm_year + 1900;
 		CONST char	*e = ( y >= 2019 ) ? "令和" : ( y >= 1989 ) ? "平成" : ( y >= 1926 ) ? "昭和" : "大正";
@@ -2211,23 +2553,49 @@ LOCAL INT page_no( CONST T_TVRUN *r, INT pg )
 }
 
 /*
+ * Where page 'pg' of the paper is in the box: below the one before, or
+ * written downwards, to the left of it.
+ */
+LOCAL void page_rect( CONST LAY *l, CONST T_TVDOC *d, INT pg, T_DPRECT *pr )
+{
+	INT	at = pg * l->page_h - l->scroll;
+
+	if ( l->vert ) {
+		pr->right = l->vr - at;
+		pr->left = pr->right - l->page_h;
+		pr->top = l->x0 - d->margin[1];
+		pr->bottom = l->full_x1 + d->margin[3];
+		return;
+	}
+	pr->left = l->x0 - d->margin[0];
+	pr->right = l->full_x1 + d->margin[2];
+	pr->top = l->y + at;
+	pr->bottom = pr->top + l->page_h;
+}
+
+/* Whether page 'pg' is where anything is drawn */
+LOCAL BOOL page_seen( CONST LAY *l, INT pg )
+{
+	INT	at = l->y + pg * l->page_h - l->scroll;
+
+	return (BOOL)( at <= l->bottom && at + l->page_h >= l->top );
+}
+
+/*
  * One overlay laid in a band of a page: each paragraph on the band's one
  * line, placed by its own alignment, so that what stands at the left, in
  * the middle and at the right of a header share the line. A line as tall
  * as the band, as a tab format's height makes it, starts at its top;
- * a lower one is put in the middle of it.
+ * a lower one is put in the middle of it. A header is written across
+ * whichever way the text runs.
  */
-LOCAL void band_draw( LAY *l, CONST T_TVDOC *o, INT top, INT h, BOOL at_foot,
-		      INT pg )
+LOCAL void band_draw( LAY *l, CONST T_TVDOC *o, CONST T_DPRECT *band,
+		      BOOL at_foot, INT pg )
 {
 	LAY		m;
-	T_DPRECT	r;
-	INT		pi, lh = 0;
+	T_DPRECT	r = *band;
+	INT		pi, lh = 0, top = band->top, h = band->bottom - band->top;
 
-	r.left = l->x0;
-	r.right = l->full_x1;
-	r.top = top;
-	r.bottom = top + h;
 	for ( pi = 0; pi < o->npara; pi++ ) {
 		lay_init(&m, -1, o, &r, 0, l->src);
 		m.y = 0;
@@ -2245,8 +2613,8 @@ LOCAL void band_draw( LAY *l, CONST T_TVDOC *o, INT top, INT h, BOOL at_foot,
 	}
 	for ( pi = 0; pi < o->npara; pi++ ) {
 		lay_init(&m, l->gid, o, &r, 0, l->src);
-		m.top = l->top;
-		m.bottom = l->bottom;
+		m.top = l->vert ? r.top - 4096 : l->top;
+		m.bottom = l->vert ? r.bottom + 4096 : l->bottom;
 		m.y = top + ( ( h > lh ) ? ( h - lh ) / 2 : 0 );
 		m.pageno = pg;
 		m.npages = l->npages;
@@ -2255,37 +2623,136 @@ LOCAL void band_draw( LAY *l, CONST T_TVDOC *o, INT top, INT h, BOOL at_foot,
 }
 
 /*
+ * Whether an overlay is laid over the whole sheet rather than in a band:
+ * one that holds figures and no letters -- the squares of 原稿用紙, a
+ * frame round the page. Its figures are in the paper's own places, from
+ * the corner of the sheet.
+ */
+LOCAL BOOL sheet_like( CONST T_TVDOC *o )
+{
+	INT	i;
+
+	if ( o == NULL || o->nfig <= 0 ) {
+		return FALSE;
+	}
+	for ( i = 0; i < o->nrun; i++ ) {
+		if ( o->run[i].kind == TV_RUN_TEXT || o->run[i].kind == TV_RUN_LINK
+		  || o->run[i].kind == TV_RUN_PAGENO || o->run[i].kind == TV_RUN_VAR ) {
+			return FALSE;
+		}
+	}
+
+	return TRUE;
+}
+
+/* Whether overlay k is put on page pg */
+LOCAL BOOL over_on_page( CONST T_TVDOC *d, INT k, INT pg )
+{
+	UINT	p = d->over_pages[k];
+
+	return (BOOL)( d->over[k] != NULL && ( d->over_on & ( 1U << k ) ) != 0
+		    && !( p == 1 && ( pg + 1 ) % 2 == 0 )
+		    && !( p == 2 && ( pg + 1 ) % 2 != 0 ) );
+}
+
+EXPORT BOOL tv_doc_has_sheet( CONST T_TVDOC *d )
+{
+	INT	k;
+
+	for ( k = 0; d != NULL && k < TV_MAX_OVER; k++ ) {
+		if ( d->over[k] != NULL && ( d->over_on & ( 1U << k ) ) != 0
+		  && sheet_like(d->over[k]) ) {
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+}
+
+/* How many pages a text that came to h takes */
+LOCAL INT page_count( CONST LAY *l, INT h )
+{
+	return ( l->page_h > 0 && h > 0 ) ? ( h + l->page_h - 1 ) / l->page_h : 1;
+}
+
+/*
+ * The overlays laid over the whole sheet, on every page on the screen,
+ * before the text: each figure from the corner of the paper, magnified
+ * as the text is.
+ */
+LOCAL void sheets( LAY *l, CONST T_TVDOC *d, INT h )
+{
+	INT	pages = page_count(l, h), pg, k, i;
+
+	for ( pg = 0; pg < pages; pg++ ) {
+		T_DPRECT	pr;
+
+		if ( !page_seen(l, pg) ) {
+			continue;
+		}
+		page_rect(l, d, pg, &pr);
+		for ( k = 0; k < TV_MAX_OVER; k++ ) {
+			CONST T_TVDOC	*o = d->over[k];
+
+			if ( !over_on_page(d, k, pg) || !sheet_like(o) ) {
+				continue;
+			}
+			for ( i = 0; i < o->nfig; i++ ) {
+				T_TVFIG	*f = o->figs[i];
+				INT	keep = f->zoom;
+
+				f->zoom = dv_zoom;
+				(void)tv_fig_draw_at(l->gid, f, &pr, 0, 0, l->src,
+						     TAD_COL_NONE, 1);
+				f->zoom = keep;
+			}
+		}
+	}
+	l->set_fid = 0;
+}
+
+/*
  * 用紙オーバーレイ: each overlay the document puts on, on the pages it is
  * for, in the top margin of every page on the screen -- the footer (1),
  * and one whose text begins with a fill line, in the bottom margin.
+ * Those laid over the whole sheet were drawn before the text.
  */
 LOCAL void overlays( LAY *l, CONST T_TVDOC *d, INT h )
 {
-	INT	per = l->page_h * ( ( l->cols > 1 ) ? l->cols : 1 );
-	INT	pages = ( per > 0 ) ? ( h + per - 1 ) / per : 0, pg, k;
+	INT	pages = page_count(l, h), pg, k;
 
 	l->npages = pages;
 	for ( pg = 0; pg < pages; pg++ ) {
-		INT	top = l->y + pg * l->page_h - l->scroll;
+		T_DPRECT	pr, band;
 
-		if ( top > l->bottom || top + l->page_h < l->top ) {
+		if ( !page_seen(l, pg) ) {
 			continue;
 		}
+		page_rect(l, d, pg, &pr);
 		for ( k = 0; k < TV_MAX_OVER; k++ ) {
 			CONST T_TVDOC	*o = d->over[k];
-			UINT		p = d->over_pages[k];
+			BOOL		foot;
 
-			if ( o == NULL || ( d->over_on & ( 1U << k ) ) == 0
-			  || ( p == 1 && ( pg + 1 ) % 2 == 0 )
-			  || ( p == 2 && ( pg + 1 ) % 2 != 0 ) ) {
+			if ( !over_on_page(d, k, pg) || sheet_like(o) ) {
 				continue;
 			}
-			if ( k != 1 && !o->foot ) {
-				band_draw(l, o, top, l->mtop, FALSE, pg);
+			foot = (BOOL)( k == 1 || o->foot );
+			/* the band: the top or the bottom margin, inside the side ones */
+			if ( l->vert ) {
+				band.left = pr.left + d->margin[0];
+				band.right = pr.right - d->margin[2];
 			} else {
-				band_draw(l, o, top + l->page_h - l->mbottom, l->mbottom,
-					  TRUE, pg);
+				band.left = l->x0;
+				band.right = l->full_x1;
 			}
+			if ( foot ) {
+				band.bottom = pr.bottom;
+				band.top = pr.bottom - d->margin[3];
+			} else {
+				band.top = pr.top;
+				band.bottom = pr.top + d->margin[1];
+			}
+			band_draw(l, o, &band, foot, pg);
 		}
 	}
 }
@@ -2306,8 +2773,8 @@ EXPORT INT tv_doc_mark( CONST T_TVDOC *d, CONST T_DPRECT *r, INT scroll_y,
 		return TV_MARK_NONE;
 	}
 	lay_init(&l, -1, d, r, scroll_y, src);
-	if ( !l.detail ) {
-		return TV_MARK_NONE;
+	if ( !l.detail || l.vert ) {
+		return TV_MARK_NONE;		/* down the line no marks are shown */
 	}
 	l.mark_asking = TRUE;
 	l.mark_x = x;

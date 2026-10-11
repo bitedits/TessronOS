@@ -26,6 +26,10 @@
  *	the ranges are written only when letters come, and so come out as
  *	they were.
  *
+ *	An element of 実時間制御TAD is a segment of its own (bpk_rt.c, design
+ *	15.7) carrying its attributes and its text as they are; those
+ *	inside it follow, and a segment ends it.
+ *
  *	Segments are little-endian words: id, length of the body in bytes
  *	(0xFFFF and a 32-bit length for a large one), then the body, whose
  *	first word of a text or figure attribute segment is subid << 8 |
@@ -36,6 +40,7 @@
 #include <tk/errno.h>
 #include <ts/btbk.h>
 #include <ts/bpk.h>
+#include <ts/uuid.h>
 
 /* What an open element is */
 #define LV_OTHER	0
@@ -49,6 +54,7 @@
 #define LV_TBOX		8		/* a rectangle holding text: a TS_TEXT */
 #define LV_SKIP		9		/* nothing inside is written */
 #define LV_OVL		10		/* <paper-overlay-define>: a text inside a segment */
+#define LV_RT		11		/* an element of 実時間制御TAD: serial holds the segment that ends it */
 
 /* Tokens */
 #define TK_EOF		0
@@ -91,6 +97,8 @@ typedef struct {
 
 /* ------------------------------------------------------------------ */
 /* Reading the XML */
+
+LOCAL INT entity( CONST UB *s, INT n, UINT *p_cp );
 
 LOCAL BOOL is_space( UB c )
 {
@@ -1646,9 +1654,11 @@ LOCAL ER vobj( BK_TADW *w, CONST TOK *t )
 	lk.target[0] = 0;
 	n = bk_tad_attr(t->p, t->n, "id", id, sizeof(id));
 	if ( n > 0 ) {
-		/* "uuid_0.xtad": the object is the part before the '_' */
-		for ( i = 0; i < n && i < (INT)sizeof(lk.target) - 1 && id[i] != '_'; i++ ) {
-			lk.target[i] = id[i];
+		/* "uuid_0.xtad": the object is the part before the '_', after a volume it names */
+		INT	at = ts_lnk_split((CONST UB *)id, n, NULL, NULL);
+
+		for ( i = 0; at + i < n && i < (INT)sizeof(lk.target) - 1 && id[at + i] != '_'; i++ ) {
+			lk.target[i] = id[at + i];
 		}
 		lk.target[i] = 0;
 	}
@@ -2117,6 +2127,204 @@ LOCAL void marker_def( BK_TADW *w, CONST TOK *t )
 /* ------------------------------------------------------------------ */
 /* Elements */
 
+/* ------------------------------------------------------------------ */
+/* 実時間制御TAD */
+
+LOCAL void putb( BK_TADW *w, UINT v )
+{
+	put8(w, v, w->len);
+	w->len++;
+}
+
+/* A value as UTF-8, its entities undone when ent; put when put. How many bytes */
+LOCAL INT rt_val( BK_TADW *w, CONST UB *v, INT n, BOOL ent, BOOL put )
+{
+	INT	i = 0, k = 0, d, m, j;
+	UINT	cp;
+	char	o[4];
+
+	while ( i < n ) {
+		if ( ent && v[i] == '&' && ( d = entity(v + i, n - i, &cp) ) > 0 ) {
+			m = bpk_utf8(cp, o);
+			for ( j = 0; j < m; j++ ) {
+				if ( put ) putb(w, (UB)o[j]);
+			}
+			k += m;
+			i += d;
+			continue;
+		}
+		if ( put ) putb(w, v[i]);
+		k++;
+		i++;
+	}
+	return k;
+}
+
+/* A string with its length (lw bytes) before it and a byte after an odd one; its room */
+LOCAL INT rt_str( BK_TADW *w, CONST UB *v, INT n, BOOL ent, INT lw, BOOL put )
+{
+	INT	m = rt_val(w, v, n, ent, FALSE);
+
+	if ( put ) {
+		if ( lw == 2 ) put16(w, (UINT)m);
+		else put32(w, (UINT)m);
+		(void)rt_val(w, v, n, ent, TRUE);
+		if ( m & 1 ) putb(w, 0);
+	}
+	return lw + m + ( m & 1 );
+}
+
+/*
+ * The body after its first word: the name (named), the attributes of the
+ * tag in order, the text (with no name) when there is one. Its bytes
+ */
+LOCAL INT rt_body( BK_TADW *w, CONST TOK *t, BOOL named, CONST TOK *text, BOOL put )
+{
+	INT	at, a, alen, v, e, size = 0, pass, na = 0;
+	UB	q;
+
+	if ( named ) size += rt_str(w, t->name, t->nlen, FALSE, 2, put);
+	for ( pass = 0; pass < 2; pass++ ) {
+		if ( pass == 1 ) {
+			if ( put ) put16(w, (UINT)( na + ( text != NULL ) ));
+			size += 2;
+		}
+		at = t->nlen;
+		for ( ;; ) {
+			while ( at < t->n && is_space(t->p[at]) ) at++;
+			if ( at >= t->n || t->p[at] == '/' ) break;
+			a = at;
+			while ( at < t->n && !is_space(t->p[at]) && t->p[at] != '=' ) at++;
+			alen = at - a;
+			while ( at < t->n && is_space(t->p[at]) ) at++;
+			if ( at >= t->n || t->p[at] != '=' ) continue;		/* a name without a value */
+			at++;
+			while ( at < t->n && is_space(t->p[at]) ) at++;
+			if ( at >= t->n || ( t->p[at] != '"' && t->p[at] != '\'' ) ) break;
+			q = t->p[at++];
+			v = at;
+			while ( at < t->n && t->p[at] != q ) at++;
+			e = at;
+			at++;
+			if ( pass == 0 ) {
+				na++;
+				continue;
+			}
+			size += rt_str(w, t->p + a, alen, FALSE, 2, put);
+			size += rt_str(w, t->p + v, e - v, TRUE, 4, put);
+		}
+	}
+	if ( text != NULL ) {
+		size += rt_str(w, t->p, 0, FALSE, 2, put);
+		size += rt_str(w, text->p, text->n, (BOOL)( text->kind == TK_TEXT ), 4, put);
+	}
+	return size;
+}
+
+/* Whether a run of letters is only spaces */
+LOCAL BOOL blank( CONST TOK *t )
+{
+	INT	i;
+
+	for ( i = 0; i < t->n && is_space(t->p[i]); i++ ) ;
+	return (BOOL)( i == t->n );
+}
+
+LOCAL BOOL end_of( CONST TOK *e, CONST TOK *t )
+{
+	INT	i;
+
+	if ( e->kind != TK_END || e->nlen != t->nlen ) return FALSE;
+	for ( i = 0; i < t->nlen && e->name[i] == t->name[i]; i++ ) ;
+	return (BOOL)( i == t->nlen );
+}
+
+LOCAL BK_TADLV *push( BK_TADW *w, CONST TOK *t, UB kind );
+
+/*
+ * An element of 実時間制御TAD: one segment. One holding only letters
+ * carries them, and its end tag is taken in with it; one holding
+ * elements is ended by the segment its level keeps.
+ */
+LOCAL void rt_start( BK_TADW *w, CONST UB *s, INT len, INT at, CONST TOK *t, BOOL empty )
+{
+	const BPKRTEL *el;
+	TOK	f, g, *text = NULL;
+	INT	a = at, k, body;
+	UINT	id, sub, flags = 0;
+	UB	b[16];
+	BOOL	named;
+	BK_TADLV *lv;
+
+	b[0] = 0;
+	(void)bk_tad_attr(t->p, t->n, "type", b, sizeof(b));
+	el = bpk_rt_by_name((CONST char *)t->name, t->nlen, same(b, 6, "serial"));
+	named = (BOOL)( el == NULL );
+	id = named ? TS_REAL : el->id;
+	sub = named ? BPK_RT_ELEM : el->sub;
+	if ( !empty ) {
+		k = token(s, len, &a, &f);
+		if ( k == TK_END && end_of(&f, t) ) {
+			w->rtskip = 1;
+			empty = TRUE;
+		} else if ( k == TK_TEXT || k == TK_CDATA ) {
+			if ( token(s, len, &a, &g) == TK_END && end_of(&g, t) ) {
+				w->rtskip = 2;
+				empty = TRUE;
+				if ( k == TK_CDATA || !blank(&f) ) text = &f;
+			}
+		}
+	}
+	if ( !empty ) flags |= BPK_RT_KIDS;
+	body = 2 + rt_body(w, t, named, text, FALSE);
+	seg(w, id, body);
+	put16(w, ( sub << 8 ) | flags);
+	(void)rt_body(w, t, named, text, TRUE);
+	if ( empty ) return;
+	lv = push(w, t, LV_RT);
+	if ( lv == NULL ) return;
+	if ( named || el->end == BPK_RT_NOEND ) lv->serial = (INT)( ( TS_REAL << 8 ) | BPK_RT_CLOSE );
+	else lv->serial = (INT)( ( (UINT)el->endid << 8 ) | el->end );
+}
+
+/* Letters between the elements of 実時間制御TAD */
+LOCAL void rt_text( BK_TADW *w, CONST TOK *t )
+{
+	INT	body;
+
+	if ( t->kind == TK_TEXT && blank(t) ) return;
+	body = 2 + 2 + rt_str(w, t->p, 0, FALSE, 2, FALSE)
+		+ rt_str(w, t->p, t->n, (BOOL)( t->kind == TK_TEXT ), 4, FALSE);
+	seg(w, TS_REAL, body);
+	put16(w, BPK_RT_TEXT << 8);
+	put16(w, 1);
+	(void)rt_str(w, t->p, 0, FALSE, 2, TRUE);
+	(void)rt_str(w, t->p, t->n, (BOOL)( t->kind == TK_TEXT ), 4, TRUE);
+}
+
+/* The id of an element of a figure or a text, for a program to name it by: BPK_RT_ID after it */
+LOCAL void rt_id( BK_TADW *w, CONST TOK *t )
+{
+	CONST UB *v;
+	INT	n, body;
+
+	if ( !bpk_rt_id_kept((CONST char *)t->name, t->nlen) || ( v = attr_at(t, "id", &n) ) == NULL || n == 0 ) return;
+	body = 2 + 2 + rt_str(w, (CONST UB *)"el", 2, FALSE, 2, FALSE) + rt_str(w, t->name, t->nlen, FALSE, 4, FALSE)
+		+ rt_str(w, (CONST UB *)"id", 2, FALSE, 2, FALSE) + rt_str(w, v, n, TRUE, 4, FALSE);
+	seg(w, TS_REAL, body);
+	put16(w, BPK_RT_ID << 8);
+	put16(w, 2);
+	(void)rt_str(w, (CONST UB *)"el", 2, FALSE, 2, TRUE);
+	(void)rt_str(w, t->name, t->nlen, FALSE, 4, TRUE);
+	(void)rt_str(w, (CONST UB *)"id", 2, FALSE, 2, TRUE);
+	(void)rt_str(w, v, n, TRUE, 4, TRUE);
+}
+
+LOCAL BOOL rt_top( BK_TADW *w )
+{
+	return (BOOL)( w->depth > 0 && w->lv[w->depth - 1].kind == LV_RT );
+}
+
 LOCAL BK_TADLV *push( BK_TADW *w, CONST TOK *t, UB kind )
 {
 	BK_TADLV *lv;
@@ -2131,6 +2339,7 @@ LOCAL BK_TADLV *push( BK_TADW *w, CONST TOK *t, UB kind )
 	lv->kind = kind;
 	lv->serial = 0;
 	lv->npara = 0;
+	lv->pout = 0;
 	return lv;
 }
 
@@ -2247,7 +2456,19 @@ LOCAL void pend_resolve( BK_TADW *w )
 	w->nclosed = 0;
 }
 
+LOCAL void on_start2( BK_TADW *w, CONST UB *s, INT len, INT at, CONST TOK *t, BOOL empty );
+
+/* A start tag; an element of a figure or a text that wrote something keeps its id after it */
 LOCAL void on_start( BK_TADW *w, CONST UB *s, INT len, INT at, CONST TOK *t, BOOL empty )
+{
+	INT	in = where(w, NULL), was = w->len;
+	BOOL	rt = rt_top(w);
+
+	on_start2(w, s, len, at, t, empty);
+	if ( !rt && ( w->len > was || same(t->name, t->nlen, "text") ) && ( in == LV_TEXT || in == LV_FIG ) ) rt_id(w, t);
+}
+
+LOCAL void on_start2( BK_TADW *w, CONST UB *s, INT len, INT at, CONST TOK *t, BOOL empty )
 {
 	BK_TADLV *lv = NULL, *ctx = NULL;
 	INT	in = where(w, &ctx);
@@ -2257,6 +2478,11 @@ LOCAL void on_start( BK_TADW *w, CONST UB *s, INT len, INT at, CONST TOK *t, BOO
 
 	if ( in == LV_SKIP ) {
 		if ( !empty ) (void)push(w, t, LV_SKIP);
+		return;
+	}
+	if ( same(t->name, t->nlen, "realtime") || same(t->name, t->nlen, "realData")
+	  || ( rt_top(w) && !same(t->name, t->nlen, "document") && !same(t->name, t->nlen, "figure") ) ) {
+		rt_start(w, s, len, at, t, empty);
 		return;
 	}
 	if ( same(t->name, t->nlen, "document") || same(t->name, t->nlen, "figure") ) {
@@ -2614,6 +2840,18 @@ LOCAL ER on_end( BK_TADW *w, CONST TOK *t )
 	BK_TADLV *lv = top(w);
 	INT	i;
 
+	if ( lv != NULL && ( lv->kind == LV_TEXT || lv->kind == LV_TBOX )
+	  && w->loose && same(t->name, t->nlen, "p") ) {
+		/* a </p> that closes no <p>: the end of the paragraph begun without one */
+		lv->pout = 1;
+		return E_OK;
+	}
+	if ( lv != NULL && lv->kind == LV_P && w->depth >= 2 && !same(t->name, t->nlen, "p") ) {
+		/* a <p> left open ends with the text it is in */
+		w->depth--;
+		lv = top(w);
+	}
+
 	/* the end tag must be the one of the element last opened */
 	if ( lv == NULL || lv->nlen != t->nlen ) return E_PAR;
 	for ( i = 0; i < t->nlen; i++ ) {
@@ -2621,6 +2859,9 @@ LOCAL ER on_end( BK_TADW *w, CONST TOK *t )
 	}
 	w->depth--;
 	switch ( lv->kind ) {
+	case LV_P:
+		if ( w->depth > 0 ) w->lv[w->depth - 1].pout = 1;
+		break;
 	case LV_TEXT:
 	case LV_TBOX:
 		text_close(w, lv);
@@ -2643,6 +2884,15 @@ LOCAL ER on_end( BK_TADW *w, CONST TOK *t )
 	case LV_OVL:
 		overlay_close(w, lv);
 		break;
+	case LV_RT: {
+		BK_TADLV *ctx = NULL;
+
+		seg(w, (UINT)lv->serial >> 8, 2);
+		put16(w, ( (UINT)lv->serial & 0xFF ) << 8);
+		/* the last of them in a text: the paragraph after it is not a new one */
+		if ( !rt_top(w) && where(w, &ctx) == LV_TEXT && ctx != NULL ) ctx->npara = 0;
+		break;
+	}
 	default:
 		break;
 	}
@@ -2654,6 +2904,10 @@ LOCAL void on_text( BK_TADW *w, CONST TOK *t, BOOL ent )
 	INT	i = 0, in = where(w, NULL);
 
 	if ( in == LV_SKIP ) return;
+	if ( rt_top(w) ) {
+		rt_text(w, t);
+		return;
+	}
 	if ( in != LV_TEXT ) {
 		/* letters outside a text are written as they are; the spaces
 		   between elements are not letters */
@@ -2679,6 +2933,44 @@ LOCAL void on_text( BK_TADW *w, CONST TOK *t, BOOL ent )
 		}
 		put_char(w, cp);
 	}
+}
+
+/*
+ * A text whose paragraphs are not all opened by <p> (a </p> with no <p>
+ * before it): what comes after a closed paragraph outside any <p> is a
+ * paragraph of its own, which that </p> ends.
+ */
+LOCAL BOOL has_loose_p( CONST UB *s, INT len )
+{
+	TOK	t;
+	INT	at = 0, k, open = 0;
+
+	while ( ( k = token(s, len, &at, &t) ) > TK_EOF ) {
+		if ( !same(t.name, t.nlen, "p") ) continue;
+		if ( k == TK_START ) open = 1;
+		else if ( k == TK_END && open-- == 0 ) return TRUE;
+	}
+	return FALSE;
+}
+
+LOCAL void loose_para( BK_TADW *w, INT k, CONST TOK *t )
+{
+	BK_TADLV *lv = top(w);
+	INT	i;
+
+	if ( lv == NULL || ( lv->kind != LV_TEXT && lv->kind != LV_TBOX ) || lv->pout != 1 ) return;
+	if ( k == TK_TEXT || k == TK_CDATA ) {
+		for ( i = 0; i < t->n && is_space(t->p[i]); i++ ) ;
+		if ( i == t->n ) return;
+	} else if ( k != TK_START && k != TK_EMPTY ) {
+		return;
+	} else if ( same(t->name, t->nlen, "p") ) {
+		return;
+	}
+	pend_resolve(w);
+	lv->pout = 2;
+	if ( lv->npara > 0 ) w->pend = PEND_NL;
+	lv->npara++;
 }
 
 /* The largest pattern number the text uses, for the ones made here to follow */
@@ -2723,12 +3015,14 @@ EXPORT ER bk_tad_from_xml( BK_TADW *w, CONST UB *xml, INT len, UB *out, INT max,
 	w->fmod = FALSE;
 	w->pend = 0;
 	w->absorb = 0;
+	w->rtskip = 0;
 	w->hk = hk;
 	w->er = E_OK;
 	w->st.nlink = w->st.nimage = w->st.noimage = w->st.nskip = w->st.nchar = w->st.nuni = 0;
 
 	if ( len >= 3 && xml[0] == 0xEF && xml[1] == 0xBB && xml[2] == 0xBF ) at = 3;
 	w->patnext = pattern_max(xml + at, len - at) + 1;
+	w->loose = has_loose_p(xml + at, len - at);
 
 	/* TS_INFO: the version of TAD */
 	put16(w, TS_INFO);
@@ -2738,6 +3032,11 @@ EXPORT ER bk_tad_from_xml( BK_TADW *w, CONST UB *xml, INT len, UB *out, INT max,
 	put16(w, BK_TAD_VERSION);
 
 	while ( ( k = token(xml, len, &at, &t) ) > TK_EOF ) {
+		if ( w->rtskip > 0 ) {
+			/* the letters and the end of an element of 実時間制御TAD, written with it */
+			w->rtskip--;
+			continue;
+		}
 		if ( w->absorb > 0 && ( k == TK_START || k == TK_EMPTY ) ) {
 			/* said by the table's cell before it */
 			w->absorb--;
@@ -2745,6 +3044,7 @@ EXPORT ER bk_tad_from_xml( BK_TADW *w, CONST UB *xml, INT len, UB *out, INT max,
 			if ( w->er < E_OK ) return w->er;
 			continue;
 		}
+		if ( w->loose ) loose_para(w, k, &t);
 		if ( w->pend != 0 && !reopens(w, k, &t) ) pend_resolve(w);
 		switch ( k ) {
 		case TK_START:

@@ -1,0 +1,11 @@
+<tad version="1.0" encoding="UTF-8" filename="基本表計算の縦の配置">
+<document>
+<p>基本表計算の縦の配置</p>
+<p>基本表計算のセルの縦の配置。メニューの定義。</p>
+</document>
+<menu>
+<item code="valign.top">上揃え</item>
+<item code="valign.middle">上下中央揃え</item>
+<item code="valign.bottom">下揃え</item>
+</menu>
+</tad>

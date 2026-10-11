@@ -81,6 +81,26 @@ LOCAL UH vbe_read( UINT reg )
 	return *(volatile UH *)(vbe_base + VBE_OFF + reg * 2);
 }
 
+/*
+ * The page shown, by the row the screen starts from. The card reads
+ * the pixels afresh at each refresh from wherever that says, so a flip
+ * is taken at once; it is used only when asked for (ts_disp_flip), and
+ * the screen keeps its first page otherwise.
+ */
+LOCAL UH	vbe_rows;			/* rows of one page */
+
+LOCAL ER vbe_flip( UINT page )
+{
+	vbe_write(VBE_Y_OFFSET, (UH)( page * vbe_rows ));
+	return ( vbe_read(VBE_Y_OFFSET) == (UH)( page * vbe_rows ) ) ? E_OK : E_IO;
+}
+
+/* Whether the mode holds two pages, as the card says and its window has room */
+LOCAL UINT vbe_pages( UINT pitch, UINT h )
+{
+	return ( vbe_read(VBE_VIRT_HEIGHT) >= h * 2 && (UD)pitch * h * 2 <= vbe_fb_size ) ? 2 : 1;
+}
+
 EXPORT INT knl_disp_hw_init( T_DISPHW *hw )
 {
 	T_PCIDEV	d;
@@ -163,6 +183,12 @@ EXPORT INT knl_disp_hw_init( T_DISPHW *hw )
 		return E_NOMEM;
 	}
 	hw->fb_va = fb_va;
+	vbe_rows = WANT_HEIGHT;
+	hw->pages = vbe_pages(hw->pitch, hw->height);
+	hw->flip = ( hw->pages > 1 ) ? vbe_flip : NULL;
+	hw->vsync = NULL;
+	hw->latch_us = 0;
+	hw->flip_start = FALSE;
 
 	return 1;
 }
@@ -198,6 +224,9 @@ EXPORT INT knl_disp_hw_setmode( T_DISPHW *hw, UINT w, UINT h )
 	hw->width = w;
 	hw->height = h;
 	hw->pitch = w * ( WANT_BPP / 8 );
+	vbe_rows = (UH)h;
+	hw->pages = vbe_pages(hw->pitch, h);
+	hw->flip = ( hw->pages > 1 ) ? vbe_flip : NULL;
 	return 1;
 }
 

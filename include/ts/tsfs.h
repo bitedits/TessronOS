@@ -31,7 +31,13 @@ extern "C" {
 
 #include <ts/uuid.h>
 
-#define TSFS_MAX_REC	64		/* records of one object */
+/*
+ * Records of one object. The native store counts them in 32 bits and keeps
+ * the placement table as a management part of as many blocks as it needs;
+ * the bound is that of the order of the records, which the metadata text
+ * carries (design 7.3), kept well inside what a program reads of it.
+ */
+#define TSFS_MAX_REC	256
 #define TSFS_NAME_MAX	64		/* bytes of the name held in the metadata */
 #define TSFS_EXT_MAX	16		/* the file name extension of a resource */
 
@@ -54,6 +60,7 @@ extern "C" {
 #define TFO_READ	0x0001
 #define TFO_WRITE	0x0002
 #define TFO_EXCL	0x0004
+#define TFO_SHARE	0x0008		/* the attributes alone: shared even with a writer */
 
 /*
  * Creation information
@@ -263,6 +270,38 @@ IMPORT ER  knl_tsfs_res_lst( ID vol, CONST TS_UUID *uuid, UB *buf, SZ size, INT 
  * protection, not as files (design 18.9).
  */
 IMPORT BOOL knl_tsfs_guards( CONST char *path );
+
+/*
+ * What the object layer knows a volume by. On the native store: the
+ * UUID the volume was made with, its label and its top object (zero
+ * while it has none); the FAT store has none of them (native FALSE).
+ * 'open' is how many have objects of it open now.
+ */
+typedef struct {
+	BOOL	native;
+	BOOL	rdonly;			/* it does not write: an error was found on it */
+	TS_UUID	vuuid;
+	TS_UUID	top;
+	UB	label[64];		/* UTF-8, NUL ended */
+	INT	open;
+} T_TSFSVINF;
+
+IMPORT ER  knl_tsfs_vol_info( ID vol, T_TSFSVINF *pk );
+
+/* The top object of a native volume set (NULL to take it away); E_NOSPT on the FAT store */
+IMPORT ER  knl_tsfs_set_top( ID vol, CONST TS_UUID *uuid );
+
+/*
+ * The object of a native volume that keeps the links other volumes make
+ * to its objects (design 8.3; zero while there is none), set; and the
+ * link table of an object by its UUID, without opening it.
+ */
+IMPORT ER  knl_tsfs_xref_obj( ID vol, TS_UUID *p_uuid );
+IMPORT ER  knl_tsfs_set_xref( ID vol, CONST TS_UUID *uuid );
+IMPORT ER  knl_tsfs_lst_lnk( ID vol, CONST TS_UUID *uuid, T_RLNK *buf, INT n, INT *p_cnt );
+
+/* Entries of the volume table made so far, and how many are volumes open now */
+IMPORT INT knl_tsfs_slots( INT *p_used );
 
 #ifdef __cplusplus
 }

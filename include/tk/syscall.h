@@ -745,6 +745,7 @@ IMPORT ER tk_ter_tsk( ID tskid );
 IMPORT ER tk_dis_dsp( void );
 IMPORT ER tk_ena_dsp( void );
 IMPORT ER tk_chg_pri( ID tskid, PRI tskpri );
+IMPORT ER tk_chg_slt( ID tskid, RELTIM slicetime );	/* T-Kernel 2.0; ms (design 4.3.1) */
 IMPORT ER tk_rot_rdq( PRI tskpri );
 IMPORT ER tk_rel_wai( ID tskid );
 IMPORT ID tk_get_tid( void );

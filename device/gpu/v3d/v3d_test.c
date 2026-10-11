@@ -18,13 +18,22 @@
  *	a job does not end, so a test that fails lets the next one run and
  *	the system go on starting. The tests that could leave the GPU in a
  *	bad state (the overflow and the MMU fault) come last, followed by a
- *	job that shows whether the GPU recovered.
+ *	job that shows whether the GPU recovered. Then compositing on the
+ *	GPU is checked against the processor (v3d_compose.c, its lines begin
+ *	"v3d compose:") and counted as one more test.
  *
  *	The jobs are the smallest frames the hardware renders: a binner
  *	list with no draws and a renderer list that clears the tile buffer
  *	to one colour (or loads it from memory) and stores every tile to a
  *	raster buffer in memory. The packets are packed by the code
  *	generated from Mesa's packet description (mesa/, MIT).
+ *
+ *	The address spaces of the processes (13-gpu.md 13.5) are checked
+ *	here too, at start whatever V3D is (v3d_as_check, lines "v3d:
+ *	address spaces"): a frame in a space of its own, a store from such a
+ *	space to an address where the kernel has a BO, which must fault and
+ *	leave the BO as it was, and a frame in the kernel's table after.
+ *	Processes get spaces, and so the V3D, only when all three pass.
  */
 
 #include <sys/machine.h>
@@ -53,7 +62,7 @@
 #include "mesa/v3d_packet_v71_pack.h"
 
 #define TEST_PRI		30		/* below everything that starts the system */
-#define TEST_STKSZ		16384
+#define TEST_STKSZ		32768
 #define TEST_DELAY_MS		3000		/* let the boot messages go by first */
 #define JOB_TMO_US		( 3 * 1000 * 1000 )	/* the common layer resets at 2 s */
 
@@ -165,10 +174,71 @@ LOCAL void bo_set_word( T_GPUBO *bo, UD i, UW v )
 	*(volatile UW *)bo_va(bo, i * 4) = v;
 }
 
-LOCAL UW bo_gpu( T_GPUBO *bo )
+/*
+ * The frames are built in the kernel's table, or in an address space of
+ * a process's (frame_as, the check of the spaces): the BOs are then
+ * entered there, and their addresses are those of that table
+ */
+#define AS_BOS		8
+LOCAL T_GPUAS	*frame_as;
+LOCAL struct {
+	T_GPUBO	*bo;
+	UW	va;
+} as_bos[AS_BOS];
+
+LOCAL UW bo_gpu_kernel( T_GPUBO *bo )
 {
 	T_GPUBOINFO	bi;
 
+	knl_gpu_bo_ref(bo, &bi);
+	return bi.offset;
+}
+
+LOCAL T_GPUBO *tbo_create( SZ size, ER *p_er )
+{
+	T_GPUBO	*bo;
+	INT	i;
+	UW	va;
+
+	if ( frame_as == NULL ) {
+		return knl_gpu_bo_create(size, 0, p_er);
+	}
+	bo = knl_gpu_bo_create(size, GPU_BO_NOGPU, p_er);
+	if ( bo == NULL ) {
+		return NULL;
+	}
+	for ( i = 0; i < AS_BOS && as_bos[i].bo != NULL; i++ ) ;
+	if ( i == AS_BOS || ( *p_er = knl_gpu_as_bind(frame_as, bo, &va) ) < E_OK ) {
+		if ( i == AS_BOS ) *p_er = E_LIMIT;
+		knl_gpu_bo_put(bo);
+		return NULL;
+	}
+	as_bos[i].bo = bo;
+	as_bos[i].va = va;
+	return bo;
+}
+
+LOCAL void tbo_put( T_GPUBO *bo )
+{
+	INT	i;
+
+	for ( i = 0; frame_as != NULL && i < AS_BOS; i++ ) {
+		if ( as_bos[i].bo == bo ) {
+			knl_gpu_as_unbind(frame_as, bo, as_bos[i].va);
+			as_bos[i].bo = NULL;
+		}
+	}
+	knl_gpu_bo_put(bo);
+}
+
+LOCAL UW bo_gpu( T_GPUBO *bo )
+{
+	T_GPUBOINFO	bi;
+	INT		i;
+
+	for ( i = 0; frame_as != NULL && i < AS_BOS; i++ ) {
+		if ( as_bos[i].bo == bo ) return as_bos[i].va;
+	}
 	knl_gpu_bo_ref(bo, &bi);
 	return bi.offset;
 }
@@ -213,9 +283,9 @@ LOCAL UB	stage[LISTS_BYTES];		/* lists are built here */
 
 LOCAL void frame_free( FRAMEJOB *fj )
 {
-	if ( fj->lists != NULL ) knl_gpu_bo_put(fj->lists);
-	if ( fj->tile_alloc != NULL ) knl_gpu_bo_put(fj->tile_alloc);
-	if ( fj->tile_state != NULL ) knl_gpu_bo_put(fj->tile_state);
+	if ( fj->lists != NULL ) tbo_put(fj->lists);
+	if ( fj->tile_alloc != NULL ) tbo_put(fj->tile_alloc);
+	if ( fj->tile_state != NULL ) tbo_put(fj->tile_state);
 	fj->lists = fj->tile_alloc = fj->tile_state = NULL;
 }
 
@@ -253,11 +323,11 @@ LOCAL ER frame_build( FRAMEJOB *fj, CONST FRAME *f )
 	ta_size = ( ( tx * ty * TILE_ALLOC_BLOCK + 4095 ) & ~4095U ) + 8192;
 	ts_size = tx * ty * TILE_STATE_BYTES;
 
-	fj->lists = knl_gpu_bo_create(LISTS_BYTES, 0, &er);
+	fj->lists = tbo_create(LISTS_BYTES, &er);
 	if ( fj->lists == NULL ) goto fail;
-	fj->tile_alloc = knl_gpu_bo_create(ta_size, 0, &er);
+	fj->tile_alloc = tbo_create(ta_size, &er);
 	if ( fj->tile_alloc == NULL ) goto fail;
-	fj->tile_state = knl_gpu_bo_create(ts_size, 0, &er);
+	fj->tile_state = tbo_create(ts_size, &er);
 	if ( fj->tile_state == NULL ) goto fail;
 	lists = bo_gpu(fj->lists);
 
@@ -395,7 +465,7 @@ LOCAL D frame_submit( FRAMEJOB *fj, T_GPUBO *dst, T_GPUBO *src )
 	bos[n++] = fj->tile_state;
 	if ( dst != NULL ) bos[n++] = dst;
 	if ( src != NULL ) bos[n++] = src;
-	return knl_gpu_submit(&fj->job, bos, n);
+	return knl_gpu_submit_as(&fj->job, bos, n, frame_as);
 }
 
 /* Build, run and wait for one frame; answers the job's result */
@@ -440,7 +510,7 @@ LOCAL UD count_bad( T_GPUBO *bo, UD words, UW want, UD guard, UD *p_guard_bad, U
 	return bad;
 }
 
-#define NTESTS		12
+#define NTESTS		14
 
 LOCAL struct {
 	CONST char	*name;
@@ -738,6 +808,109 @@ LOCAL void test_fault( void )
 	note("MMU fault", ok);
 }
 
+/* ---------------------------------------------------------------- the address spaces */
+
+#define AS_W		64
+#define AS_H		64
+#define AS_KEEP		0xA5A5A5A5U	/* what the kernel's BO holds */
+#define AS_TRIES	64
+
+EXPORT BOOL v3d_as_check( void )
+{
+	T_GPUBO		*t = NULL, *k = NULL, *skipped[AS_TRIES];
+	INT		nskip = 0;
+	T_V3DSTAT	a, b;
+	FRAME		f;
+	UD		words = (UD)AS_W * AS_H, guard = PAGE_SIZE / 4, i, bad = 0, changed = 0;
+	UD		gbad, first, us = 0;
+	UW		kva;
+	ER		er, er_fill = E_SYS, er_store = E_SYS, er_back = E_SYS;
+	BOOL		ok_fill, ok_store, ok_back;
+
+	frame_as = knl_gpu_as_create(&er);
+	if ( frame_as == NULL ) {
+		tm_printf((UB *)"v3d: address spaces FAIL: none made (%d); processes do not draw on the V3D\n", er);
+		return FALSE;
+	}
+	knl_memset(as_bos, 0, sizeof(as_bos));
+	knl_memset(&f, 0, sizeof(f));
+	f.w = AS_W;
+	f.h = AS_H;
+	f.fill = TRUE;
+
+	/* a frame stored to a BO of the space's own */
+	t = tbo_create((SZ)( words * 4 + PAGE_SIZE ), &er);
+	if ( t != NULL ) {
+		f.color = 0x13579BDFU;
+		f.dst = bo_gpu(t);
+		er_fill = frame_run(&f, t, NULL, &us);
+		bad = count_bad(t, words, f.color, guard, &gbad, &first) + gbad;
+	}
+	ok_fill = ( t != NULL && er_fill == E_OK && bad == 0 );
+	tm_printf((UB *)"v3d: address spaces: a frame in a table of its own %s: job %s, %ld pixels wrong, %ld us\n",
+		  ok_fill ? "ok" : "FAIL", ername(er_fill), bad, us);
+
+	/*
+	 * A store from the space to where the kernel's table has a BO: a
+	 * fault, the BO as it was. The two tables hand out addresses apart,
+	 * so the kernel's BOs are made until one lies where the space has
+	 * nothing (the ones passed over go at the end)
+	 */
+	kva = 0;
+	for ( i = 0; i < AS_TRIES; i++ ) {
+		k = knl_gpu_bo_create((SZ)( words * 4 ), 0, &er);
+		if ( k == NULL ) break;
+		kva = bo_gpu_kernel(k);
+		if ( v3d_mmu_lookup(v3d_as_mmu(knl_gpu_as_priv(frame_as)), kva) == 0
+		  && v3d_mmu_lookup(v3d_as_mmu(knl_gpu_as_priv(frame_as)), kva + (UW)( words * 4 ) - 4) == 0 ) {
+			break;
+		}
+		skipped[nskip++] = k;
+		k = NULL;
+	}
+	if ( k != NULL ) {
+		for ( i = 0; i < words; i++ ) bo_set_word(k, i, AS_KEEP);
+		bo_fresh(k, 0, words * 4);
+		v3d_stat(&a);
+		f.color = 0xDEADBEEFU;
+		f.dst = kva;
+		er_store = frame_run(&f, NULL, NULL, &us);
+		v3d_stat(&b);
+		bo_fresh(k, 0, words * 4);
+		for ( i = 0; i < words; i++ ) {
+			if ( bo_word(k, i) != AS_KEEP ) changed++;
+		}
+		ok_store = ( er_store == E_IO && changed == 0 && b.faults > a.faults );
+		tm_printf((UB *)"v3d: address spaces: a store to the kernel's BO at %08x %s: job %s, %d fault(s), "
+			  "last at %08x, %ld words changed\n", kva, ok_store ? "ok" : "FAIL", ername(er_store),
+			  (INT)( b.faults - a.faults ), b.fault_addr, changed);
+	} else {
+		ok_store = FALSE;
+		tm_printf((UB *)"v3d: address spaces: a store to the kernel's BO FAIL: no BO, or its address in use\n");
+	}
+
+	/* and the kernel's table again */
+	if ( t != NULL ) tbo_put(t);
+	knl_gpu_as_put(frame_as);
+	frame_as = NULL;
+	if ( k != NULL ) {
+		f.color = 0x2468ACE0U;
+		f.dst = kva;
+		er_back = frame_run(&f, k, NULL, &us);
+		bad = count_bad(k, words, f.color, 0, &gbad, &first);
+		knl_gpu_bo_put(k);
+	}
+	while ( nskip > 0 ) knl_gpu_bo_put(skipped[--nskip]);
+	ok_back = ( er_back == E_OK && bad == 0 );
+	tm_printf((UB *)"v3d: address spaces: a frame in the kernel's table after %s: job %s, %ld pixels wrong\n",
+		  ok_back ? "ok" : "FAIL", ername(er_back), bad);
+
+	ok_fill = ok_fill && ok_store && ok_back;
+	tm_printf((UB *)"v3d: address spaces %s: processes %s on the V3D\n",
+		  ok_fill ? "ok" : "FAIL", ok_fill ? "draw" : "do not draw");
+	return ok_fill;
+}
+
 /* ---------------------------------------------------------------- the task */
 
 LOCAL void test_task( INT stacd, void *exinf )
@@ -757,6 +930,7 @@ LOCAL void test_task( INT stacd, void *exinf )
 	test_overflow();
 	test_fault();
 	test_fill("after fault", 64, 64, 0x0F1E2D3CU);
+	note("address spaces", v3d_as_check());
 
 	v3d_stat(&st);
 	tm_printf((UB *)"v3d test: interrupts: core %d (frames %d, flushes %d, out of memory %d), "
@@ -764,6 +938,9 @@ LOCAL void test_task( INT stacd, void *exinf )
 		  (INT)st.core_ints, (INT)st.frdone, (INT)st.fldone, (INT)st.outomem,
 		  (INT)st.hub_ints, (INT)st.faults, (INT)st.storms);
 	note("interrupts", st.frdone > 0 && st.fldone > 0 && st.storms == 0);
+
+	/* last, with the GPU known to work: compositing on it, against the processor */
+	note("compose", v3d_compose_check());
 
 	for ( i = 0; i < nresult; i++ ) {
 		if ( result[i].ok ) npass++;
@@ -781,7 +958,7 @@ EXPORT void v3d_test_start( void )
 	T_CTSK	ctsk;
 	ID	tskid;
 
-	if ( CNF_V3D < 2 ) {
+	if ( CNF_V3D != 2 ) {
 		return;
 	}
 	knl_memset(&ctsk, 0, sizeof(ctsk));

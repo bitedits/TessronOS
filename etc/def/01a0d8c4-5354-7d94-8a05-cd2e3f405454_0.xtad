@@ -1,0 +1,7 @@
+<tad version="1.0" encoding="UTF-8" filename="文字検索の辞書">
+<document>
+<p>文字検索の辞書</p>
+<p>小物「文字検索」が使う文字の辞書。漢字のよみ、画数、部首、部品と、記号の名称、文字の分類、関連字をレコード1に持つ。tools/gen_chardic.pyがビルドのときに作る。</p>
+<p>この辞書は次のデータを含む。KANJIDIC2とKRADFILE（Electronic Dictionary Research and Development Group、http://www.edrdg.org/edrdg/licence.html、CC BY-SA 4.0）、KanjiVG（Copyright (C) 2009-2013 Ulrich Apel、http://kanjivg.tagaini.net、CC BY-SA 3.0）、Unicode Unihan DatabaseとUnicode Character Database（Copyright Unicode, Inc.、Unicode License v3）。辞書のレコード1はこれらから作った派生物であり、CC BY-SA 4.0（https://creativecommons.org/licenses/by-sa/4.0/）で配布する。</p>
+</document>
+</tad>

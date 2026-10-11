@@ -227,6 +227,14 @@ EXPORT INT so_recvfrom( INT s, void *mem, SZ size, INT flags,
 	return so_ret_n(lwip_recvfrom(s, mem, (size_t)size, flags, from, fromlen));
 }
 
+/* The stack does not hand over the type of service: never there */
+EXPORT INT so_recvtos( INT s, void *mem, SZ size, INT flags,
+		       struct sockaddr *from, socklen_t *fromlen, INT *p_tos )
+{
+	*p_tos = -1;
+	return so_recvfrom(s, mem, size, flags, from, fromlen);
+}
+
 EXPORT INT so_read( INT s, void *mem, SZ size )
 {
 	return so_ret_n(lwip_read(s, mem, (size_t)size));
@@ -411,6 +419,69 @@ EXPORT ER so_resolve( CONST char *name, UW *p_addr )
 		so_freeaddrinfo(res);
 	}
 	return er;
+}
+
+/*
+ * The addresses of a name, for the callers of both stacks. This stack
+ * carries IPv4 only: an IPv6 address is never answered, and a question
+ * for IPv6 alone finds nothing.
+ */
+EXPORT INT so_resolveall( CONST char *name, INT family, INT flags, T_SOADDR *addrs, INT max )
+{
+	UW	a;
+	INT	i;
+	ER	er;
+
+	if ( name == NULL || addrs == NULL || max <= 0 ) {
+		return E_PAR;
+	}
+	if ( family == AF_INET6 ) {
+		return E_NOEXS;
+	}
+	if ( family != AF_INET && family != AF_UNSPEC ) {
+		return E_NOSPT;
+	}
+	er = so_resolve(name, &a);
+	if ( er < E_OK ) {
+		return er;
+	}
+	for ( i = 0; i < (INT)sizeof(*addrs); i++ ) {
+		((UB *)addrs)[i] = 0;
+	}
+	addrs->family = AF_INET;
+	*(UW *)addrs->addr = a;
+	return 1;
+}
+
+EXPORT INT so_getifaddr6( T_SOIF6 *list, INT max, UB *gw )
+{
+	INT	i;
+
+	if ( gw != NULL ) {
+		for ( i = 0; i < 16; i++ ) gw[i] = 0;
+	}
+	return 0;
+}
+
+EXPORT ER so_getdns6( INT n, UB *addr )
+{
+	return E_NOEXS;
+}
+
+/* IPv6 is not carried by this stack: it is always off */
+EXPORT ER so_setip6( UINT mode, CONST UB *addr, INT plen, CONST UB *gw )
+{
+	return ( ( mode & SO_IP6_MODE ) == SO_IP6_OFF ) ? E_OK : E_NOSPT;
+}
+
+EXPORT UINT so_getip6( void )
+{
+	return SO_IP6_OFF;
+}
+
+EXPORT ER so_setdns6( INT n, CONST UB *addr )
+{
+	return E_NOSPT;
 }
 
 /* One byte of an address as up to three digits, and where that ended */

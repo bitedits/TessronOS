@@ -21,7 +21,9 @@
 # rumpcomp_*), which peripheral_kernel/network/netbsd supplies.
 #
 # The sources are not changed. The few files a kernel build generates
-# (vers.c, ioconf.c and the machine header links) are made here.
+# (vers.c, ioconf.c and the machine header links) are made here. One
+# function of theirs, ip_savecontrol, is wrapped at the link by one of
+# the interface component's.
 #
 # Usage: build.sh [fetch|gen|compile|link|notices|all|clean]
 #
@@ -37,12 +39,28 @@ NM=$XB/aarch64-none-elf-nm
 JOBS=${JOBS:-12}
 
 # The release, where its sources are fetched from, and the checksum of
-# the set NetBSD publishes for it (the SHA512 file of the release)
-NB_VER=10.1
-NB_URL=https://cdn.netbsd.org/pub/NetBSD/NetBSD-$NB_VER/source/sets/syssrc.tgz
-NB_SHA512=766ac21f33cfe0e701dfedb894fa07f36d811da1a12e979181e8fca7af4e627852680ce42a7b29e97dd3e2e402ddf9ae7bfba60c8d7dc6b8a3354d8ce8c06926
+# the set NetBSD publishes for it (the SHA512 file of the release). A
+# release a newer one has replaced is taken off the main mirror and kept
+# on the archive, so each place is tried in turn (NB_URL first when given).
+NB_VER=11.0
+NB_URLS="${NB_URL:+$NB_URL }https://cdn.netbsd.org/pub/NetBSD/NetBSD-$NB_VER/source/sets/syssrc.tgz
+ https://archive.netbsd.org/pub/NetBSD-archive/NetBSD-$NB_VER/source/sets/syssrc.tgz
+ https://ftp.netbsd.org/pub/NetBSD/NetBSD-$NB_VER/source/sets/syssrc.tgz"
+NB_SHA512=318d451ecc83749607d5448198c02663ea5f0b7f4cc74fb565747f86eead7b66b5809a37deee219dc6ddb2e5ee332d1cbb94c1a4e9db63620c3abd7586fb3057
+# When the set cannot be had whole from any of them (a server may hand
+# out only its first megabytes), the part of it that is kept below -- the same
+# files, as they are in the set, packed in name order with no owner or
+# time of packing -- is taken instead: from this tree if it is here, else
+# from the TessronOS release that carries it (NB_SUB_URL first when given)
+NB_SUB=netbsd-$NB_VER-rumpsrc.tgz
+NB_SUB_URLS="${NB_SUB_URL:+$NB_SUB_URL }https://github.com/satromi/TessronOS/releases/download/netbsd-$NB_VER-src/$NB_SUB"
+NB_SUB_SHA512=69df51784bc88696219af3a6793c780f1edc051a5c98bc8edabc88efa88766be63559dbc9eb20c8c7c9947f381530c188e8dc8835ac50ed43af2784517295ba4
 NB=${NBSRC:-$HOME/netbsd/netbsd-$NB_VER}
 OUT=${OUT:-$HOME/tessronos-netbsd}
+# The instruction set the object is built for: the kernel's (common.mk).
+# The Raspberry Pi 4 family takes ARMv8.0-A with CRC32 (MARCH=armv8-a+crc,
+# OUT=~/tessronos-netbsd-v80), which has no LSE atomics
+MARCH=${MARCH:-armv8.2-a}
 S=$NB/sys
 C=$NB/common
 R=$S/rump
@@ -54,7 +72,7 @@ OBJ=$OUT/obj
 # directories (not what is below them) -- what the stack's sources and
 # the headers they include come from, as the compiler lists them -- and
 # the machine's headers whole
-EXTRACT_DIRS="common/include/ppath common/include/prop
+EXTRACT_DIRS="common/include/libc common/include/ppath common/include/prop
  common/lib/libc/arch/aarch64/atomic common/lib/libc/arch/aarch64/gen
  common/lib/libc/arch/aarch64/string common/lib/libc/atomic common/lib/libc/cdb
  common/lib/libc/gen common/lib/libc/hash/murmurhash common/lib/libc/hash/rmd160
@@ -65,8 +83,8 @@ EXTRACT_DIRS="common/include/ppath common/include/prop
  sys/altq sys/compat/common sys/compat/net sys/compat/netinet6 sys/compat/sys
  sys/conf sys/crypto/blake2 sys/crypto/chacha sys/crypto/cprng_fast
  sys/crypto/nist_hash_drbg sys/dev sys/dev/mii sys/kern sys/lib/libkern
- sys/miscfs/deadfs sys/net sys/net/agr sys/net80211 sys/netatalk sys/netinet
- sys/netinet6 sys/netipsec sys/netmpls sys/rump sys/rump/include/machine
+ sys/net sys/net/agr sys/net80211 sys/netatalk sys/netinet
+ sys/netinet6 sys/netipsec sys/netmpls sys/rump/include/machine
  sys/rump/include/opt sys/rump/include/rump sys/rump/include/rump-sys
  sys/rump/include/sys sys/rump/librump/rumpkern
  sys/rump/librump/rumpkern/arch/generic sys/rump/librump/rumpnet
@@ -74,6 +92,36 @@ EXTRACT_DIRS="common/include/ppath common/include/prop
  sys/rump/net/lib/libnetinet6 sys/secmodel sys/secmodel/extensions
  sys/secmodel/suser sys/sys sys/ufs/ufs sys/uvm"
 EXTRACT_TREES="sys/arch/aarch64/include sys/arch/arm/include sys/arch/evbarm/include"
+
+# The kept part of the set (NB_SUB): from this tree, else from where it is published
+fetch_sub() {
+	local sub u got=""
+	sub=$(dirname "$NB")/$NB_SUB
+	if [ -f "$TOP/tools/netbsd/$NB_SUB" ]; then
+		cp "$TOP/tools/netbsd/$NB_SUB" "$sub"
+		got=$TOP/tools/netbsd/$NB_SUB
+	else
+		for u in $NB_SUB_URLS; do
+			echo "fetch: $u"
+			if curl -fsSL -o "$sub.part" "$u"; then
+				mv "$sub.part" "$sub"
+				got=$u
+				break
+			fi
+			rm -f "$sub.part"
+		done
+	fi
+	if [ -z "$got" ]; then
+		echo "fetch: neither NetBSD $NB_VER's syssrc.tgz nor its kept part $NB_SUB could be had" \
+		     "(set NB_URL to a place that has the set, or NB_SUB_URL to one that has the part)" >&2
+		exit 1
+	fi
+	echo "$NB_SUB_SHA512  $sub" | sha512sum -c -
+	mkdir -p "$NB"
+	tar xzf "$sub" -C "$NB" --strip-components=1
+	rm -f "$sub"
+	echo "fetch: NetBSD $NB_VER sources in $NB (the kept part, from $got)"
+}
 
 stage_fetch() {
 	if [ -d "$S/rump" ]; then
@@ -84,7 +132,31 @@ stage_fetch() {
 	local tgz
 	tgz=$(dirname "$NB")/syssrc-$NB_VER.tgz
 	if [ ! -f "$tgz" ]; then
-		curl -fsSL -o "$tgz.part" "$NB_URL"
+		local u got="" rc n
+		for u in $NB_URLS; do
+			echo "fetch: $u"
+			rm -f "$tgz.part"
+			# a server that closes the connection part way (the archive
+			# gives a megabyte at a time) is asked again from where it
+			# stopped: curl says 18 for a transfer cut short
+			n=0
+			while :; do
+				rc=0
+				curl -fsSL -C - -o "$tgz.part" "$u" || rc=$?
+				[ "$rc" -eq 18 ] && [ "$n" -lt 400 ] || break
+				n=$((n + 1))
+			done
+			if [ "$rc" -eq 0 ]; then
+				got=$u
+				break
+			fi
+			rm -f "$tgz.part"
+		done
+		if [ -z "$got" ]; then
+			echo "fetch: NetBSD $NB_VER's syssrc.tgz could not be had whole; its kept part instead"
+			fetch_sub
+			return
+		fi
 		mv "$tgz.part" "$tgz"
 	fi
 	echo "$NB_SHA512  $tgz" | sha512sum -c -
@@ -214,13 +286,13 @@ RUMPKERN_SRCS="rump.c rumpcopy.c cons.c emul.c etfs_wrap.c intr.c
  subr_kcpuset.c subr_kmem.c subr_kobj.c subr_localcount.c subr_log.c
  subr_lwp_specificdata.c subr_once.c subr_pcq.c subr_percpu.c subr_pool.c
  subr_prf.c subr_pserialize.c subr_psref.c subr_specificdata.c subr_time.c
- subr_thmap.c subr_vmem.c subr_workqueue.c subr_xcall.c sys_descrip.c
- sys_generic.c sys_getrandom.c sys_module.c sys_pipe.c sys_select.c
+ subr_time_arith.c subr_thmap.c subr_vmem.c subr_workqueue.c subr_xcall.c
+ sys_descrip.c sys_generic.c sys_getrandom.c sys_module.c sys_pipe.c sys_select.c
  syscalls.c uipc_sem.c
  uvm_aobj.c uvm_readahead.c uvm_object.c uvm_swapstub.c
  uvm_page_array.c uvm_page_status.c
- secmodel.c secmodel_suser.c secmodel_extensions.c
- vnode_if.c clock_subr.c
+ secmodel.c secmodel_suser.c secmodel_extensions.c secmodel_extensions_rump.c
+ clock_subr.c
  nist_hash_drbg.c cprng_fast.c chacha_impl.c chacha_ref.c chacha_selftest.c
  blake2s.c
  rump_generic_cpu.c rump_generic_kobj.c rump_generic_pmap.c
@@ -250,8 +322,8 @@ LIBKERN_SRCS="byte_swap_2.S byte_swap_4.S byte_swap_8.S memcmp.S memcpy.S
  membar_ops.S atomic_init_cas.c
  snprintb.c proc_compare.c getfstypename.c
  prop_array.c prop_array_util.c prop_bool.c prop_data.c
- prop_dictionary.c prop_dictionary_util.c prop_ingest.c
- prop_kern.c prop_number.c prop_object.c prop_stack.c prop_string.c
+ prop_dictionary.c prop_dictionary_util.c prop_extern.c prop_ingest.c
+ prop_intern.c prop_kern.c prop_number.c prop_object.c prop_stack.c prop_string.c
  ppath.c ppath_extant.c
  kern_assert.c __main.c cpuset.c inet_addr.c intoa.c
  md4c.c md5c.c rmd160.c sha1.c sha2.c sha3.c keccak.c murmurhash.c
@@ -301,17 +373,17 @@ NET_SRCS="if.c if_loop.c if_stats.c route.c rtsock.c raw_usrreq.c
 
 # TessronOS's interface component over the device "neta"
 NETA_PATH="$COMP"
-NETA_SRCS="if_tsneta.c tsnet_conf.c novfs_stub.c"
+NETA_SRCS="if_tsneta.c tsnet_conf.c"
 
 # ---------------------------------------------------------------- flags
 
 # As the kernel is built (common.mk), without the floating point
 # registers, which kernel tasks do not have; with the rump kernel's own
 # options (opt_rumpkernel.h)
-CFLAGS="-march=armv8.2-a -mgeneral-regs-only -mno-outline-atomics -O2 -g
+CFLAGS="-march=$MARCH -mgeneral-regs-only -mno-outline-atomics -O2 -g
  -ffreestanding -fno-strict-aliasing -fno-delete-null-pointer-checks
  -fno-common -fno-pic -fno-stack-protector -fno-omit-frame-pointer
- -ffunction-sections -fdata-sections -std=gnu99
+ -ffunction-sections -fdata-sections -std=gnu11
  -Wall -Wno-unused -Wno-sign-compare -Wno-pointer-sign
  -Wno-format-zero-length -Wno-address-of-packed-member -Wno-cast-function-type
  -Wno-array-bounds -Wno-stringop-overflow -Wno-stringop-overread
@@ -329,7 +401,7 @@ CPPFLAGS="-nostdinc -D_RUMPKERNEL -DDIAGNOSTIC
  -I$S/lib/libkern -I$C/lib/libc/quad -I$C/lib/libc/string
  -I$C/lib/libc/arch/aarch64/string -I$C/lib/libc/arch/aarch64/atomic
  -I$C/lib/libc/hash/sha3 -I$C/lib/libprop"
-ASFLAGS="-march=armv8.2-a -D_LOCORE -D_KERNEL"
+ASFLAGS="-march=$MARCH -D_LOCORE -D_KERNEL"
 
 export CC CFLAGS CPPFLAGS ASFLAGS
 
@@ -391,7 +463,8 @@ stage_compile() {
 	: > "$OUT/jobs.list"
 	MISSING=0
 	add_jobs rumpkern "$RUMPKERN_PATH" "$RUMPKERN_SRCS $RUMPKERN_NORENAME" "-I$GEN/rumpkern"
-	add_jobs libkern "$LIBKERN_PATH" "$LIBKERN_SRCS"
+	# the C library's internal declarations, which libkern's sources share
+	add_jobs libkern "$LIBKERN_PATH" "$LIBKERN_SRCS" "-I$C/include/libc"
 	# net_stub.c holds tentative definitions of what if.c defines
 	add_jobs rumpnet "$RUMPNET_PATH" "$RUMPNET_SRCS" "-fcommon"
 	add_jobs net "$NET_PATH" "$NET_SRCS" "-I$GEN/net"
@@ -409,6 +482,12 @@ stage_compile() {
 	fi
 }
 
+# The objects of the sources listed above, and no others: an object an
+# earlier release's source left in $OBJ is not taken
+objects() {
+	awk '{ print $2 }' "$OUT/jobs.list" | sort
+}
+
 # The names a rump kernel keeps: its own entry points, the link set
 # bounds, and what the compiler's run-time library provides
 RENAME_KEEP='^(rump|RUMP|__|_GLOBAL_OFFSET_TABLE)'
@@ -422,7 +501,7 @@ stage_link() {
 	# rump_syscalls.o is generated into it already; only the calls the
 	# compiler makes of its own (memset for a structure cleared) are
 	# turned to the rump kernel's copies.
-	for o in $(find "$OBJ" -name '*.o' | sort); do
+	for o in $(objects); do
 		local r keep=$RENAME_KEEP
 		r=$OUT/ren/$(echo "${o#$OBJ/}" | tr / _)
 		cp "$o" "$r"
@@ -449,7 +528,10 @@ stage_link() {
 		echo "	}"
 		echo "}"
 	} > "$OUT/linkset.ld"
-	$LD -r -d -T "$OUT/linkset.ld" -o "$OUT/rumpnet_all.o" "$OUT"/ren/*.o
+	# The stack's calls of ip_savecontrol go to the interface component's
+	# own (rumpcomp/tsnet_conf.c), which adds the type of service of a
+	# datagram received to its ancillary data (ECN)
+	$LD -r -d -T "$OUT/linkset.ld" --wrap=rumpns_ip_savecontrol -o "$OUT/rumpnet_all.o" "$OUT"/ren/*.o
 	# Only the rump kernel's entry points stay global; the rest of its
 	# names cannot meet the kernel's
 	$NM -g --defined-only "$OUT/rumpnet_all.o" | awk '{ print $NF }' \
@@ -468,7 +550,7 @@ stage_link() {
 # with the stack in it (THIRD_PARTY_NOTICES.md)
 stage_notices() {
 	local list=$OUT/notice.files out=$OUT/NOTICE-netbsd.txt
-	find "$OBJ" -name '*.o.d' -exec cat {} + | tr ' ' '\n' \
+	objects | sed 's/$/.d/' | xargs cat | tr ' ' '\n' \
 		| sed 's/^[[:space:]]*//' | grep -E "^$NB/" | grep -v ':$' | sort -u > "$list"
 	{
 		echo "The NetBSD $NB_VER sources compiled into the TessronOS network stack:"

@@ -82,6 +82,14 @@ USER_TEXT void u_task_fault( INT stacd, void *exinf )
 	while (1) ;
 }
 
+/* quick task: signals the semaphore and ends at once */
+USER_TEXT void u_task_quick( INT stacd, void *exinf )
+{
+	u_svc(TSN_TK_SIG_SEM, (UBINT)stacd, 1, 0);
+	u_svc(TSN_TK_EXT_TSK, 0, 0, 0);
+	while (1) ;
+}
+
 /* the user entry addresses as absolute values (the kernel cannot take them with adrp) */
 __asm__(
 	"	.pushsection .data\n"
@@ -91,9 +99,10 @@ __asm__(
 	"	.quad u_task_tid\n"
 	"	.quad u_task_fault\n"
 	"	.quad u_shared\n"
+	"	.quad u_task_quick\n"
 	"	.popsection\n"
 );
-IMPORT UBINT	kt_user_entries[4];
+IMPORT UBINT	kt_user_entries[5];
 
 /* ---- kernel side -------------------------------------------------- */
 
@@ -171,7 +180,74 @@ LOCAL void test_el0_fault_contained( void )
 	KT_ASSERT_EQ(rtsk.tskstat, TTS_DMT);			/* terminated by the fault handler */
 	KT_ASSERT_EQ(sem_id, sem_id);				/* kernel data untouched */
 	KT_ASSERT_ER(tk_del_tsk(id), E_OK);
-	KT_ASSERT_EQ(knl_pf_free_count(-1), before);		/* user stack released */
+	/* user stack released; what ended processes held may come back meanwhile too (proc.c, prc_reaper) */
+	KT_ASSERT(knl_pf_free_count(-1) >= before);
+}
+
+/*
+ * Tasks of protection level 3 made, run and deleted KT_CHURN_N times:
+ * each user stack is put where the one before had its, in the system
+ * process space, and the tables and pages under the stacks come back
+ * (design 4.6.2). Without that the space's stack area is used up a
+ * little at each task, and a table is kept for each 2MB of it.
+ */
+#if TS_NETSTACK_NETBSD
+IMPORT UD	knl_rump_pages( void );
+#endif
+
+IMPORT BOOL	knl_pt_reclaim( void );
+IMPORT UW	knl_pt_pruned( INT *p_waiting );
+
+LOCAL UD el0_free( void )
+{
+#if TS_NETSTACK_NETBSD
+	UD	r, f;
+
+	do {
+		r = knl_rump_pages();
+		f = knl_pf_free_count(-1);
+	} while ( knl_rump_pages() != r );
+	return f + r;
+#else
+	return knl_pf_free_count(-1);
+#endif
+}
+
+LOCAL void test_el0_stack_churn( void )
+{
+	UD	before = 0, after = 0;
+	UBINT	next0 = 0;
+	INT	i, t, bad = 0, waiting = 0;
+	UW	pruned0 = 0;
+	ER	er;
+	ID	id;
+
+	for ( i = 0; i < KT_CHURN_N + 8; i++ ) {
+		if ( i == 8 ) {		/* the first few take what was not there yet */
+			(void)knl_pt_reclaim();
+			next0 = knl_sysprc_space.stk_next;
+			pruned0 = knl_pt_pruned(NULL);
+			before = el0_free();
+		}
+		id = cre_user_task(4, NULL);
+		if ( id <= 0 ) { bad++; break; }
+		if ( tk_sta_tsk(id, sem_id) != E_OK || tk_wai_sem(sem_id, 1, 1000) != E_OK ) { bad++; break; }
+		while ( ( er = tk_del_tsk(id) ) == E_OBJ ) tk_dly_tsk(1);	/* not dormant yet */
+		if ( er != E_OK ) { bad++; break; }
+	}
+	for ( t = 0; t < 50; t++ ) {
+		(void)knl_pt_reclaim();
+		after = el0_free();
+		if ( after == before ) break;
+		tk_dly_tsk(100);
+	}
+	(void)knl_pt_pruned(&waiting);
+	tm_printf((UB*)"  %d tasks: stack area %lx -> %lx, tables taken out %d (waiting %d), free pages %d -> %d\n",
+		  (INT)KT_CHURN_N, (UD)next0, (UD)knl_sysprc_space.stk_next,
+		  (INT)( knl_pt_pruned(NULL) - pruned0 ), waiting, (INT)before, (INT)after);
+	KT_ASSERT_EQ(bad, 0);
+	KT_ASSERT_EQ(knl_sysprc_space.stk_next, next0);
+	KT_ASSERT_EQ(after, before);
 }
 
 EXPORT void ktest_el0( void )
@@ -187,6 +263,7 @@ EXPORT void ktest_el0( void )
 	KT_RUN(test_el0_syscall);
 	KT_RUN(test_el0_tid_rsfn);
 	KT_RUN(test_el0_fault_contained);
+	KT_RUN(test_el0_stack_churn);
 
 	tk_del_sem(sem_id);
 }

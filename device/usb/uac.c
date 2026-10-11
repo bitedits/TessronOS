@@ -359,6 +359,25 @@ LOCAL void load_volume( UAC *u, UACDIR *d )
 
 /* ---------------------------------------------------------------- attach */
 
+#ifdef USE_KTEST
+/*
+ * For the tests: a device of this product name that comes from now on is
+ * not taken, and is left to the programs (SVC class 12, WebUSB); NULL
+ * takes them all again.
+ */
+LOCAL UB	uac_leave_name[32];
+
+EXPORT void knl_uac_leave( CONST UB *product )
+{
+	INT	i;
+
+	for ( i = 0; i < (INT)sizeof(uac_leave_name) - 1 && product != NULL && product[i] != 0; i++ ) {
+		uac_leave_name[i] = product[i];
+	}
+	uac_leave_name[i] = 0;
+}
+#endif
+
 EXPORT BOOL knl_uac_match( USBDEV *dev )
 {
 	UB	*p, *end;
@@ -366,6 +385,11 @@ EXPORT BOOL knl_uac_match( USBDEV *dev )
 	if ( dev->cfg == NULL ) {
 		return FALSE;
 	}
+#ifdef USE_KTEST
+	if ( uac_leave_name[0] != 0 && knl_strcmp((CONST char *)dev->product, (CONST char *)uac_leave_name) == 0 ) {
+		return FALSE;
+	}
+#endif
 	end = dev->cfg + dev->cfglen;
 	for ( p = dev->cfg; p != NULL; p = knl_usb_next_desc(p, end) ) {
 		if ( p[1] == USB_DT_INTERFACE && p[0] >= 9 && p[5] == USB_CLASS_AUDIO
@@ -486,10 +510,14 @@ LOCAL UAC *uac_capture( void )
 	return NULL;
 }
 
+/* The function that plays now, else the first that can */
 LOCAL UAC *uac_playback( void )
 {
 	INT	i;
 
+	if ( out_uac != NULL && out_uac->used ) {
+		return out_uac;
+	}
 	for ( i = 0; i < UAC_MAX; i++ ) {
 		if ( uac_pool[i].used && uac_pool[i].play.nalt > 0 ) {
 			return &uac_pool[i];
@@ -497,6 +525,80 @@ LOCAL UAC *uac_playback( void )
 	}
 
 	return NULL;
+}
+
+/*
+ * A function's output id (include/ts/snd.h): "usb:VVVV:PPPP@C-R.h.h",
+ * the controller, its root port from 1 and then the hub port of each
+ * tier on the way down.
+ */
+LOCAL void uac_id( CONST UAC *u, UB *id )
+{
+	CONST USBDEV	*d = u->dev;
+	INT		n, t;
+
+	n = tm_sprintf(id, (CONST UB *)"usb:%04x:%04x@%d-%d", (UINT)GET16(d->ddesc + 8),
+		       (UINT)GET16(d->ddesc + 10), d->hc->index, d->root_port + 1);
+	for ( t = 0; t < d->depth && t < 5; t++ ) {
+		n += tm_sprintf(id + n, (CONST UB *)".%d", (INT)((d->route >> (4 * t)) & 0xf));
+	}
+}
+
+/* Whether id and the function's own differ only after the '@' (where it is plugged in) */
+LOCAL BOOL same_kind( CONST UB *a, CONST UB *b )
+{
+	INT	i;
+
+	for ( i = 0; a[i] != 0 && a[i] == b[i] && a[i] != '@'; i++ ) {
+		;
+	}
+
+	return ( a[i] == '@' && b[i] == '@' && i > 0 );
+}
+
+/* The function of output id: the one at its port, else the first of its ids, else none */
+LOCAL UAC *uac_of( CONST UB *id )
+{
+	UB	mine[SND_ID_MAX];
+	UAC	*like = NULL;
+	INT	i;
+
+	for ( i = 0; i < UAC_MAX; i++ ) {
+		UAC	*u = &uac_pool[i];
+
+		if ( !u->used || u->play.nalt == 0 ) {
+			continue;
+		}
+		uac_id(u, mine);
+		if ( knl_strcmp((CONST char *)mine, (CONST char *)id) == 0 ) {
+			return u;
+		}
+		if ( like == NULL && same_kind(mine, id) ) {
+			like = u;
+		}
+	}
+
+	return like;
+}
+
+LOCAL INT uac_outputs( SDOut *o, INT max )
+{
+	UB	id[SND_ID_MAX];
+	INT	i, n = 0;
+
+	for ( i = 0; i < UAC_MAX && n < max; i++ ) {
+		UAC	*u = &uac_pool[i];
+
+		if ( !u->used || u->play.nalt == 0 ) {
+			continue;
+		}
+		uac_id(u, id);
+		knl_snd_out_set(&o[n], id, u->dev->product, SND_BE_USB,
+				( u->play.fu_id != 0 && u->play.vol_max > u->play.vol_min ) ? SND_OF_LEVEL : 0);
+		n++;
+	}
+
+	return n;
 }
 
 /* ---------------------------------------------------------------- streams */
@@ -687,7 +789,7 @@ LOCAL BOOL uac_rec_running( void )
 	return ( cap_uac != NULL && cap_uac->used && cap_uac->cap.cur >= 0 );
 }
 
-LOCAL ER uac_play_start( UW *rate, INT *channels )
+LOCAL ER uac_play_start( CONST UB *id, UW *rate, INT *channels )
 {
 	UACDIR	*d;
 	UACALT	*a;
@@ -695,7 +797,8 @@ LOCAL ER uac_play_start( UW *rate, INT *channels )
 	UW	r;
 	ER	er;
 
-	out_uac = uac_playback();
+	out_uac = NULL;
+	out_uac = ( id != NULL && id[0] != 0 ) ? uac_of(id) : uac_playback();
 	if ( out_uac == NULL ) {
 		return E_NOSPT;
 	}
@@ -745,11 +848,6 @@ LOCAL void uac_play_stop( void )
 LOCAL BOOL uac_play_running( void )
 {
 	return ( out_uac != NULL && out_uac->used && out_uac->play.cur >= 0 );
-}
-
-LOCAL BOOL uac_can_play( void )
-{
-	return ( uac_playback() != NULL );
 }
 
 LOCAL BOOL uac_can_record( void )
@@ -802,7 +900,7 @@ LOCAL ER uac_set_level( INT dn, CONST SDVol *v )
 
 EXPORT CONST SNDHW knl_uac_hw = {
 	SND_BE_USB,
-	uac_can_play,
+	uac_outputs,
 	uac_can_record,
 	uac_play_start,
 	uac_play_stop,
@@ -812,5 +910,7 @@ EXPORT CONST SNDHW knl_uac_hw = {
 	uac_rec_running,
 	uac_poll,
 	uac_get_level,
-	uac_set_level
+	uac_set_level,
+	0,
+	0
 };

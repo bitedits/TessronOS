@@ -23,6 +23,7 @@
 #include <ts/ui.h>
 
 #define XFC_ENT_MAX	2048		/* entries a list holds */
+#define XFC_DISKS	2048		/* disks listed: every disk and partition the device manager knows */
 #define XFC_CONN_MAX	8		/* FTP connections kept */
 #define XFC_FIELD	128		/* bytes of a field of the FTP form */
 #define XFC_WIN_MAX	8		/* windows at once: the media and the file lists */
@@ -37,6 +38,8 @@
 #define E_DIR		6
 #define E_FILE		7
 
+typedef struct xfcbt XFCBT;		/* a disk of the BTRON file system (xfc_btron.c) */
+
 typedef struct {
 	UINT	kind;			/* E_* */
 	UB	name[256];		/* what is shown and, for a file, its name */
@@ -50,6 +53,12 @@ typedef struct {
 	BOOL	hidden;			/* a name that starts with a dot */
 	BOOL	faint;			/* cannot be used now: no medium */
 	INT	vw;			/* the width of its 仮身, as last drawn */
+	INT	fid;			/* a 実身 of a BTRON disk: its file ID */
+	char	btron[64];		/* E_DISK: the name of its BTRON file system, "" none */
+	char	fmt[16];		/* E_DISK: what is on it (tessronos.format.kind), "" not known */
+	BOOL	nofs;			/* E_DISK: a kind no file system here mounts */
+	BOOL	iso;			/* of the ISO 9660 side of a BTRON CD-ROM: a file or a
+					   directory there, not a 実身 */
 } XFCENT;
 
 /* An FTP connection as the panel and the settings have it */
@@ -130,6 +139,11 @@ typedef struct {
 	UB		dir[XFU_PATH_MAX];	/* the directory shown, from the root */
 	UB		(*hist)[XFU_PATH_MAX];	/* directories opened before, the latest first */
 	INT		nhist;
+
+	/* a disk of the BTRON file system: dir is then the file IDs gone into, "3/17" */
+	XFCBT		*bt;
+	INT		niso;			/* entries of the ISO 9660 side's root, in tree; 0 none.
+						   Its directories are "@iso/..." in dir */
 } XWIN;
 
 IMPORT void xfc_net_init( XFCNET *n, T_FTPNET *net, UINT tmo, UINT lport );
@@ -199,5 +213,32 @@ IMPORT BOOL xfc_ask_ftp( XWIN *w, XFCCONN *c, XFC_TRY try_connect );
 IMPORT void xfc_meanwhile( CONST T_OBNTM *m );
 
 IMPORT void xfc_log( CONST char *s );
+
+/* ---------------------------------------------------------------- BTRON disks (xfc_btron.c) */
+
+/* Whether a disk holds the BTRON file system (a CD-ROM's partition, or from its start); its name */
+IMPORT BOOL xfc_bt_probe( CONST TS_UUID *disk, D size, char *name, INT max );
+IMPORT void xfc_bt_forget( CONST TS_UUID *disk );	/* what the probe kept of a disk let go */
+IMPORT ER   xfc_bt_open( XWIN *w, CONST TS_UUID *disk );
+IMPORT void xfc_bt_close( XWIN *w );
+IMPORT CONST char *xfc_bt_name( XWIN *w );
+IMPORT INT  xfc_bt_fid( CONST UB *dir );
+IMPORT void xfc_bt_names( XWIN *w, CONST UB *dir, char *out, INT max );
+
+/* Each 実身 a 実身 links to: its name, file ID, whether it links to others, its bytes */
+typedef INT (*XFC_BTPUT)( void *arg, CONST UB *name, INT fid, BOOL links, D size );
+IMPORT ER   xfc_bt_list( XWIN *w, INT fid, XFC_BTPUT put, void *arg );
+
+/* A 実身 and what it links to made 実身 on the volume of into; the first made, and how many */
+/*
+ * The files of a BTRON CD-ROM's ISO 9660 side, beside its partition, as
+ * a tree to read (the partition's image left out): how many entries its
+ * root has, 0 when there is no such side (t is then of no use).
+ */
+IMPORT INT  xfc_bt_iso_tree( XWIN *w, T_XFUTREE *t );
+
+typedef void (*XFC_BTPROG)( INT done, INT total );
+IMPORT ER   xfc_bt_import( XWIN *w, INT fid, CONST TS_UUID *into, TS_UUID *p_top, INT *p_objs, XFC_BTPROG prog,
+			   char *err, INT errmax );
 
 #endif /* __XFC_H__ */

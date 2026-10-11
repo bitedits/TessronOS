@@ -24,6 +24,9 @@
  *	The tray is a real object (SYSDEF_TRAY, on the volatile volume):
  *	record 0 lists the levels in words, and each set is one record of
  *	its own. What goes in is copied in, what comes out is copied out.
+ *
+ *	A process makes the same calls (lib/libts): they are done for it by
+ *	a task of the kernel's, the tray being the system's object.
  */
 
 #ifndef __TS_TRAY_H__

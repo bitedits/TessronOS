@@ -1,0 +1,12 @@
+<tad version="1.0" encoding="UTF-8" filename="基本表計算のグラフ">
+<document>
+<p>基本表計算のグラフ</p>
+<p>基本表計算のグラフ。選択した範囲の1列目を見出し、2列目からを値にする。メニューの定義。</p>
+</document>
+<menu>
+<item code="chart.bar">集合縦棒グラフ</item>
+<item code="chart.sbar">積上縦棒グラフ</item>
+<item code="chart.line">折れ線グラフ</item>
+<item code="chart.sline">積上折線グラフ</item>
+</menu>
+</tad>

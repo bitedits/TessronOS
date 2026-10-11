@@ -9,8 +9,7 @@
 
 /*
  *	netinet/in.h
- *	Internet addresses (IPv4; the IPv6 types are declared for the sources
- *	that name them, and such a socket cannot be made).
+ *	Internet addresses, IPv4 and IPv6.
  */
 
 #ifndef __TSPOSIX_NETINET_IN_H__
@@ -89,6 +88,7 @@ extern const struct in6_addr in6addr_loopback;
 
 #define IP_TOS			1
 #define IP_TTL			2
+#define IP_RECVTOS		13	/* the type of service of what is received, a message IP_TOS of a byte */
 #define IP_MULTICAST_IF		32
 #define IP_MULTICAST_TTL	33
 #define IP_MULTICAST_LOOP	34
@@ -100,6 +100,7 @@ extern const struct in6_addr in6addr_loopback;
 #define IPV6_MULTICAST_LOOP	19
 #define IPV6_JOIN_GROUP		20
 #define IPV6_LEAVE_GROUP	21
+#define IPV6_RECVTCLASS		66	/* the traffic class of what is received, a message IPV6_TCLASS of an int */
 #define IPV6_TCLASS		67
 
 #define IN6_IS_ADDR_UNSPECIFIED(a) \

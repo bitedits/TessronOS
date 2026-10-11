@@ -117,8 +117,8 @@ knl_exc_sync_el0:
 1:	mov	x0, sp
 	mrs	x1, esr_el1
 	mrs	x2, far_el1
-	bl	knl_el0_fault			/* terminates the task, no return */
-	b	.
+	bl	knl_el0_fault			/* terminates the task, or returns when put right */
+	RESTORE_EXC_FRAME_ERET			/* and the access is made again */
 	.size	knl_exc_sync_el0, . - knl_exc_sync_el0
 
 /*
@@ -142,7 +142,7 @@ knl_exc_irq:
 	b.eq	3f
 2:	ldr	x2, =GICC_BASE
 	str	w1, [x2, #0x10]			/* GICC_EOIR */
-	bl	Default_Handler			/* no return */
+	bl	Default_Handler			/* x0 = interrupt ID, no return */
 	b	.
 3:	RESTORE_EXC_FRAME_ERET
 	.size	knl_exc_irq, . - knl_exc_irq
@@ -150,6 +150,7 @@ knl_exc_irq:
 	.type	knl_exc_fiq, %function
 knl_exc_fiq:
 	SAVE_EXC_FRAME
+	mov	x0, sp				/* frame */
 	bl	FIQ_Handler
 	b	.
 	.size	knl_exc_fiq, . - knl_exc_fiq
@@ -157,6 +158,7 @@ knl_exc_fiq:
 	.type	knl_exc_serror, %function
 knl_exc_serror:
 	SAVE_EXC_FRAME
+	mov	x0, sp				/* frame */
 	bl	SError_Handler
 	b	.
 	.size	knl_exc_serror, . - knl_exc_serror

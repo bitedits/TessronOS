@@ -1,0 +1,130 @@
+# トレー (design 11.27), for tools/ui_run.py: two numbers put into the tray
+# from 電卓 with Ctrl+C, the accessory opened from its program, the levels
+# chosen with the arrow keys and the digits, the window built again when
+# another set is put in while it is open, and the menu's 一覧表示 and
+# 付せん表示. The tags stand down the window's left side, a tag for
+# each of the ten levels, those that hold nothing greyed: the tag of
+# level N at 205, 145+26(N-1).
+open 01a0d8c4-5320-7a41-8b52-6c7d8e9fa020
+expect calculator: ready
+wait 800
+click 837 230
+expect calculator: shown 0 []
+key 1E
+key 1F
+key 06 01
+expect calculator: copied 12
+click 837 230
+key 20
+key 21
+key 22
+key 06 01
+expect calculator: copied 345
+open 01a0d8c4-5430-7a31-8b42-5c6d7e8f5430
+expect trayview: opened, 2 levels
+wait 800
+win トレー
+shot trv_open
+key 51
+expect trayview: level 2
+wait 300
+shot trv_level2
+key 1E
+expect trayview: level 1
+# another set put in while the window is open: level 1 is the new one
+win 電卓
+click 837 230
+key 23
+key 24
+key 06 01
+expect calculator: copied 67
+expect trayview: changed, 3 levels, level 1 文章
+open 01a0d8c4-5430-7a31-8b42-5c6d7e8f5430
+wait 500
+win トレー
+shot trv_changed
+key 20
+expect trayview: level 3
+# the menu: opened with 閉じる under the pointer
+click 400 300 1
+wait 600
+shot trv_menu
+move 400 341
+wait 150
+move 500 341
+wait 300
+shot trv_menu_view
+key 29
+key 29
+wait 300
+# a link put in: TADjsについて chosen in the window BTRON and copied
+click 100 90
+key 06 01
+expect trayview: changed, 4 levels, level 1 仮身
+wait 500
+shot trv_link
+# a picture put in: 画面印刷 takes the window in front into the tray at PrintScreen
+open 01a0d8c4-53d0-7a21-8b32-4c5d6e7f53d0
+expect scrprint: panel 1
+wait 600
+click 414 339
+click 650 313
+click 414 455
+click 836 511
+expect scrprint: armed 1
+move 300 300
+wait 300
+key 46
+expect scrprint: tray
+expect trayview: changed, 5 levels, level 1 画像
+open 01a0d8c4-5430-7a31-8b42-5c6d7e8f5430
+wait 800
+shot trv_picture
+# 表示 > 一覧表示: a row for each level; the arrow keys go down the rows
+win トレー
+click 400 300 1
+wait 600
+move 400 341
+wait 150
+move 500 341
+wait 300
+click 530 361
+expect trayview: list, tags on
+key 51
+expect trayview: level 2 仮身
+wait 300
+shot trv_list
+# 付せん表示 off (the menu opens with 表示, chosen last, under the pointer)
+click 400 300 1
+wait 600
+move 410 300
+wait 150
+move 500 300
+wait 300
+shot trv_menu_again
+click 530 361
+expect trayview: list, tags off
+# 詳細表示, the document of level 5 drawn as its text alone
+click 400 300 1
+wait 600
+move 410 300
+wait 150
+move 500 300
+wait 300
+click 530 300
+expect trayview: detail, tags off
+key 22
+expect trayview: level 5 文章
+wait 300
+shot trv_tags_off
+# a press on the tag of level 3; the greyed tag of level 7 is not chosen
+click 205 197
+expect trayview: level 3 文章
+click 205 301
+wait 300
+shot trv_tag_pressed
+key 08 01
+expect trayview: closed
+absent !EXCEPTION!
+absent !STACK!
+absent !OACV!

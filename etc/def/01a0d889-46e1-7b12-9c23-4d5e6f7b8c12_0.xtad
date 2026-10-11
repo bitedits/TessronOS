@@ -1,0 +1,11 @@
+<tad version="1.0" encoding="UTF-8" filename="かな入力練習の表示">
+<document>
+<p>かな入力練習の表示</p>
+<p>かな入力練習の窓の表示。全画面表示、再表示、背景色。メニューの定義。</p>
+</document>
+<menu>
+<item code="fullscreen" key="L">全画面表示オンオフ</item>
+<item code="refresh">再表示</item>
+<item code="bgcolour">背景色変更</item>
+</menu>
+</tad>

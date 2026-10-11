@@ -1,0 +1,21 @@
+<tad version="1.0" encoding="UTF-8" filename="予定表のデータボックス">
+<document>
+<p>予定表のデータボックス</p>
+<p>予定表の窓の上の帯と、年月を尋ねるパネルの定義。帯の前月、今日、翌月は押しボタン、年月の押しボタンは年月を尋ねるパネルを開く。押しボタンの年月とラベルの文字は予定表が書き換える。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,2560,40" title="予定表" kind="bare">
+<button num="20" rect="8,7,92,33">＜ 前月</button>
+<button num="21" rect="98,7,158,33">今日</button>
+<button num="22" rect="164,7,248,33">翌月 ＞</button>
+<button num="23" rect="264,7,368,33" emph="true">2026/01</button>
+<text num="1" x="384" y="26"> </text>
+</panel>
+<panel num="2" rect="0,0,300,128" title="年月を選択">
+<text x="20" y="42">年月：</text>
+<serial num="11" rect="88,20,212,50"><f w="4" lo="1" hi="9999" value="2026"/>/<f w="2" lo="1" hi="12" value="1" zero="true"/></serial>
+<button num="101" rect="104,88,192,114" answer="cancel">取消</button>
+<button num="102" rect="200,88,288,114" answer="ok" emph="true">移動</button>
+</panel>
+</databox>
+</tad>

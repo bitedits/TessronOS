@@ -1,0 +1,49 @@
+# 強制終了 (design 5.5.1, 5.5.3, 5.5.5), for tools/ui_run.py. A program with a window
+# (SVCPROG.ELF 25 opens "ktpause") is ended with Shift+Pause: its window is in front
+# but has not been given the keys, and the window in front is the one meant. One with
+# no window (SVCPROG.ELF 33) is chosen in the window 強制終了 (Ctrl+Shift+Pause; End
+# chooses the last row, the newest process) and ended with 〈強制終了〉. The window is
+# a window of panels from the data box 強制終了のデータボックス, at 352,142 on the
+# 1280x800 screen of the test, its work area from 360,170: 〈強制終了〉 at 760,490,
+# 〈デスクトップを立ち上げ直す〉 at 492,490. The second button over it opens its menu
+# (the common 閉じる, its own items, ウインドウ・小物・実行); Esc puts the menu away.
+# 〈デスクトップを立ち上げ直す〉 asks first in a panel that warns, over the middle of
+# the window: 〈立ち上げ直す〉 at 696,391 starts the desktop again, which comes up
+# with its cabinet while the window stays. Ctrl+Shift+Pause closes the window.
+run /boot/SVCPROG.ELF 25
+win ktpause
+wait 300
+key 48 02
+expect を強制終了しました
+run /boot/SVCPROG.ELF 33
+wait 500
+key 48 03
+expect the window is up
+win 強制終了
+wait 1500
+shot fq_window
+key 4d
+wait 300
+click 760 490
+expect を強制終了しました
+wait 1500
+shot fq_ended
+click 640 300 1
+wait 800
+shot fq_menu
+key 29
+wait 300
+click 492 490
+expect asked whether to start the desktop again
+wait 800
+shot fq_confirm
+click 696 391
+expect デスクトップを立ち上げ直しました
+wait 2500
+shot fq_restarted
+key 48 03
+wait 500
+wins
+shot fq_after
+absent !EXCEPTION!
+absent !STACK!

@@ -1,0 +1,12 @@
+<tad version="1.0" encoding="UTF-8" filename="マイクロカードの画面">
+<document>
+<p>マイクロカードの画面</p>
+<p>検索条件画面、設計画面、検索解除。メニューの定義。</p>
+</document>
+<menu>
+<item code="scr.find" key="F">検索条件画面</item>
+<item code="scr.design">設計画面</item>
+<line/>
+<item code="search.off">検索解除</item>
+</menu>
+</tad>

@@ -21,17 +21,23 @@
  *
  *	Installing puts each object of the package on the system under its
  *	own UUID -- made when the system does not have it, and its metadata
- *	and records written anew when it does -- and links the program from
- *	the program box. A program the system already has by the same id is
- *	updated only by a newer version, unless the caller says to go ahead
- *	all the same (the person was asked); one that came under another
- *	UUID is taken out of the box. A version is written R1.000: R, a
- *	number of any length, a point and three digits, and compares as the
- *	number times a thousand and the digits.
+ *	and records written anew when it does, the records past the last
+ *	the package brings deleted -- and links the program from the program
+ *	box. The program is reached through that link and what its record 0
+ *	links to through it; the templates are named only in its metadata,
+ *	so each object no link reaches is held once, which keeps it out of
+ *	the 屑実身 and from being collected. A program the system already
+ *	has by the same id is updated only by a newer version, unless the
+ *	caller says to go ahead all the same (the person was asked); one that
+ *	came under another UUID is taken out of the box and deleted. What the
+ *	version it replaces brought and the new one does not (its templates
+ *	and what its record 0 linked to) is deleted as well. A version is
+ *	written R1.000: R, a number of any length, a point and three digits,
+ *	and compares as the number times a thousand and the digits.
  *
- *	Deleting takes a program out of the box and deletes its object and
- *	its templates. The programs the desktop carries in itself (builtin)
- *	are not deleted.
+ *	Deleting takes a program out of the box and deletes its object, its
+ *	templates and what only its record 0 linked to. The programs the
+ *	desktop carries in itself (builtin) are not deleted.
  */
 
 #include <sys/machine.h>
@@ -48,7 +54,7 @@
 #define PKG_HEAD	16
 #define PKG_ENTRY	64
 #define PKG_NAME	48
-#define PKG_MAX_OBJ	(1 + DT_PROG_BASE)
+#define PKG_MAX_OBJ	32		/* the program and what it brings */
 #define PKG_FORMAT	1
 
 typedef struct {
@@ -177,6 +183,50 @@ LOCAL BOOL entry_of( CONST UB *name, TS_UUID *u, INT *p_what )
 
 /* ---------------------------------------------------------------- one object put on */
 
+/*
+ * The records of an object the package wrote over that the package does
+ * not bring: those past the last it brings, deleted from the last down
+ * so that the numbers below stay as they are.
+ */
+LOCAL void drop_records( CONST TS_UUID *u, CONST PKGENT *e, INT n )
+{
+	T_OBREC	*rec;
+	TS_UUID	fu;
+	INT	nr, i, what, last = -1;
+	ID	key;
+
+	for ( i = 0; i < n; i++ ) {
+		if ( entry_of(e[i].name, &fu, &what) && what > last && ts_uuid_cmp(&fu, u) == 0 ) {
+			last = what;
+		}
+	}
+	rec = (T_OBREC *)Kmalloc(sizeof(T_OBREC) * OM_REC_MAX);
+	if ( rec == NULL ) {
+		return;
+	}
+	nr = om_obj_records(u, rec, OM_REC_MAX);
+	key = 0;
+	for ( i = nr - 1; i >= 0; i-- ) {
+		if ( rec[i].recno <= last ) {
+			continue;
+		}
+		if ( key <= 0 ) {
+			key = ob_opn_obj(u, OB_OP_WRITE | OB_OP_RECORD);
+			if ( key <= 0 ) {
+				break;
+			}
+		}
+		if ( ob_del_rec(key, rec[i].recno) >= E_OK ) {
+			tm_printf((UB *)"TessronOS desktop: record %d the new version does not have, deleted\n",
+				  rec[i].recno);
+		}
+	}
+	if ( key > 0 ) {
+		ob_cls_obj(key);
+	}
+	Kfree(rec);
+}
+
 LOCAL ER put_object( CONST TS_UUID *u, CONST PKGENT *e, INT n, CONST T_OBPRT *prt )
 {
 	CONST PKGENT	*meta = NULL, *icon = NULL;
@@ -218,10 +268,58 @@ LOCAL ER put_object( CONST TS_UUID *u, CONST PKGENT *e, INT n, CONST T_OBPRT *pr
 			er = om_obj_record_put(u, what, e[i].rt, 0, e[i].data, (SZ)e[i].size);
 		}
 	}
+	if ( er >= E_OK ) {
+		drop_records(u, e, n);
+	}
 	return er;
 }
 
+/* An object deleted, what kept it from deletion (削除不可) taken off first */
+LOCAL ER del_object( CONST TS_UUID *u )
+{
+	T_OBPRT	prt;
+
+	if ( ob_get_prt(u, &prt) >= E_OK && ( prt.attr & ( OB_A_PERM | OB_A_RONLY ) ) ) {
+		prt.attr &= ~( OB_A_PERM | OB_A_RONLY );
+		(void)ob_set_prt(u, &prt);
+	}
+	return ob_del_obj(u);
+}
+
 /* ---------------------------------------------------------------- installing */
+
+/*
+ * What a program brought beside itself: its templates (the metadata's
+ * base) and what its record 0 links to. Answers how many.
+ */
+LOCAL INT brought( CONST TS_UUID *prog, CONST DTPROG *p, TS_UUID *out, INT max )
+{
+	UB	*rec;
+	SZ	size = 0;
+	INT	n = 0, i;
+
+	for ( i = 0; p != NULL && i < p->nbase && n < max; i++ ) {
+		out[n++] = p->base[i];
+	}
+	rec = om_obj_record(prog, 0, &size);
+	if ( rec != NULL ) {
+		n += om_store_links(rec, size, out + n, max - n);
+		Kfree(rec);
+	}
+	return n;
+}
+
+LOCAL BOOL among( CONST TS_UUID *u, CONST TS_UUID *set, INT n )
+{
+	INT	i;
+
+	for ( i = 0; i < n; i++ ) {
+		if ( ts_uuid_cmp(u, &set[i]) == 0 ) {
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
 
 EXPORT ER dt_pkg_install( CONST TS_UUID *pkg, BOOL force, TS_UUID *p_prog, UINT *p_how )
 {
@@ -233,7 +331,9 @@ EXPORT ER dt_pkg_install( CONST TS_UUID *pkg, BOOL force, TS_UUID *p_prog, UINT 
 	T_JSON		root, list, it;
 	T_OBPRT		prt;
 	CONST DTPROG	*have;
-	TS_UUID		old;
+	TS_UUID		old, was[PKG_MAX_OBJ];
+	T_OBREF		wref;
+	INT		nwas = 0, nwbase = 0;
 	BOOL		had = FALSE, moved = FALSE;
 	ER		er;
 
@@ -290,6 +390,8 @@ EXPORT ER dt_pkg_install( CONST TS_UUID *pkg, BOOL force, TS_UUID *p_prog, UINT 
 			goto done;
 		}
 		moved = (BOOL)( ts_uuid_cmp(&old, &prog) != 0 );
+		nwas = brought(&old, have, was, PKG_MAX_OBJ);
+		nwbase = have->nbase;
 	}
 
 	dt_sys_prt(&prt);
@@ -303,6 +405,31 @@ EXPORT ER dt_pkg_install( CONST TS_UUID *pkg, BOOL force, TS_UUID *p_prog, UINT 
 		}
 		if ( !had || moved ) {
 			er = om_obj_link_add(&box, &prog);
+		}
+	}
+	/* what nothing links to, held, so that it is not taken for a 屑実身 */
+	for ( k = 1; er >= E_OK && k < nobj; k++ ) {
+		if ( om_store_refs(&obj[k]) == 0 ) {
+			(void)ob_lnk_obj(&obj[k]);
+		}
+	}
+	/*
+	 * What the version replaced brought and this one does not: a template
+	 * of its own that only the hold it was given keeps, or something its
+	 * record 0 linked to that nothing links to any more. Something shared
+	 * (a menu other programs link to too) stays.
+	 */
+	if ( er >= E_OK && had ) {
+		for ( k = 0; k < nwas; k++ ) {
+			if ( among(&was[k], obj, nobj) || ob_ref_obj(&was[k], &wref) < E_OK ) {
+				continue;
+			}
+			if ( om_store_refs(&was[k]) <= ( ( k < nwbase ) ? 1 : 0 ) ) {
+				(void)del_object(&was[k]);
+			}
+		}
+		if ( moved ) {
+			(void)del_object(&old);
 		}
 	}
 	dt_prog_reread();
@@ -319,23 +446,11 @@ done:
 
 /* ---------------------------------------------------------------- deleting */
 
-/* An object deleted, what kept it from deletion (削除不可) taken off first */
-LOCAL ER del_object( CONST TS_UUID *u )
-{
-	T_OBPRT	prt;
-
-	if ( ob_get_prt(u, &prt) >= E_OK && ( prt.attr & ( OB_A_PERM | OB_A_RONLY ) ) ) {
-		prt.attr &= ~( OB_A_PERM | OB_A_RONLY );
-		(void)ob_set_prt(u, &prt);
-	}
-	return ob_del_obj(u);
-}
-
 EXPORT ER dt_prog_remove( CONST TS_UUID *prog )
 {
 	CONST DTPROG	*p = dt_prog_of(prog);
-	TS_UUID		box, base[DT_PROG_BASE];
-	INT		nbase, i;
+	TS_UUID		box, was[PKG_MAX_OBJ];
+	INT		nbase, nwas, i;
 	ER		er;
 
 	if ( p == NULL ) {
@@ -345,14 +460,15 @@ EXPORT ER dt_prog_remove( CONST TS_UUID *prog )
 		return E_PAR;
 	}
 	nbase = p->nbase;
-	for ( i = 0; i < nbase; i++ ) {
-		base[i] = p->base[i];
-	}
+	nwas = brought(prog, p, was, PKG_MAX_OBJ);
 	er = ( ts_str_to_uuid(SYSDEF_PROG_BOX, &box) >= E_OK ) ? om_obj_link_del(&box, prog) : E_SYS;
 	if ( er >= E_OK ) {
 		er = del_object(prog);
-		for ( i = 0; i < nbase; i++ ) {
-			(void)del_object(&base[i]);
+		/* its templates; what its record 0 linked to once nothing else does */
+		for ( i = 0; i < nwas; i++ ) {
+			if ( i < nbase || om_store_refs(&was[i]) <= 0 ) {
+				(void)del_object(&was[i]);
+			}
 		}
 	}
 	dt_prog_reread();

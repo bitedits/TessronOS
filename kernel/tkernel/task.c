@@ -99,6 +99,13 @@ EXPORT void knl_make_dormant( TCB *tcb )
 	tcb->svcown	= 0;
 	tcb->svcdepth	= 0;
 	tcb->svcin	= 0;
+	tcb->runcyc	= 0;
+	tcb->slicetime	= 0;		/* the turn of its band until tk_chg_slt says otherwise */
+	tcb->slice_set	= FALSE;
+	tcb->slice_at	= 0;
+#if CNF_STK_WATCH
+	tcb->swn	= 0;		/* the next run starts on a new stack */
+#endif
 
 	tcb->klockwait	= FALSE;
 	tcb->klocked	= FALSE;

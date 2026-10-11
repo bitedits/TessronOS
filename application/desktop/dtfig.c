@@ -1137,6 +1137,7 @@ LOCAL void invert_picked( DTWIN *d )
 #define FC_BURN		618
 #define FC_PAPER	619
 #define FC_PAGE_SETUP	620
+#define FC_PRINT	621
 
 typedef struct {
 	CONST char	*code;
@@ -1164,6 +1165,7 @@ LOCAL CONST FIGCMD fig_cmds[] = {
 	{ "rot.r",	FC_ROT_R },
 	{ "paper",	FC_PAPER },
 	{ "pagesetup",	FC_PAGE_SETUP },
+	{ "print",	FC_PRINT },
 };
 
 #define NFIGCMD	( (INT)( sizeof(fig_cmds) / sizeof(fig_cmds[0]) ) )
@@ -1241,6 +1243,7 @@ EXPORT void df_menu_do( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj,
 	case FC_BURN:		df_burn(d);			break;
 	case FC_PAPER:		df_paper_toggle(d);		break;
 	case FC_PAGE_SETUP:	df_page_setup(d);		break;
+	case FC_PRINT:		dt_print_window(d);		break;
 	default:
 		/* the items shared with the cabinet */
 		cmd = cab_menu_cmd(sel);
@@ -1249,7 +1252,7 @@ EXPORT void df_menu_do( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj,
 		}
 		break;
 	}
-	wm_composite();
+	wm_update();
 }
 
 EXPORT void df_front( DTWIN *d, BOOL front )

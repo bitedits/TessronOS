@@ -20,10 +20,17 @@
 
 typedef struct umem	T_UMEM;
 
+/* The access a fault was met by (knl_umem_fault) */
+#define UM_ACC_READ	0
+#define UM_ACC_WRITE	1
+#define UM_ACC_EXEC	2
+
 IMPORT ER   knl_umem_map( T_UMEM **pp, T_SPACE *sp, UBINT *p_va, UD size, UD align,
 			  UINT prot, BOOL hold );
 IMPORT ER   knl_umem_unmap( T_UMEM **pp, T_SPACE *sp, UBINT va, UD size, BOOL hold );
 IMPORT ER   knl_umem_ctl( T_UMEM **pp, T_SPACE *sp, UBINT va, UD size, UINT prot, BOOL hold );
+IMPORT BOOL knl_umem_fault( T_UMEM *um, T_SPACE *sp, UBINT va, UINT acc );
+IMPORT void knl_umem_wx( T_UMEM *um, T_SPACE *sp, UD out[6] );
 IMPORT void knl_umem_flush( T_UMEM *um );
 IMPORT UD   knl_umem_bytes( T_UMEM *um );
 IMPORT void knl_umem_free( T_UMEM **pp );

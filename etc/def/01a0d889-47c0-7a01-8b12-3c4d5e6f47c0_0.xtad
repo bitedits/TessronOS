@@ -1,0 +1,15 @@
+<tad version="1.0" encoding="UTF-8" filename="電子手帳のメニュー">
+<document>
+<p>電子手帳のメニュー</p>
+<p>電子手帳のウインドウのメニュー。閉じる、保存、表示、ページ、編集、印刷と、ウインドウ、小物、実行。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2060-7001-9a10-c1d2e3f46001"/></include>
+<item>保存<link id="01a0d889-45ed-7774-81e6-53a2d63223c7_0.xtad" vobjid="01a0d8c3-2060-7002-9a10-c1d2e3f46002"/></item>
+<item>表示<link id="01a0d889-47c1-7a12-8b23-3c4d5e6f47c1_0.xtad" vobjid="01a0d8c3-2060-7003-9a10-c1d2e3f46003"/></item>
+<item>ページ<link id="01a0d889-47c2-7a23-8b34-3c4d5e6f47c2_0.xtad" vobjid="01a0d8c3-2060-7004-9a10-c1d2e3f46004"/></item>
+<item>編集<link id="01a0d889-47c3-7a34-8b45-3c4d5e6f47c3_0.xtad" vobjid="01a0d8c3-2060-7005-9a10-c1d2e3f46005"/></item>
+<item>印刷<link id="01a0d889-47c4-7a45-8b56-3c4d5e6f47c4_0.xtad" vobjid="01a0d8c3-2060-7006-9a10-c1d2e3f46006"/></item>
+<include><link id="01a0d889-46bd-7f9c-8bad-e3f4a5b6c789_0.xtad" vobjid="01a0d8c3-2060-7007-9a10-c1d2e3f46007"/></include>
+</menu>
+</tad>

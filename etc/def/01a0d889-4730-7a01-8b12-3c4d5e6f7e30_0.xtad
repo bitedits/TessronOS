@@ -1,0 +1,17 @@
+<tad version="1.0" encoding="UTF-8" filename="マイクロカードのメニュー">
+<document>
+<p>マイクロカードのメニュー</p>
+<p>マイクロカードの窓のメニュー。閉じる、保存、表示、画面、編集、カード、マーク、印刷と、仮身操作から実行までの共通の項目。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2006-7014-9a10-c1d2e3f40d14"/></include>
+<item>保存<link id="01a0d889-45ed-7774-81e6-53a2d63223c7_0.xtad" vobjid="01a0d8c3-2006-7015-9a10-c1d2e3f40d15"/></item>
+<item>表示<link id="01a0d889-4731-7a12-8b23-3c4d5e6f7e31_0.xtad" vobjid="01a0d8c3-2006-7016-9a10-c1d2e3f40d16"/></item>
+<item>画面<link id="01a0d889-4732-7a23-8b34-3c4d5e6f7e32_0.xtad" vobjid="01a0d8c3-2006-7017-9a10-c1d2e3f40d17"/></item>
+<item>編集<link id="01a0d889-4733-7a34-8b45-3c4d5e6f7e33_0.xtad" vobjid="01a0d8c3-2006-7018-9a10-c1d2e3f40d18"/></item>
+<item>カード<link id="01a0d889-4734-7a45-8b56-3c4d5e6f7e34_0.xtad" vobjid="01a0d8c3-2006-7019-9a10-c1d2e3f40d19"/></item>
+<item>マーク<link id="01a0d889-4735-7a56-8b67-3c4d5e6f7e35_0.xtad" vobjid="01a0d8c3-2006-701a-9a10-c1d2e3f40d1a"/></item>
+<item>印刷<link id="01a0d889-4736-7a67-8b78-3c4d5e6f7e36_0.xtad" vobjid="01a0d8c3-2006-701b-9a10-c1d2e3f40d1b"/></item>
+<include><link id="01a0d889-45ec-766a-986d-5fad49d48e06_0.xtad" vobjid="01a0d8c3-2006-701c-9a10-c1d2e3f40d1c"/></include>
+</menu>
+</tad>

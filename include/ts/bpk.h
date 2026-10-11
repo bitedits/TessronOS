@@ -147,6 +147,45 @@ typedef struct {
  */
 IMPORT INT lh5_decode( BPKLH5 *z, const UB *in, UINT inlen, UB *out, UINT outlen );
 
+/*
+ * The encoder that writes what lh5_decode reads (design 11.20). Matches
+ * are looked for in the 8 KB before each byte through hash chains, a
+ * match one byte on taken instead when it is longer; the codes go out
+ * in blocks of at most LH5E_BLOCK, each with Huffman tables of its own
+ * whose codes are kept to 16 bits. The state is large and the caller
+ * places it; nothing is allocated and no library call is made.
+ */
+#define LH5E_HASH	( 1 << 15 )
+#define LH5E_WIN	( 1 << LH5_DICBIT )
+#define LH5E_BLOCK	16384
+#define LH5E_CHAIN	128		/* earlier places tried for one match */
+
+typedef struct {
+	UB		*out;
+	UINT		outmax, outpos;
+	BOOL		full;			/* out was too small */
+	UINT		bitbuf;
+	INT		bitcount;
+	INT		head[LH5E_HASH];	/* the latest place of each hash, + 1 */
+	INT		prev[LH5E_WIN];		/* the place before it with the same hash, + 1 */
+	UH		code[LH5E_BLOCK];	/* a byte, or a length as 253 + length */
+	UH		dist[LH5E_BLOCK];	/* and its distance less one */
+	INT		ncode;
+	UINT		c_freq[LH5_NC], p_freq[LH5_NP], t_freq[LH5_NT];
+	UB		c_len[LH5_NC], p_len[LH5_NP], t_len[LH5_NT];
+	UH		c_code[LH5_NC], p_code[LH5_NP], t_code[LH5_NT];
+	UINT		hw[2 * LH5_NC];		/* the Huffman trees' weights */
+	INT		hpar[2 * LH5_NC];	/* each node's parent */
+	INT		heap[2 * LH5_NC];
+	UB		hdep[2 * LH5_NC];
+} BPKLH5E;
+
+/*
+ * in[0..inlen) encoded into out[0..outmax), z the encoder's state.
+ * Answers the bytes written, or -1 when out was too small.
+ */
+IMPORT INT lh5_encode( BPKLH5E *z, const UB *in, UINT inlen, UB *out, UINT outmax );
+
 /* ================================================================ binary TAD */
 
 /* Segment ids */
@@ -177,6 +216,20 @@ IMPORT INT lh5_decode( BPKLH5 *z, const UB *in, UINT inlen, UB *out, UINT outlen
 #define TS_FPAGE	0xFFB5		/* 図形ページ割付け */
 #define TS_FMEMO	0xFFBE		/* 図形メモ */
 #define TS_FAPPL	0xFFBF		/* 図形アプリケーション */
+#define TS_RSND		0xFF90		/* 実時間: 音(<note> <midi> <pcm>) */
+#define TS_RMEDIA	0xFFA0		/* 実時間: メディア(<audio> <video> <image>)。実時間の要素の中だけ */
+#define TS_RMCTL	0xFFB0		/* 実時間: メディア制御。実時間の要素の中だけ */
+#define TS_RWAIT	0xFFC0		/* 実時間: イベント待機 */
+#define TS_RANIM	0xFFC1		/* 実時間: キーフレーム */
+#define TS_RTRIG	0xFFC2		/* 実時間: 入力トリガー */
+#define TS_RERR		0xFFC3		/* 実時間: エラー処理 */
+#define TS_RGRP		0xFFD0		/* 実時間: グループ */
+#define TS_RTIME	0xFFD1		/* 実時間: 時間設定 */
+#define TS_BRLP		0xFFD2		/* 実時間: 分岐・繰り返し */
+#define TS_RGRD		0xFFD3		/* 実時間: 補間 */
+#define TS_REAL		0xFFEA		/* 実時間データ開始 */
+#define TS_REALEND	0xFFEB		/* 実時間データ終了 */
+#define TS_SUNIT	0xFFEC		/* 単位系設定付箋 */
 #define TS_EXT		0xFFFE		/* an id past FFFF follows */
 #define TS_LONG		0xFFFF		/* as a length: a 32-bit length follows */
 
@@ -237,6 +290,11 @@ IMPORT INT lh5_decode( BPKLH5 *z, const UB *in, UINT inlen, UB *out, UINT outlen
 #define LH_F_MTIME	88
 #define LH_F_CTIME	92
 
+/* LH_F_TYPE: the object's F_STATE f_type */
+#define BPK_F_FILE	0x1000		/* a file */
+#define BPK_F_RONLY	0x0010		/* not to be written */
+#define BPK_F_PERM	0x0020		/* not to be deleted */
+
 /* A record header, before each record's bytes */
 #define BPK_RECHEAD	8
 #define RH_TYPE		0		/* H */
@@ -247,6 +305,8 @@ IMPORT INT lh5_decode( BPKLH5 *z, const UB *in, UINT inlen, UB *out, UINT outlen
 #define BPK_RT_LINK	0		/* a link record */
 #define BPK_RT_TAD	1
 #define BPK_RT_EXEC	8		/* 実行機能付箋 */
+#define BPK_RT_MCARD	31		/* マイクロカード実身's data, subtypes 1 to 4 */
+#define BPK_MC_FORMAT	1		/* its subtype of the format */
 
 /* A link record: its target is the object of local header LK_F_ID */
 #define BPK_LINKREC	52
@@ -334,6 +394,14 @@ typedef struct {
 	INT		rootview[4];		/* its box: left, top, right, bottom */
 	UINT		rootchsz;		/* its CHSIZE, as written (bpk_chsize_pt) */
 	UINT		rootcol[4];		/* frcol, chcol, tbcol, bgcol: COLOR as written */
+
+	/*
+	 * The CRC-16 of the inflated stream against the one the global
+	 * header carries. An archive whose CRC is 0 says nothing of it.
+	 * bpk_parse does not refuse an archive that fails it.
+	 */
+	UINT		crc;			/* the stream's own */
+	BOOL		crcok;
 } BPKARC;
 
 /* What a link's attr leaves out of its frame, and whether it opens by itself */
@@ -363,6 +431,94 @@ IMPORT void bpk_free( BPKARC *a );
 /* The program id (and name) a 実行機能付箋's application ID names, or NULL */
 IMPORT const char *bpk_appl_prog( const UH *appl, const char **p_name );
 
+/* The CRC-16 (x^16 + x^15 + x^2 + 1, the low bit first) of n bytes, from crc */
+IMPORT UINT bpk_crc16( const UB *p, UINT n, UINT crc );
+
+/* ---------------------------------------------------------------- an archive written */
+
+/*
+ * What a program is to BTRON: its application ID, its name and the kind
+ * of data it opens (TRON code, for a 実行機能付箋), the F_STATE's
+ * application type, and where its 実行機能付箋's data keeps the window's
+ * colour (0 none). FALSE for a program BTRON has no ID for.
+ */
+typedef struct {
+	UH		appl[3];
+	const char	*name;
+	const char	*kind;
+	UINT		atype;
+	UINT		bgoff;
+} BPKAPPL;
+
+IMPORT BOOL bpk_prog_appl( const char *prog, BPKAPPL *a );
+
+/*
+ * A 実行機能付箋 record of one entry: the application, the window it
+ * opens (left, top, right, bottom; NULL none), the window's colour (a
+ * COLOR, when hasbg), and マイクロスクリプト's $SV (50 numbers, NULL
+ * none). Its bytes into out (room for BPK_EXEC_MAX); answers how many.
+ */
+#define BPK_EXEC_MAX	( BPK_EXECHEAD + 0x22 + 200 )
+IMPORT INT  bpk_exec_put( UB *out, const BPKAPPL *a, const INT *win, UINT bg, BOOL hasbg, const INT *sv );
+
+/*
+ * A link record (BPK_LINKREC bytes) to the object of local header fid
+ * (0xFFFF: none in the archive): the VLINK's attr (BPK_V_*), its
+ * relationship and the application of what it points at (NULL: none).
+ */
+IMPORT void bpk_link_put( UB *out, UINT fid, UINT attr, UINT rel, const UH *appl );
+
+/* One object to write: its local header as given, but for what the writer makes */
+typedef struct {
+	BPKLHEAD	head;		/* name, f_type, f_atype, origid and the four times;
+					   offset, f_nrec, f_nlink and f_size are made */
+	INT		nrec;
+	const BPKREC	*rec;		/* type, sub, size and data of each, in order */
+} BPKWFILE;
+
+/* An archive to write: its objects, the root first, and how it says the root looks */
+typedef struct {
+	const char	*name;		/* the book's name, UTF-8; 16 TRON characters are kept */
+	UINT		time;		/* when it was packed, seconds from 1985 (STIME) */
+	INT		method;		/* BPK_LH5 or BPK_LH0 */
+	INT		nfiles;
+	const BPKWFILE	*file;
+	BOOL		hasroot;	/* the extension: the root's link and how it looks */
+	UINT		rootattr;	/* BPK_V_* */
+	INT		rootview[4];
+	UINT		rootchsz;	/* CHSIZE */
+	UINT		rootcol[4];	/* COLORs */
+	UH		rootappl[3];
+	const UB	*ext;		/* or an extension as it is (another archive's), NULL none */
+	UINT		extlen;
+	INT		maxfiles;	/* objects allowed: 0 is BPK_FILES_MAX, at most BPK_FILES_FORM */
+} BPKWRITE;
+
+/* What the archive came to: the figures 書籍情報 shows */
+typedef struct {
+	UINT		filesize;	/* the records of the objects, links aside */
+	UINT		origsize;	/* the stream inflated */
+	UINT		compsize;	/* the stream as stored */
+	UINT		crc;
+	UINT		nlink;		/* link records */
+} BPKWSTAT;
+
+/*
+ * The archive file as binary TAD -- 管理情報, a figure, the 指定付箋
+ * with the global header and the stream, the figure's end -- malloc'd
+ * into *p_out. E_OK, or an error and what was wrong (in Japanese) in err.
+ * BPK_FILES_MAX objects at most, the most a 書籍 holds; one written only
+ * to be read back at once (an import) may hold as many as the form can
+ * number, BPK_FILES_FORM, when maxfiles says so: the global header
+ * counts them in 16 bits and a link record names none with 0xFFFF.
+ */
+#define BPK_FILES_MAX	650
+#define BPK_FILES_FORM	0xFFFE
+IMPORT ER   bpk_write( const BPKWRITE *w, UB **p_out, UINT *p_len, BPKWSTAT *st, char *err, INT errmax );
+
+/* Whether bytes are an archive file: a binary TAD that has the archive's 指定付箋 */
+IMPORT BOOL bpk_is_archive( const UB *raw, UINT len );
+
 /* ---------------------------------------------------------------- text that grows */
 
 typedef struct {
@@ -381,6 +537,14 @@ IMPORT void bpk_buf_xml( BPKBUF *b, const char *s );	/* escaped for XML */
 IMPORT void bpk_buf_json( BPKBUF *b, const char *s );	/* escaped for a JSON string */
 IMPORT void bpk_buf_cp( BPKBUF *b, UINT cp );		/* one character, UTF-8 */
 IMPORT void bpk_buf_num( BPKBUF *b, INT milli );	/* a number kept in thousandths */
+
+/*
+ * A time of the archive (STIME, seconds from 1985-01-01 00:00 UTC) as
+ * ISO 8601 in UTC ("2025-10-18T01:02:03Z", out of 24 bytes), and an ISO
+ * 8601 time (an offset taken in) back; 0 when it is not one.
+ */
+IMPORT INT  bpk_stime_iso( UINT stime, char *out );
+IMPORT UINT bpk_iso_stime( const char *s );
 
 /* ---------------------------------------------------------------- binary TAD to xmlTAD */
 
@@ -402,6 +566,21 @@ typedef struct {
 	ER (*picture)( void *ctx, INT recno, INT n, const UB *png, INT len );
 	void	*ctx;
 } BPKHOOK;
+
+/*
+ * マイクロカード実身: its format record (type 31, subtype 1) begins with
+ * the identification Ｃ Ｒ Ｄ and the version 0x100. Such an object
+ * opens in マイクロカード (BPK_MC_PROG), whose record 0 is its name and,
+ * after <mclinks/>, one <link> for each link record in their order (an
+ * empty one where the target is not there): the VDATA of its 仮身
+ * items and 印刷書式 name a link record by that order.
+ */
+#define BPK_MC_PROG	"tessronos-microcard"
+#define BPK_MC_NAME	"マイクロカード"
+
+IMPORT BOOL bpk_mc_format( const UB *p, UINT n );
+IMPORT BOOL bpk_mc_file( const BPKFILE *f );
+IMPORT void bpk_mc_xml( BPKBUF *b, const char *name, INT nlink, const BPKHOOK *hook );
 
 /* Segments the converter kept as <tadseg> for want of an element, counted by kind */
 #define BPK_SKIP_KINDS	32
@@ -448,6 +627,12 @@ IMPORT void bpk_conv_object( BPKCONV *cv );
  *   <figoverlay number even odd overlayData/>, <figoverlay active/>
  *   <tadseg id="ffe8" data="hex"/>: any other segment, its bytes as they were
  * A kept element too long for one attribute goes on in more, part="1", "2" ...
+ *
+ * The record may be of either byte order: the standard form writes its
+ * numbers with the high byte first, the semi-standard form with the low
+ * byte first, and its first segment's id says which. Both come out the
+ * same; only the bytes a kept element carries are as they were, marked
+ * byteorder="big" when they are of the standard form.
  */
 IMPORT ER   bpk_tad_to_xml( BPKCONV *cv, const char *name, const char *self, INT recno,
 			    const UB *rec, UINT len, BPKBUF *out );
@@ -471,6 +656,49 @@ IMPORT BOOL bpk_tad_is_doc( const UB *rec, UINT len );
  * system's standard 16.
  */
 IMPORT void bpk_colour( UINT raw, const UINT *cmap, INT ncmap, char out[8] );
+
+/* ---------------------------------------------------------------- 実時間制御の要素 */
+
+/*
+ * An element of 実時間制御TAD as a segment (design 15.7). The body is
+ * the word sub << 8 | flags, then for an element that begins
+ * something its name (BPK_RT_ELEM only: a 16-bit length and the
+ * bytes), its attributes in order -- a 16-bit count, then for each a
+ * 16-bit length and the name, a 32-bit length and the value -- every
+ * string UTF-8 with its entities undone and padded to an even length.
+ * An element's text is an attribute with an empty name. BPK_RT_KIDS
+ * says elements follow inside it, up to the segment that ends it.
+ */
+#define BPK_RT_KIDS	0x01		/* flags: what is inside follows */
+#define BPK_RT_ELEM	0x10		/* TS_REAL sub: an element with no number of its own, its name given */
+#define BPK_RT_CLOSE	0x11		/* TS_REAL sub: the end of one with no end of its own */
+#define BPK_RT_TEXT	0x12		/* TS_REAL sub: letters between the elements */
+#define BPK_RT_ID	0x13		/* TS_REAL sub: the id (attribute "id") of the shape, picture or text
+					   named by "el" written just before it */
+#define BPK_RT_NOEND	0xFF		/* BPKRTEL.end: ended by BPK_RT_CLOSE */
+
+typedef struct {
+	const char	*name;
+	UH		id;		/* TS_R* */
+	UB		sub;
+	UB		end;		/* the sub of the segment that ends it, under endid */
+	UH		endid;
+} BPKRTEL;
+
+/* The element of that name (realGroup: serial says which); NULL when it has no number of its own */
+IMPORT const BPKRTEL *bpk_rt_by_name( const char *name, INT nlen, BOOL serial );
+
+/* The element a segment begins; NULL when it begins none */
+IMPORT const BPKRTEL *bpk_rt_by_seg( UINT id, UINT sub );
+
+/* Whether an element of a text or a figure keeps its id through binary TAD (BPK_RT_ID) */
+IMPORT BOOL bpk_rt_id_kept( const char *name, INT nlen );
+
+/* Whether a segment ends an element (its end, or BPK_RT_CLOSE) */
+IMPORT BOOL bpk_rt_is_end( UINT id, UINT sub );
+
+/* Whether a segment id is one of 実時間制御 (TS_RMEDIA and TS_RMCTL only where inside says so) */
+IMPORT BOOL bpk_rt_seg( UINT id, BOOL inside );
 
 /* ---------------------------------------------------------------- PNG */
 

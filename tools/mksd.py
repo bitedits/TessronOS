@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Make an SD card image for the Raspberry Pi 5 (design 13.6).
+"""Make an SD card image for the Raspberry Pi 5 and 4 (design 13.6).
 
 Layout (512 byte sectors, GPT):
   0      protective MBR
@@ -18,7 +18,9 @@ Layout (512 byte sectors, GPT):
 Usage: mksd.py --sys SYSVOL [--boot-mb N] [--scratch-mb N] <output> <file for the FAT root ...>
 
 A file is placed under its own base name; give it the name the boot
-loader or the kernel looks for (tessronos.img, INIT.ELF ...).
+loader or the kernel looks for (tessronos.img, INIT.ELF ...), or name it
+DEST=SOURCE to place SOURCE as DEST, which may be dir/name for a directory
+of the root (the Raspberry Pi 4 firmware's overlays/disable-bt.dtbo).
 """
 import os
 import struct

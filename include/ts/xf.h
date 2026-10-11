@@ -77,6 +77,15 @@ IMPORT ER  xf_find( CONST TS_UUID *box, CONST UB *filename, TS_UUID *p_uuid );
 /* An object renamed as a file: its name, and "tessronos.file.name" when it has one */
 IMPORT ER  xf_rename( CONST TS_UUID *uuid, CONST UB *filename );
 
+/*
+ * For the POSIX view of the objects (objfs): an empty object of the
+ * file's form made on the volume of box and linked from it, named by
+ * the file's name; and its record 0 and "tessronos.file" made again from
+ * what record 1 now holds, once it was written as a file.
+ */
+IMPORT ER  xf_create( CONST UB *filename, CONST TS_UUID *box, TS_UUID *p_uuid );
+IMPORT ER  xf_refresh( CONST TS_UUID *uuid );
+
 /* The record the file's bytes are in: 1, or 0 for an xmlTAD file */
 IMPORT INT xf_data_rec( CONST TS_UUID *uuid );
 

@@ -345,7 +345,7 @@ LOCAL BOOL enter( DTWIN *d, INT i )
 	cut_marked = FALSE;
 	cut_moving = FALSE;
 	dt_draw(d);
-	wm_composite();
+	wm_update();
 
 	return TRUE;
 }
@@ -374,7 +374,7 @@ EXPORT void df_canvas_leave( void )
 	}
 	if ( d->used ) {
 		dt_draw(d);
-		wm_composite();
+		wm_update();
 	}
 }
 
@@ -545,7 +545,7 @@ EXPORT BOOL df_canvas_press( DTWIN *d, INT fx, INT fy )
 				apply(x, y, TRUE);
 			}
 			dt_draw(d);
-			wm_composite();
+			wm_update();
 			return TRUE;
 		}
 		df_canvas_leave();
@@ -585,7 +585,7 @@ EXPORT void df_canvas_follow( INT sx, INT sy )
 		apply(x, y, FALSE);
 	}
 	dt_draw(cv_win);
-	wm_composite();
+	wm_update();
 }
 
 EXPORT void df_canvas_release( void )
@@ -597,7 +597,7 @@ EXPORT void df_canvas_release( void )
 	if ( df_paint_tool() == DF_PAINT_CUTTER ) {
 		cut_release();
 		dt_draw(cv_win);
-		wm_composite();
+		wm_update();
 	}
 }
 

@@ -38,14 +38,18 @@
  *	the panel was opened from keeps to its program (起動アプリの固定)
  *	is set here too (起動固定).
  *
- *	It is a window of its own, not a panel that holds the desktop
- *	still: the buttons that change a list leave it open (WM_ANS_ACT),
- *	nothing is written until 適用, and 適用 and 取消 close it.
+ *	It is a window of the desktop's like the others, not a panel that
+ *	holds the desktop still (DTOWN): the frame moves, sizes and closes
+ *	it, the second button opens its menu -- 閉じる, 編集 and the tail of
+ *	ウインドウ, 小物 and 実行. The buttons that change a list leave it
+ *	open (WM_ANS_ACT), nothing is written until 適用, and 適用 and 取消
+ *	close it.
  */
 
 #include <sys/machine.h>
 #include "kernel.h"
 #include <tk/tkernel.h>
+#include <tm/tmonitor.h>
 #include <ts/wm.h>
 #include <ts/part.h>
 #include <ts/hid.h>
@@ -99,21 +103,17 @@ typedef struct {
 
 /* One window of 管理情報, and what its panel is setting until 適用 */
 typedef struct {
-	BOOL		used;
-	INT		wid;		/* the window */
-	INT		pid;		/* the panel filling it */
-	BOOL		moving;		/* carried by its band */
-	INT		grab_dx, grab_dy;
+	INT		pid;		/* the panel filling the window */
 
 	/*
-	 * The window the link was chosen in, while it stays open: what
-	 * asks and tells are put over, and where 起動アプリの固定 is
-	 * changed. 'd' is that window, or another of the desktop's when it
-	 * has closed.
+	 * 'd' is the window of 管理情報 itself, which what asks and tells
+	 * stand over. 'parent' is the window the link was chosen in, while
+	 * it stays open: where 起動アプリの固定 is changed.
 	 */
 	DTWIN		*d;
 	DTWIN		*parent;
 	INT		parent_wid;
+	BOOL		parent_sealed;
 	T_VOBJ		link;		/* the link, as it was when chosen */
 	CONST T_VOBJ	*v;		/* &link */
 	BOOL		lock_was;
@@ -194,6 +194,8 @@ LOCAL void who_name( CONST TS_UUID *u, UB *b, INT max )
 		(void)put(b, 0, max, "システム");
 	} else if ( ts_uuid_cmp(u, &ob_group_admin) == 0 ) {
 		(void)put(b, 0, max, "管理者");
+	} else if ( ts_uuid_cmp(u, &ob_user_person) == 0 || ts_uuid_cmp(u, &ob_group_users) == 0 ) {
+		(void)put(b, 0, max, "利用者");
 	} else if ( om_store_name(u, b, max) <= 0 ) {
 		if ( ts_uuid_to_str(u, t, sizeof(t)) < E_OK ) t[0] = 0;
 		(void)put(b, 0, max, t);
@@ -221,8 +223,9 @@ LOCAL INT who_add( WHO *w, INT n, CONST TS_UUID *u, UINT kind )
 
 /*
  * The users and groups this panel knows of: the system and the
- * administrators, whoever the desktop is logged in as and its groups,
- * and those the protection already names. 'kind' 0 is both.
+ * administrators, the person at the machine (the user logged in, or
+ * 利用者) and the ordinary users, whoever the desktop acts as and its
+ * groups, and those the protection already names. 'kind' 0 is both.
  */
 LOCAL INT who_all( CONST INFO *st, UINT kind, WHO *w )
 {
@@ -231,6 +234,8 @@ LOCAL INT who_all( CONST INFO *st, UINT kind, WHO *w )
 
 	if ( kind != W_GROUP ) n = who_add(w, n, &ob_user_system, W_USER);
 	if ( kind != W_USER )  n = who_add(w, n, &ob_group_admin, W_GROUP);
+	if ( kind != W_GROUP ) n = who_add(w, n, &knl_ob_session_crd()->user, W_USER);
+	if ( kind != W_USER )  n = who_add(w, n, &ob_group_users, W_GROUP);
 	if ( crd != NULL && ob_get_crd(crd) >= E_OK ) {
 		if ( kind != W_GROUP ) n = who_add(w, n, &crd->user, W_USER);
 		for ( i = 0; i < crd->ngrp && kind != W_USER; i++ ) {
@@ -457,6 +462,11 @@ LOCAL void choose_app( INFO *st )
 
 	if ( txt == NULL ) return;
 	n = dt_prog_list(0, all, 64);
+	/* a command opens no object: it is not one to add */
+	for ( i = k = 0; i < n; i++ ) {
+		if ( all[i]->kind != DT_PK_COMMAND ) all[k++] = all[i];
+	}
+	n = k;
 	for ( i = 0; i < n; i++ ) {
 		k = put(txt[i], 0, IF_TEXT - 44, (CONST char *)all[i]->name);
 		k = put(txt[i], k, IF_TEXT, ( all[i]->kind == DT_PK_APP ) ? "　（アプリケーション）"
@@ -769,7 +779,7 @@ LOCAL void build_users( T_WMPANEL *def, INFO *st )
 LOCAL void build_apps( T_WMPANEL *def, INFO *st )
 {
 	T_WMPART	*pt;
-	BOOL		lockable = (BOOL)( !st->d->sealed && dt_app_lockable(st->v) );
+	BOOL		lockable = (BOOL)( !st->parent_sealed && dt_app_lockable(st->v) );
 
 	(void)add(def, 3, WM_PT_LABEL, 0, 14, 40, 110, 22, "既定の起動");
 	(void)add(def, 3, WM_PT_LABEL, N_DFLT, 130, 40, IF_W - 144, 22, NULL);
@@ -876,55 +886,41 @@ LOCAL BOOL apply( INFO *st )
 /* ---------------------------------------------------------------- the windows */
 
 /*
- * 管理情報 is a window like any other: several can be open, each of its
- * own object, and the desktop goes on with the rest while they are.
- * The desktop's loop gives each event to dt_info_event first.
+ * 管理情報 is a window of the desktop's like any other (DTOWN): several
+ * can be open, each of its own object, and the desktop goes on with the
+ * rest while they are. The frame moves it, sizes it and closes it as it
+ * does every window; the work area is the panel.
  */
 #define IF_WIN_MAX	8
 
-LOCAL INFO	*info_win[IF_WIN_MAX];
+LOCAL CONST DTOWN	info_own;
 
-LOCAL INFO *info_of( INT wid )
+LOCAL void info_draw( DTWIN *d )
 {
-	INT	i;
+	INFO	*st = (INFO *)d->self;
 
-	for ( i = 0; i < IF_WIN_MAX; i++ ) {
-		if ( info_win[i] != NULL && info_win[i]->wid == wid ) {
-			return info_win[i];
-		}
+	dt_own_ground(d);
+	if ( st != NULL && st->pid >= 0 ) {
+		wm_panel_draw(st->pid);
 	}
-	return NULL;
+	wm_update();
 }
 
-LOCAL void info_close( INFO *st )
+LOCAL void info_close( DTWIN *d )
 {
-	INT	i;
+	INFO	*st = (INFO *)d->self;
 
-	for ( i = 0; i < IF_WIN_MAX; i++ ) {
-		if ( info_win[i] == st ) {
-			info_win[i] = NULL;
-		}
+	if ( st == NULL ) {
+		return;
 	}
 	if ( st->pid >= 0 ) {
 		(void)wm_panel_close(st->pid);
 	}
-	(void)wm_close(st->wid);
 	Kfree(st);
-	wm_composite();
+	tm_printf((UB *)"info: closed\n");
 }
 
-/* A desktop window for what asks and tells to stand over */
-LOCAL DTWIN *host_of( INFO *st )
-{
-	DTWIN	*p = parent_of(st);
-
-	if ( p != NULL ) {
-		return p;
-	}
-	return dt_first_win();
-}
-
-/* The window's name: the object's with 管理情報 after it */
+/* The window's name: the object's with の管理情報 after it */
 LOCAL void title_of( CONST T_VOBJ *v, char *t, INT max )
 {
 	UB	nm[TAD_NAME_MAX];
@@ -940,26 +936,27 @@ LOCAL void title_of( CONST T_VOBJ *v, char *t, INT max )
 EXPORT void dt_real_info( DTWIN *d, CONST T_VOBJ *v )
 {
 	INFO		*st;
+	DTWIN		*w;
 	T_WMPANEL	*def;
 	T_WMPART	*pt;
-	T_WMWIN		w;
+	T_WMWIN		ww;
 	T_DPRECT	o;
 	CONST char	*tags[3] = { "実身情報", "使用者管理", "付箋指定" };
 	char		title[TAD_NAME_MAX + 24];
-	INT		i, at = -1, k, pw, ph, slot = -1;
+	INT		i, at = -1, k, pw, ph, n = 0;
 
 	/* the object's window already open: brought to the front */
-	for ( i = 0; i < IF_WIN_MAX; i++ ) {
-		if ( info_win[i] == NULL ) {
-			if ( slot < 0 ) slot = i;
-		} else if ( ts_uuid_cmp(&info_win[i]->link.target, &v->target) == 0 ) {
-			wm_raise(info_win[i]->wid);
-			wm_focus(info_win[i]->wid);
-			wm_composite();
+	for ( w = dt_own_next(&info_own, NULL); w != NULL; w = dt_own_next(&info_own, w) ) {
+		st = (INFO *)w->self;
+		if ( st != NULL && ts_uuid_cmp(&st->link.target, &v->target) == 0 ) {
+			wm_raise(w->wid);
+			wm_focus(w->wid);
+			wm_update();
 			return;
 		}
+		n++;
 	}
-	if ( slot < 0 ) {
+	if ( n >= IF_WIN_MAX ) {
 		dt_tell(d, "管理情報のウインドウをこれ以上開けません", NULL);
 		return;
 	}
@@ -968,10 +965,10 @@ EXPORT void dt_real_info( DTWIN *d, CONST T_VOBJ *v )
 		return;
 	}
 	knl_memset(st, 0, sizeof(*st));
-	st->used = TRUE;
-	st->d = d;
 	st->parent = d;
 	st->parent_wid = d->wid;
+	st->parent_sealed = d->sealed;
+	st->d = d;
 	st->link = *v;
 	st->v = &st->link;
 	st->pid = -1;
@@ -1009,204 +1006,132 @@ EXPORT void dt_real_info( DTWIN *d, CONST T_VOBJ *v )
 	 */
 	pw = def->r.right - def->r.left;
 	ph = def->r.bottom - def->r.top;
-	if ( wm_ref(d->wid, &w) >= E_OK ) {
-		o.left = w.outer.left + 40;
-		o.top = w.outer.top + 40;
+	if ( wm_ref(d->wid, &ww) >= E_OK ) {
+		o.left = ww.outer.left + 40;
+		o.top = ww.outer.top + 40;
 	} else {
 		o.left = o.top = 80;
 	}
 	o.right = o.left + pw + 16;
 	o.bottom = o.top + ph + 40;
 	title_of(st->v, title, sizeof(title));
-	st->wid = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, title);
-	if ( st->wid < 0 ) {
+	w = dt_own_open(&info_own, st, &o, WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_RESIZE, title, NULL);
+	if ( w == NULL ) {
 		Kfree(def);
 		Kfree(st);
 		return;
 	}
-	if ( wm_ref(st->wid, &w) >= E_OK ) {
+	st->d = w;
+	if ( wm_ref(w->wid, &ww) >= E_OK ) {
 		/* the frame measured: the work area made the panel's size */
-		o = w.outer;
-		o.right += pw - ( w.work.right - w.work.left );
-		o.bottom += ph - ( w.work.bottom - w.work.top );
-		(void)wm_move(st->wid, &o);
+		o = ww.outer;
+		o.right += pw - ( ww.work.right - ww.work.left );
+		o.bottom += ph - ( ww.work.bottom - ww.work.top );
+		(void)wm_move(w->wid, &o);
 	}
 	def->r.left = 0;
 	def->r.top = 0;
 	def->r.right = pw;
 	def->r.bottom = ph;
-	st->pid = wm_panel_open(st->wid, def);
+	st->pid = wm_panel_open(w->wid, def);
 	Kfree(def);
 	if ( st->pid < 0 ) {
-		(void)wm_close(st->wid);
-		Kfree(st);
+		dt_close(w);
 		return;
 	}
-	info_win[slot] = st;
 	show_owner(st);
 	show_acl(st);
 	show_apps(st);
-	wm_raise(st->wid);
-	wm_focus(st->wid);
-	wm_panel_draw(st->pid);
-	wm_composite();
+	tm_printf((UB *)"info: opened %s\n", title);
+	dt_draw(w);
+}
+
+/* 編集's コピー and 貼り付け: on the 機能付箋 chosen on 付箋指定 */
+LOCAL void info_menu_set( DTWIN *d, ID mid )
+{
+	INFO	*st = (INFO *)d->self;
+	INT	sel = dt_pn_value(st->pid, N_APPS) - 1;
+
+	(void)mn_chg_atr(mid, NULL, "info.copy", ( sel >= 0 && sel < st->napp ) ? 0 : MN_GREY);
+	(void)mn_chg_atr(mid, NULL, "info.paste", ( dt_tray_kind(NULL) != DT_TRAY_NONE ) ? 0 : MN_GREY);
+}
+
+LOCAL void info_menu_do( DTWIN *d, CONST T_MNSEL *sel )
+{
+	INFO	*st = (INFO *)d->self;
+
+	if ( mn_is(sel, "info.copy") ) {
+		copy_tag(st, dt_pn_value(st->pid, N_APPS) - 1);
+	} else if ( mn_is(sel, "info.paste") ) {
+		paste_tags(st);
+		show_apps(st);
+	}
+	dt_draw(d);
 }
 
 /*
- * The window's menu: 閉じる, 編集 with コピー and 貼り付け of the
- * 機能付箋 chosen on 付箋指定, and the system's items after them.
+ * An event in the work area: the panel's. A button that changes a list
+ * leaves the window open; 適用 writes what was set and closes it, 取消
+ * closes it. A key with Ctrl is left to the menu's letters.
  */
-LOCAL void info_menu( INFO *st, CONST T_WMEV *ev )
+LOCAL BOOL info_input( DTWIN *d, CONST T_WMEV *ev )
 {
-	TS_UUID		mu;
-	T_MNSEL		sel;
-	T_VOBJ		*none = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
-	DTWIN		*host = host_of(st);
-	ID		mid;
-	INT		pid, cmd = 0;
-	ER		er;
+	INFO	*st = (INFO *)d->self;
+	UINT	ans = WM_ANS_NONE;
 
-	if ( none == NULL ) return;
-	knl_memset(none, 0, sizeof(*none));
-	if ( ts_str_to_uuid(SYSDEF_MENU_INFO, &mu) < E_OK || mn_cre_men(&mu, &mid) < E_OK ) {
-		Kfree(none);
-		return;
-	}
-	if ( host != NULL ) {
-		dt_get_vmn(host, mid, FALSE, none);
-	}
-	pid = mn_opn_men(mid, st->wid, ev->x, ev->y);
-	if ( pid >= 0 ) {
-		cmd = dt_run_menu(host, pid, ev->when);
-	}
-	er = mn_get_sel(mid, cmd, &sel);
-	(void)mn_del_men(mid);
-	if ( er >= E_OK ) {
-		st->d = host;
-		if ( mn_is(&sel, "close") ) {
-			info_close(st);
-		} else if ( mn_is(&sel, "info.copy") ) {
-			if ( host != NULL ) copy_tag(st, dt_pn_value(st->pid, N_APPS) - 1);
-		} else if ( mn_is(&sel, "info.paste") ) {
-			if ( host != NULL ) paste_tags(st);
-			show_apps(st);
-			wm_panel_draw(st->pid);
-		} else if ( host != NULL ) {
-			(void)dt_exe_vmn(host, &sel, FALSE, none);
-		}
-	}
-	Kfree(none);
-	wm_composite();
-}
-
-/*
- * An event, if it is for a window of 管理情報: TRUE when it was, and
- * nothing else is to be done with it. A move of the pointer is also
- * the desktop's to follow, so it answers FALSE for that.
- */
-EXPORT BOOL dt_info_event( CONST T_WMEV *ev )
-{
-	INFO	*st = NULL;
-	T_WMEV	e = *ev;
-	T_WMWIN	w;
-	UINT	ans = WM_ANS_NONE, btn;
-	INT	i, px, py;
-
-	/* one being carried takes the moves and the let go wherever they are */
-	for ( i = 0; i < IF_WIN_MAX; i++ ) {
-		if ( info_win[i] != NULL && info_win[i]->moving ) {
-			st = info_win[i];
-		}
-	}
-	if ( st != NULL ) {
-		if ( ev->type == HID_EV_MOVE && ts_hid_pointer(&px, &py, &btn) >= E_OK
-		  && wm_ref(st->wid, &w) >= E_OK ) {
-			T_DPRECT	o;
-
-			o.left = px - st->grab_dx;
-			o.top = py - st->grab_dy;
-			o.right = o.left + ( w.outer.right - w.outer.left );
-			o.bottom = o.top + ( w.outer.bottom - w.outer.top );
-			if ( wm_move(st->wid, &o) >= E_OK ) wm_composite();
-			return FALSE;
-		}
-		if ( ev->type == HID_EV_BTN_UP ) {
-			st->moving = FALSE;
-			return TRUE;
-		}
-	}
-
-	if ( ev->type == HID_EV_KEY_DOWN || ev->type == HID_EV_KEY_UP ) {
-		st = info_of(wm_focused());
-		e.wid = ( st != NULL ) ? st->wid : 0;
-	} else {
-		st = info_of(ev->wid);
-	}
-	if ( st == NULL ) {
+	if ( st == NULL || st->pid < 0 ) {
 		return FALSE;
 	}
-	if ( ev->type == HID_EV_BTN_DOWN ) {
-		wm_raise(st->wid);
-		wm_focus(st->wid);
-		if ( ev->y < 0 ) {
-			/* its band: carried */
-			if ( wm_ref(st->wid, &w) >= E_OK ) {
-				st->moving = TRUE;
-				st->grab_dx = ( w.work.left + ev->x ) - w.outer.left;
-				st->grab_dy = ( w.work.top + ev->y ) - w.outer.top;
-			}
-			wm_composite();
-			return TRUE;
-		}
-		if ( ev->code == 1 ) {
-			info_menu(st, ev);	/* the second button: the window's menu */
-			return TRUE;
-		}
-		if ( ev->code != 0 ) {
-			wm_composite();
-			return TRUE;
-		}
+	if ( ( ev->type == HID_EV_KEY_DOWN || ev->type == HID_EV_KEY_UP )
+	  && ( ev->mods & ( HID_MOD_LCTRL | HID_MOD_RCTRL ) ) != 0 ) {
+		return FALSE;
 	}
-	st->d = host_of(st);
-	if ( wm_panel_event(st->pid, &e, &ans) < E_OK ) {
-		ans = WM_ANS_CANCEL;
+	if ( ( ev->type == HID_EV_BTN_DOWN || ev->type == HID_EV_BTN_UP ) && ev->code != 0 ) {
+		return TRUE;
+	}
+	if ( wm_panel_event(st->pid, ev, &ans) < E_OK ) {
+		ans = WM_ANS_NONE;
 	}
 	apps_follow(st);
-	if ( ans >= WM_ANS_ACT && st->d != NULL ) {
+	if ( ans >= WM_ANS_ACT ) {
 		act(st, ans);
-		wm_raise(st->wid);
-		wm_focus(st->wid);
+		wm_raise(d->wid);
+		wm_focus(d->wid);
 		ans = WM_ANS_NONE;
 	}
 	if ( ans == WM_ANS_OK ) {
-		if ( !apply(st) && st->d != NULL ) {
-			dt_tell(st->d, "使用者管理を変更できませんでした", "所有者か管理者だけが変更できます");
-			wm_raise(st->wid);
-			wm_panel_draw(st->pid);
-			wm_composite();
+		if ( !apply(st) ) {
+			dt_tell(d, "使用者管理を変更できませんでした", "所有者か管理者だけが変更できます");
+			wm_raise(d->wid);
+			dt_draw(d);
 			return TRUE;
 		}
-		info_close(st);
+		tm_printf((UB *)"info: applied\n");
+		dt_close(d);
 		dt_draw_all();
+		wm_update();
 		return TRUE;
 	}
 	if ( ans == WM_ANS_CANCEL ) {
-		info_close(st);
+		dt_close(d);
+		wm_update();
 		return TRUE;
 	}
-	wm_panel_draw(st->pid);
-	wm_update();
-	return (BOOL)( ev->type != HID_EV_MOVE );
-}
-
-/* Every window of 管理情報 closed (the desktop stopping) */
-EXPORT void dt_info_close_all( void )
-{
-	INT	i;
-
-	for ( i = 0; i < IF_WIN_MAX; i++ ) {
-		if ( info_win[i] != NULL ) {
-			info_close(info_win[i]);
-		}
+	if ( ev->type != HID_EV_MOVE ) {
+		wm_panel_draw(st->pid);
 	}
+	wm_update();
+	return TRUE;
 }
+
+LOCAL CONST DTOWN	info_own = {
+	SYSDEF_MENU_INFO,
+	info_draw,
+	info_input,
+	NULL,
+	info_menu_set,
+	info_menu_do,
+	NULL,
+	info_close,
+	NULL
+};

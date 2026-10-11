@@ -1,0 +1,6 @@
+<tad version="1.0" encoding="UTF-8" filename="hello">
+<document>
+<p>hello</p>
+<p>プロセスとして動いたことを確かめるコマンド。番号、待った時間、引数を標準出力に出し、最初の引数が数ならそれを終了コードにする。コンソールから名前で実行する。実行形式はレコード1</p>
+</document>
+</tad>

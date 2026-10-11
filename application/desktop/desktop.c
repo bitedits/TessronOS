@@ -53,8 +53,11 @@
 #include <ts/kconv.h>
 #include <ts/ob.h>
 #include <ts/dtreq.h>
+#include <ts/img.h>
 #include <ts/sysdef.h>
 #include <ts/so.h>
+#include <ts/lockup.h>
+#include <ts/fquit.h>
 #include "obj/obj.h"
 #include "desktop.h"
 
@@ -122,9 +125,54 @@ LOCAL INT	dt_hold_at = 0;	/* a program's bar: the start last told */
 LOCAL INT	dt_move_wid = 0;
 LOCAL BOOL	dt_sizing = FALSE;
 LOCAL INT	dt_grab_dx = 0, dt_grab_dy = 0;
+/*
+ * With LK_LIVE at 0 the window stays where it is while it is carried and
+ * an outline follows the hand instead; the window goes where the outline
+ * is when the button is let go. Every window the desktop carries --
+ * its own (those with a part of their own among them), a program's, the
+ * dialog of a program ended --
+ * goes through these two.
+ */
+LOCAL BOOL	dt_outline = FALSE;
+LOCAL T_DPRECT	dt_outline_to;
+
+/* A window carried to o: TRUE when it moved there now, FALSE when only its outline did */
+EXPORT BOOL dt_carry_window( INT wid, CONST T_DPRECT *o )
+{
+	T_WMWIN		w;
+	T_DPRECT	r = *o;
+	INT		wide, high;
+
+	if ( wm_num(LK_LIVE, 1) != 0 ) {
+		return (BOOL)( wm_move(wid, o) >= E_OK );
+	}
+	/* no smaller than its frame, as wm_move would have it */
+	if ( wm_ref(wid, &w) >= E_OK && wm_least(w.attr, &wide, &high) >= E_OK ) {
+		if ( r.right - r.left < wide ) r.right = r.left + wide;
+		if ( r.bottom - r.top < high ) r.bottom = r.top + high;
+	}
+	dt_outline = TRUE;
+	dt_outline_to = r;
+	(void)wm_set_drag(&r, 1);
+	return FALSE;
+}
+
+/* The button let go: TRUE when the window went where its outline was */
+EXPORT BOOL dt_carry_end( INT wid )
+{
+	if ( !dt_outline ) {
+		return FALSE;
+	}
+	dt_outline = FALSE;
+	(void)wm_set_drag(NULL, 0);
+	return (BOOL)( wm_move(wid, &dt_outline_to) >= E_OK );
+}
 
 LOCAL UINT	dt_up_mods = 0;	/* the keys held when the button was let go */
 LOCAL ID	dt_tskid = 0;	/* the desktop's task, while it runs */
+#if USE_KTEST
+EXPORT volatile INT	dt_test_stall = 0;	/* the tests: the loop stopped (desktop.h) */
+#endif
 
 /* ---------------------------------------------------------------- the face */
 
@@ -192,18 +240,40 @@ EXPORT void dt_work_rect( CONST DTWIN *d, T_DPRECT *r )
 		return;
 	}
 	tv_doc_zoom(8);
-	r->left = DT_MARGIN;  r->top = DT_MARGIN;
+	/*
+	 * The page reaches the frame: what is drawn runs up to its inner
+	 * edge on every side, with no strip left undrawn inside it. Lines
+	 * that wrap stop where they wrap; what does not wrap is cut at the
+	 * frame.
+	 */
+	r->left = 0;  r->top = 0;
 	r->right = 600;  r->bottom = 400;
 	if ( wm_ref(d->wid, &w) >= E_OK ) {
-		r->right  = w.work.right - w.work.left - DT_MARGIN;
-		r->bottom = w.work.bottom - w.work.top - DT_MARGIN;
+		r->right  = w.work.right - w.work.left;
+		r->bottom = w.work.bottom - w.work.top;
 	}
 	/*
 	 * A document not wrapped to the window is wrapped to its paper:
 	 * the paper's whole width when the paper is shown, its margins and
 	 * all, and the width inside the margins when it is not.
 	 */
-	if ( d->doc != NULL && !d->xml_view && ( d->paper_frame || d->nowrap ) ) {
+	if ( d->doc != NULL && !d->xml_view && d->doc->vert
+	  && ( d->paper_frame || d->nowrap ) ) {
+		/*
+		 * 縦書き: its lines run down the page, so the paper decides how
+		 * tall the page is, the whole of it when the paper is shown
+		 * and what is inside the top and bottom margins when it is not.
+		 */
+		INT	ph = ( d->doc->paper_h > 0 ) ? d->doc->paper_h : DT_PAPER_H;
+
+		if ( !d->paper_frame ) {
+			ph -= d->doc->margin[1] + d->doc->margin[3];
+		}
+		if ( ph < 64 ) {
+			ph = 64;
+		}
+		r->bottom = r->top + ph;
+	} else if ( d->doc != NULL && !d->xml_view && ( d->paper_frame || d->nowrap ) ) {
 		INT	pw = ( d->doc->paper_w > 0 ) ? d->doc->paper_w : DT_PAPER_W;
 
 		if ( !d->paper_frame ) {
@@ -228,6 +298,42 @@ LOCAL void paper_frame( DTWIN *d, INT gid, CONST T_DPRECT *r )
 	INT		ph = d->doc->page_h, k, pages;
 
 	if ( ph <= 0 || wm_ref(d->wid, &w) < E_OK ) {
+		return;
+	}
+	if ( d->doc->vert ) {
+		/*
+		 * 縦書き: the pages stand side by side from the right, each
+		 * as wide as the paper, and the desk is below them and to the
+		 * left of the last.
+		 */
+		desk.left = 0;
+		desk.top = r->bottom + 1;
+		desk.right = w.work.right - w.work.left;
+		desk.bottom = w.work.bottom - w.work.top;
+		if ( desk.bottom > desk.top ) {
+			dp_fill_rect(gid, &desk, 0x00A0A0A0U);
+		}
+		pages = ( d->height + ph - 1 ) / ph;
+		if ( pages < 1 ) {
+			pages = 1;
+		}
+		desk.top = r->top;
+		desk.bottom = r->bottom + 1;
+		desk.left = 0;
+		desk.right = r->right - pages * ph + d->scroll_y;
+		if ( desk.right > desk.left ) {
+			dp_fill_rect(gid, &desk, 0x00A0A0A0U);
+		}
+		for ( k = 0; k < pages; k++ ) {
+			pg.right = r->right - k * ph + d->scroll_y;
+			pg.left = pg.right - ph - 1;
+			pg.top = r->top;
+			pg.bottom = r->bottom + 1;
+			if ( pg.right < 0 || pg.left > r->right ) {
+				continue;
+			}
+			dp_frame_rect(gid, &pg, 0x00606060U, 1);
+		}
 		return;
 	}
 	desk.left = r->right + 1;
@@ -265,6 +371,12 @@ EXPORT void dt_draw( DTWIN *d )
 	INT		gid = wm_gid(d->wid);
 	T_WMBAR		b;
 
+	if ( d->own != NULL ) {
+		if ( gid >= 0 ) {
+			d->own->draw(d);	/* the part's own work area */
+		}
+		return;
+	}
 	if ( d->tb_host != NULL ) {
 		dt_draw(d->tb_host);		/* the figure, and the text's caret in it */
 		return;
@@ -291,14 +403,23 @@ EXPORT void dt_draw( DTWIN *d )
 	}
 	dt_work_rect(d, &r);
 	if ( d->doc != NULL ) {
+		if ( !d->sealed && d->tool == DT_TOOL_NONE ) {
+			tv_draw_host(&d->id);
+		}
 		d->height = tv_doc_draw(gid, d->doc, &r, d->scroll_y, d->rec,
 					d->paper);
+		tv_draw_host(NULL);
 		if ( d->paper_frame && !d->xml_view ) {
 			paper_frame(d, gid, &r);
 		}
 	} else if ( d->fig != NULL ) {
+		/* the links in it to objects of other volumes are marked */
+		if ( !d->sealed && d->tool == DT_TOOL_NONE ) {
+			tv_draw_host(&d->id);
+		}
 		tv_fig_draw(gid, d->fig, &r, d->scroll_x, d->scroll_y, d->rec,
 			    d->paper);
+		tv_draw_host(NULL);
 		tv_fig_size(d->fig, &d->width, &d->height);
 		if ( d->fig->zoom > 0 ) {
 			d->height = d->height * d->fig->zoom / 8;
@@ -321,6 +442,35 @@ EXPORT void dt_draw( DTWIN *d )
 		dp_line_wide(gid, tr.right, tr.top - 1, tr.right, tr.bottom, 1, DP_LINE_DASH, &tp);
 		dd_draw(d->tb, gid);
 		dt_work_rect(d, &r);		/* the figure's own page, again */
+	}
+	if ( d->doc != NULL && d->doc->vert && !d->xml_view ) {
+		/*
+		 * 縦書き: the text runs on to the left, so the bar across is
+		 * the one that winds it, its knob at the right end at the head
+		 * of the text. Where the knob is, is kept in scroll_x, so that
+		 * what moves the knob moves the text (scroll_x_to).
+		 */
+		INT	view = r.right - r.left, room;
+
+		b.lo = 0;
+		b.hi = ( r.bottom - r.top > 0 ) ? r.bottom - r.top : 1;
+		b.clo = 0;
+		b.chi = b.hi;
+		wm_set_bar(d->wid, WM_BAR_R, &b);
+		b.hi = ( d->height > view ) ? d->height : view;
+		if ( b.hi <= 0 ) {
+			b.hi = 1;
+		}
+		room = b.hi - view;
+		d->scroll_x = room - d->scroll_y;
+		if ( d->scroll_x < 0 ) d->scroll_x = 0;
+		b.clo = d->scroll_x;
+		b.chi = d->scroll_x + view;
+		if ( b.chi > b.hi ) {
+			b.chi = b.hi;
+		}
+		wm_set_bar(d->wid, WM_BAR_B, &b);
+		return;
 	}
 	b.lo  = 0;
 	b.hi  = ( d->height > 0 ) ? d->height : 1;
@@ -379,6 +529,29 @@ LOCAL void blink_restart( void )
 	}
 }
 
+/*
+ * The window drawn again inside the caret alone, when it has one: the
+ * environment's visible part narrowed to it while the page is drawn, so
+ * that what goes to the screen is the caret and not the window.
+ */
+LOCAL void caret_draw( DTWIN *f )
+{
+	T_DPRECT	r, all;
+	T_WMWIN		w;
+	INT		gid = wm_gid(f->wid);
+
+	if ( gid < 0 || !dd_caret_rect(f, &r) || wm_ref(f->wid, &w) < E_OK ) {
+		dt_draw(f);
+		return;
+	}
+	all.left = 0;  all.top = 0;
+	all.right = w.work.right - w.work.left;
+	all.bottom = w.work.bottom - w.work.top;
+	(void)dp_set_visible(gid, &r);
+	dt_draw(f);
+	(void)dp_set_visible(gid, &all);
+}
+
 /* The caret of the window typed into: shown and hidden by turns */
 LOCAL void caret_step( UW now )
 {
@@ -390,8 +563,8 @@ LOCAL void caret_step( UW now )
 			dd_caret_hidden = FALSE;
 			f = dt_win_of(wm_focused());
 			if ( f != NULL ) {
-				dt_draw(f);
-				wm_composite();
+				caret_draw(f);
+				wm_update();
 			}
 		}
 		return;
@@ -406,8 +579,8 @@ LOCAL void caret_step( UW now )
 		return;
 	}
 	dd_caret_hidden = (BOOL)!dd_caret_hidden;
-	dt_draw(f);
-	wm_composite();
+	caret_draw(f);
+	wm_update();
 }
 
 LOCAL void blink_step( void )
@@ -436,7 +609,7 @@ LOCAL void blink_step( void )
 			dt_draw(&dt_win[i]);
 		}
 	}
-	wm_composite();
+	wm_update();
 }
 
 /*
@@ -689,7 +862,7 @@ LOCAL void close_requests( void )
 			if ( dt_win[i].used && wm_obj_uuid(dt_win[i].wid, &u) >= E_OK
 			  && ts_uuid_cmp(&u, &m.uuid) == 0 ) {
 				win_close(&dt_win[i]);
-				wm_composite();
+				wm_update();
 				break;
 			}
 		}
@@ -713,15 +886,22 @@ LOCAL struct {
 	TS_UUID	into;			/* and that window's object */
 	INT	sx, sy;			/* the outline's corner there, on the screen */
 	INT	x0, y0;			/* where the hand was when the carry began */
+	BOOL	copy;			/* the second button went down: 複写ドラッグ */
+	SZ	anssz;			/* how much of an answer the program reads */
 } carry;
 
 /*
  * The first form of a request and its answer, before a carried link
  * was asked for: a program written for it asks and reads in that size,
- * and is answered in it.
+ * and is answered in it. The second form, before the asking window and
+ * the flags, likewise.
  */
 #define DTREQ_OPEN_SIZE	( (SZ)( (UB *)&((T_DTREQ *)0)->look - (UB *)0 ) )
 #define DTANS_OPEN_SIZE	( (SZ)( (UB *)&((T_DTANS *)0)->into - (UB *)0 ) )
+#define DTREQ_V2_SIZE	( (SZ)( (UB *)&((T_DTREQ *)0)->win - (UB *)0 ) )
+#define DTANS_V2_SIZE	( (SZ)( (UB *)&((T_DTANS *)0)->look - (UB *)0 ) )
+/* The third, before the letters carried: answered in the size of now */
+#define DTREQ_V3_SIZE	( (SZ)( (UB *)&((T_DTREQ *)0)->text - (UB *)0 ) )
 
 LOCAL void answer_as( CONST TS_UUID *reply, CONST T_DTANS *an, SZ size )
 {
@@ -740,10 +920,6 @@ LOCAL void answer_as( CONST TS_UUID *reply, CONST T_DTANS *an, SZ size )
 	}
 }
 
-LOCAL void answer( CONST TS_UUID *reply, CONST T_DTANS *an )
-{
-	answer_as(reply, an, sizeof(*an));
-}
 
 EXPORT void dt_answer( CONST TS_UUID *reply, CONST T_DTANS *an, SZ size )
 {
@@ -760,7 +936,8 @@ LOCAL void carry_answer( ER er, CONST TS_UUID *into )
 	if ( into != NULL ) {
 		an.into = *into;
 	}
-	answer(&carry.rq.reply, &an);
+	an.how = carry.copy ? DT_HOW_COPY : 0;
+	answer_as(&carry.rq.reply, &an, carry.anssz);
 }
 
 /* The outline where the hand is, held where it was taken */
@@ -781,12 +958,14 @@ LOCAL void carry_outline( INT px, INT py )
  * down, which it may no longer be when the request comes -- a press
  * that was a click answers at once that nothing was carried.
  */
-LOCAL void carry_start( CONST T_DTREQ *rq )
+LOCAL void carry_start( CONST T_DTREQ *rq, SZ anssz )
 {
 	INT	px = 0, py = 0;
 	UINT	btn = 0;
 
 	carry.rq = *rq;
+	carry.anssz = anssz;
+	carry.copy = FALSE;
 	carry.rq.ask[0][sizeof(rq->ask[0]) - 1] = 0;
 	carry.rq.ask[1][sizeof(rq->ask[1]) - 1] = 0;
 	carry.rq.yes[sizeof(rq->yes) - 1] = 0;
@@ -803,7 +982,7 @@ LOCAL void carry_start( CONST T_DTREQ *rq )
 	carry.x0 = px;
 	carry.y0 = py;
 	carry_outline(px, py);
-	wm_composite();
+	wm_update();
 }
 
 LOCAL void carry_follow( INT px, INT py )
@@ -818,12 +997,41 @@ LOCAL void carry_release( INT px, INT py )
 
 	carry.on = FALSE;
 	(void)wm_set_drag(NULL, 0);
-	wm_composite();
+	wm_update();
 	if ( px - carry.x0 < 4 && carry.x0 - px < 4 && py - carry.y0 < 4 && carry.y0 - py < 4 ) {
 		carry_answer(E_OBJ, NULL);	/* let go where it was taken: a click, nothing carried */
 		return;
 	}
 	t = dt_win_of(wm_at(px, py));
+	if ( t == NULL && wm_at(px, py) > 0 && wm_at(px, py) == wm_obj_wid(&carry.rq.win) ) {
+		carry_answer(E_NOEXS, NULL);	/* back over the program's own window: its own to do */
+		return;
+	}
+	if ( ( carry.rq.flags & DT_F_TEXT ) != 0 ) {
+		/* letters: into a text where the outline's corner is, or onto a program's window */
+		INT	n, cx = px - carry.rq.grab_x, cy = py - carry.rq.grab_y;
+		ER	er = E_NOEXS;
+
+		carry.rq.text[DT_CARRY_TEXT - 1] = 0;
+		for ( n = 0; carry.rq.text[n] != 0; n++ ) ;
+		if ( n > 0 && t != NULL && dd_editable(t) && !t->xml_view ) {
+			er = dd_text_drop(t, cx, cy, carry.rq.text, n);
+		} else if ( n > 0 && t != NULL && df_is(t) ) {
+			/* a figure: as its text, in a piece of text there or a new one */
+			er = df_text_drop(t, cx, cy, carry.rq.text, n);
+		} else if ( n > 0 && t == NULL && wm_at(px, py) > 0 ) {
+			er = wm_obj_drop_text(wm_at(px, py), cx, cy, dt_up_mods, &carry.rq.win, carry.rq.text, n);
+			if ( er == E_NOSPT ) {
+				er = E_NOEXS;
+			}
+		}
+		if ( er < E_OK ) {
+			(void)wm_msg_put("ここには置けません");
+		}
+		wm_update();
+		carry_answer(( er < E_OK ) ? E_NOEXS : E_OK, NULL);
+		return;
+	}
 	if ( t == NULL || ( t->fig == NULL && t->doc == NULL ) || t->sealed || t->xml_view ) {
 		(void)wm_msg_put("ここには置けません");
 		carry_answer(E_NOEXS, NULL);
@@ -833,11 +1041,11 @@ LOCAL void carry_release( INT px, INT py )
 	  && !dt_confirm(t, (CONST char *)carry.rq.ask[0],
 			 ( carry.rq.ask[1][0] != 0 ) ? (CONST char *)carry.rq.ask[1] : NULL,
 			 "取消", ( carry.rq.yes[0] != 0 ) ? (CONST char *)carry.rq.yes : "実行") ) {
-		wm_composite();
+		wm_update();
 		carry_answer(E_ABORT, NULL);
 		return;
 	}
-	wm_composite();
+	wm_update();
 	carry.pending = TRUE;
 	carry.seq = carry.rq.seq;
 	carry.wid = t->wid;
@@ -852,7 +1060,7 @@ LOCAL void carry_release( INT px, INT py )
  * grab_y from the outline's corner), looking as asked. With more, the
  * carry stays open for the next link of the same outline.
  */
-LOCAL ER carry_place( CONST T_DTREQ *rq, BOOL more )
+LOCAL ER carry_place( CONST T_DTREQ *rq, BOOL more, TS_UUID *p_into )
 {
 	DTWIN	*t;
 	T_VOBJ	v;
@@ -869,6 +1077,33 @@ LOCAL ER carry_place( CONST T_DTREQ *rq, BOOL more )
 	}
 	knl_memset(&v, 0, sizeof(v));
 	v.target = rq->target;
+	if ( ( rq->flags & DT_F_DUPLICATE ) != 0 ) {
+		/* 実身複製ドラッグ: the link put is to a copy, named where it was let go */
+		UB		start[WM_LABEL_MAX], name[WM_LABEL_MAX];
+		CONST char	*base = dt_base_name(&rq->target);
+		INT		k = 0, i;
+
+		if ( base != NULL ) {
+			for ( ; base[k] != 0 && k < WM_LABEL_MAX - 1; k++ ) start[k] = (UB)base[k];
+		} else if ( om_store_name(&rq->target, start, WM_LABEL_MAX - 16) > 0 ) {
+			while ( start[k] != 0 ) k++;
+			for ( i = 0; "のコピー"[i] != 0 && k < WM_LABEL_MAX - 1; i++ ) start[k++] = (UB)"のコピー"[i];
+		}
+		start[k] = 0;
+		if ( !dt_ask_name(t, "新しい実身の名称を入力してください", start, name, WM_LABEL_MAX) ) {
+			return E_ABORT;
+		}
+		if ( om_store_copy(&rq->target, name, TRUE, &v.target) < E_OK ) {
+			(void)wm_msg_put("実身を作れませんでした");
+			return E_IO;
+		}
+		if ( base != NULL ) {
+			(void)om_store_set_maker(&v.target);
+		}
+		if ( p_into != NULL ) {
+			*p_into = v.target;
+		}
+	}
 	v.right = rq->look.w;
 	v.bottom = rq->look.h;
 	v.height = rq->look.h;
@@ -883,7 +1118,7 @@ LOCAL ER carry_place( CONST T_DTREQ *rq, BOOL more )
 	if ( !ed_place_link(t, carry.sx + rq->grab_x, carry.sy + rq->grab_y, &v) ) {
 		return E_OBJ;
 	}
-	wm_composite();
+	wm_update();
 	return E_OK;
 }
 
@@ -905,15 +1140,23 @@ LOCAL void process_requests( void )
 	SZ		asz = 0;
 	CONST DTPROG	*list[64];
 	INT		i, n;
+	SZ		anssz;
 
 	while ( dt_req > 0 && ob_rea_rec(dt_req, 0, 0, &rq, sizeof(rq), &asz) >= E_OK ) {
-		if ( asz != (SZ)sizeof(rq)
+		/*
+		 * What is opened while the request is done -- a panel, the
+		 * page of 印刷 -- is the asking process's to 強制終了 (5.5.1).
+		 */
+		knl_wmobj_act_for(knl_obchan_last_from(&dt_req_u));
+		if ( asz != (SZ)sizeof(rq) && asz != DTREQ_V2_SIZE && asz != DTREQ_V3_SIZE
 		  && !( asz == DTREQ_OPEN_SIZE && ( rq.req == DT_RQ_OPEN || rq.req == DT_RQ_TOOL ) ) ) {
 			continue;
 		}
 		if ( asz < (SZ)sizeof(rq) ) {
 			knl_memset((UB *)&rq + asz, 0, sizeof(rq) - (SZ)asz);
 		}
+		anssz = ( asz == DTREQ_OPEN_SIZE ) ? DTANS_OPEN_SIZE
+		      : ( asz == DTREQ_V2_SIZE ) ? DTANS_V2_SIZE : (SZ)sizeof(an);
 		knl_memset(&an, 0, sizeof(an));
 		an.seq = rq.seq;
 		an.er = E_OK;
@@ -925,9 +1168,7 @@ LOCAL void process_requests( void )
 		 * click's would be.
 		 */
 		if ( rq.req == DT_RQ_OPEN || rq.req == DT_RQ_TOOL ) {
-			dt_prog_reply(&rq.reply, rq.seq,
-				      ( asz == DTREQ_OPEN_SIZE ) ? DTANS_OPEN_SIZE : (SZ)sizeof(an),
-				      (BOOL)( rq.req == DT_RQ_TOOL ));
+			dt_prog_reply(&rq.reply, rq.seq, anssz, (BOOL)( rq.req == DT_RQ_TOOL ));
 		}
 		if ( rq.req == DT_RQ_OPEN ) {
 			/*
@@ -942,13 +1183,20 @@ LOCAL void process_requests( void )
 			v.frcol = v.chcol = v.tbcol = v.bgcol = TAD_COL_NONE;
 			dt_open_vobj(NULL, &v);
 		} else if ( rq.req == DT_RQ_CARRY ) {
-			carry_start(&rq);	/* answered when the hand lets go */
+			carry_start(&rq, anssz);	/* answered when the hand lets go */
 			continue;
 		} else if ( rq.req == DT_RQ_PLACE || rq.req == DT_RQ_PLACE_MORE ) {
-			an.er = carry_place(&rq, (BOOL)( rq.req == DT_RQ_PLACE_MORE ));
+			an.er = carry_place(&rq, (BOOL)( rq.req == DT_RQ_PLACE_MORE ), &an.into);
+		} else if ( rq.req >= DT_RQ_CLOSE && rq.req <= DT_RQ_FULL ) {
+			an.er = dt_proc_link_op(&rq, &an);	/* 仮身操作 and 実身操作 of a program's link */
+		} else if ( rq.req == DT_RQ_ADMIN ) {
+			an.er = dt_admin_req(&rq, knl_obchan_last_from(&dt_req_u));
 		} else if ( ( rq.req == DT_RQ_INSTALL || rq.req == DT_RQ_REMOVE )
-			 && !knl_ob_pid_admin(knl_obchan_last_from(&dt_req_u)) ) {
-			an.er = E_OACV;		/* only an administrator adds or takes away programs */
+			 && !knl_ob_pid_admin(knl_obchan_last_from(&dt_req_u))
+			 && ( an.er = dt_admin_ask(knl_obchan_last_from(&dt_req_u),
+						   (CONST UB *)( ( rq.req == DT_RQ_INSTALL ) ? "プログラムの追加"
+										 : "プログラムの削除" ), &rq.win) ) < E_OK ) {
+			/* only an administrator adds or takes away programs: the password asked for */
 		} else if ( rq.req == DT_RQ_INSTALL ) {
 			an.er = dt_pkg_install(&rq.target, (BOOL)( rq.recno == 1 ), &an.into, &an.how);
 		} else if ( rq.req == DT_RQ_REMOVE ) {
@@ -963,17 +1211,44 @@ LOCAL void process_requests( void )
 					break;
 				}
 			}
+		} else if ( rq.req == DT_RQ_TYPE ) {
+			an.er = dt_type_req(&rq, &an);	/* letters into the window the keys went to before */
+		} else if ( rq.req == DT_RQ_PRINT ) {
+			an.er = dt_print_spool(&rq, &an);	/* 印刷 of the pages it made */
+		} else if ( rq.req == DT_RQ_NOTIFY ) {
+			an.er = dt_note_req(&rq, &an);		/* 通知: shown, what comes of it told later */
 		} else {
 			an.er = E_PAR;
 		}
-		wm_composite();
+		wm_update();
 		if ( dt_prog_reply_taken() ) {
 			dt_prog_reply(NULL, 0, 0, FALSE);
 			continue;		/* the starter answers */
 		}
 		dt_prog_reply(NULL, 0, 0, FALSE);
-		answer_as(&rq.reply, &an, ( asz == DTREQ_OPEN_SIZE ) ? DTANS_OPEN_SIZE : (SZ)sizeof(an));
+		answer_as(&rq.reply, &an, anssz);
 	}
+	knl_wmobj_act_for(0);
+}
+
+/*
+ * A window of a program's as if it were one of the desktop's, for the
+ * panels the desktop asks with over it: only its number, and no record,
+ * so that nothing of a window of the desktop's is drawn or changed.
+ * The desktop's first window when the program's is not said or gone.
+ */
+LOCAL DTWIN	dt_host;
+
+EXPORT DTWIN *dt_host_of( CONST TS_UUID *win )
+{
+	INT	wid = ( win != NULL ) ? wm_obj_wid(win) : E_NOEXS;
+
+	if ( wid <= 0 ) {
+		return dt_first_win();
+	}
+	knl_memset(&dt_host, 0, sizeof(dt_host));
+	dt_host.wid = wid;
+	return &dt_host;
 }
 
 /* The port the requests come to: a channel of this program's own */
@@ -989,6 +1264,7 @@ LOCAL BOOL	dt_port_said = FALSE;
 LOCAL void port_open( void )
 {
 	T_OBCRE	c;
+	T_OBPRT	rp;
 	TS_UUID	u;
 	ER	er = E_OK;
 
@@ -1001,7 +1277,15 @@ LOCAL void port_open( void )
 			dt_port = 0;
 		}
 	}
-	/* and the one processes find by its name */
+	/*
+	 * and the one processes find by its name: written by every
+	 * program, whoever it acts for, and read by the desktop alone
+	 */
+	knl_memset(&rp, 0, sizeof(rp));
+	rp.owner = ob_user_system;
+	rp.group = ob_group_admin;
+	rp.mode = 0622;
+	c.prt = &rp;
 	c.name = (CONST UB *)DT_REQ_NAME;
 	c.flags = OB_F_GLOBAL;
 	if ( dt_req <= 0
@@ -1108,6 +1392,15 @@ LOCAL INT win_open( CONST TS_UUID *id, INT recno, INT x, INT y )
 	win_watch(d, id);
 	om_store_paper(id, &d->paper);
 	ed_model(d);
+	if ( d->doc != NULL && tv_doc_has_sheet(d->doc) ) {
+		/*
+		 * A document with something laid over its whole sheet -- the
+		 * squares of 原稿用紙 -- is opened on its paper, where what is
+		 * laid on the sheet is seen.
+		 */
+		d->paper_frame = TRUE;
+		ed_model(d);
+	}
 	for ( i = 0; i < TAD_NAME_MAX; i++ ) {
 		d->name[i] = name[i];
 	}
@@ -1118,6 +1411,67 @@ LOCAL INT win_open( CONST TS_UUID *id, INT recno, INT x, INT y )
 	}
 
 	return wid;
+}
+
+/*
+ * The pictogram of a tool's window: the icon of the program that is the
+ * tool, as the window of any object takes its object's (the page a tool
+ * makes is no object, and would otherwise keep the plain pictogram).
+ */
+LOCAL void prog_icon( INT wid, CONST DTPROG *p )
+{
+	UB	*file;
+	UW	*px = NULL;
+	SZ	size = 0;
+	INT	w = 0, h = 0;
+
+	file = om_obj_icon(&p->uuid, &size);
+	if ( file == NULL ) {
+		return;
+	}
+	if ( img_decode(file, size, &px, &w, &h) >= E_OK && px != NULL ) {
+		(void)wm_set_icon(wid, px, w, h);
+		Kfree(px);
+	}
+	Kfree(file);
+}
+
+LOCAL void made_icon( INT wid, CONST char *title, UINT tool )
+{
+	CONST DTPROG	*p;
+	CONST UB	*id;
+	INT		i, k;
+
+	id = ( tool == DT_TOOL_TRASH ) ? (CONST UB *)"trash-real-objects"
+	   : ( tool == DT_TOOL_SEARCH ) ? (CONST UB *)"real-object-search"
+	   : ( tool == DT_TOOL_NETWORK ) ? (CONST UB *)"virtual-object-network"
+	   : ( tool == DT_TOOL_WINLIST ) ? (CONST UB *)"window-list-viewer" : NULL;
+	p = ( id != NULL ) ? dt_prog_find(id) : NULL;
+	for ( i = 0; p == NULL && id == NULL; i++ ) {
+		/* 原紙箱 and 小物箱: the program the window is named after */
+		p = dt_prog_at(i);
+		if ( p == NULL ) {
+			break;
+		}
+		for ( k = 0; title[k] != 0 && p->name[k] == (UB)title[k]; k++ ) ;
+		if ( title[k] != 0 || p->name[k] != 0 ) {
+			p = NULL;
+		}
+	}
+	if ( p == NULL ) {
+		return;
+	}
+	prog_icon(wid, p);
+}
+
+/* A window of the desktop's own given the icon of one of the programs, by its id */
+EXPORT void dt_win_icon( INT wid, CONST char *prog )
+{
+	CONST DTPROG	*p = dt_prog_find((CONST UB *)prog);
+
+	if ( p != NULL ) {
+		prog_icon(wid, p);
+	}
 }
 
 /*
@@ -1149,6 +1503,7 @@ EXPORT DTWIN *dt_open_made( T_TAD *rec, CONST char *title, UINT tool,
 		tad_free(rec);
 		return NULL;
 	}
+	made_icon(wid, title, tool);
 	knl_memset(d, 0, sizeof(*d));
 	d->used   = TRUE;
 	d->sealed = TRUE;
@@ -1168,6 +1523,135 @@ EXPORT DTWIN *dt_open_made( T_TAD *rec, CONST char *title, UINT tool,
 	dt_draw(d);
 
 	return d;
+}
+
+/*
+ * A window whose work area a part of the desktop draws and works: one of
+ * the desktop's windows like the others, with no record and no object
+ * of its own, so that it is never taken for the window of an object.
+ * The part draws it when it is ready.
+ */
+EXPORT DTWIN *dt_own_open( CONST DTOWN *own, void *self, CONST T_DPRECT *o, UINT attr,
+			   CONST char *title, CONST char *prog )
+{
+	DTWIN	*d = NULL;
+	INT	i, wid;
+
+	for ( i = 0; i < DT_MAX_WIN; i++ ) {
+		if ( !dt_win[i].used ) {
+			d = &dt_win[i];
+			break;
+		}
+	}
+	if ( d == NULL ) {
+		(void)wm_msg_put("これ以上ウインドウを開けません。どれかを閉じてください");
+		return NULL;
+	}
+	wid = wm_open(o, attr, title);
+	if ( wid < 0 ) {
+		return NULL;
+	}
+	if ( prog != NULL ) {
+		dt_win_icon(wid, prog);
+	}
+	knl_memset(d, 0, sizeof(*d));
+	d->used   = TRUE;
+	d->sealed = TRUE;
+	d->tool   = DT_TOOL_OWN;
+	d->own    = own;
+	d->self   = self;
+	d->wid    = wid;
+	d->paper  = TV_PAPER_LOOK;
+	for ( i = 0; title[i] != 0 && i < TAD_NAME_MAX - 1; i++ ) {
+		d->name[i] = (UB)title[i];
+	}
+	d->name[i] = 0;
+	win_watch(d, NULL);
+	wm_raise(wid);
+	wm_focus(wid);
+
+	return d;
+}
+
+/* The whole work area laid with a panel's ground: round a panel when the window is made larger */
+EXPORT void dt_own_ground( DTWIN *d )
+{
+	T_WMWIN		w;
+	T_DPRECT	all;
+	T_DPPAT		pat;
+	INT		gid = wm_gid(d->wid);
+
+	if ( gid < 0 || wm_ref(d->wid, &w) < E_OK ) {
+		return;
+	}
+	all.left = 0;
+	all.top = 0;
+	all.right = w.work.right - w.work.left;
+	all.bottom = w.work.bottom - w.work.top;
+	if ( wm_look_pat(LK_PNLGROUND, &pat) >= E_OK ) {
+		dp_fill_rect_pat(gid, &all, &pat);
+	} else {
+		dp_fill_rect(gid, &all, wm_look(WM_LOOK_WORK));
+	}
+}
+
+EXPORT DTWIN *dt_own_next( CONST DTOWN *own, DTWIN *d )
+{
+	INT	i = ( d != NULL ) ? (INT)( d - dt_win ) + 1 : 0;
+
+	for ( ; i < DT_MAX_WIN; i++ ) {
+		if ( dt_win[i].used && dt_win[i].own == own ) {
+			return &dt_win[i];
+		}
+	}
+	return NULL;
+}
+
+/*
+ * An event given to the part of a window with one, measured from that
+ * window's work area: the window the button went down in follows the
+ * hand and hears the let go wherever the pointer is.
+ */
+LOCAL INT	dt_own_held = 0;
+
+LOCAL BOOL own_give( INT wid, CONST T_WMEV *ev )
+{
+	DTWIN	*o = dt_win_of(wid);
+	T_WMEV	e = *ev;
+	T_WMWIN	w, at;
+	INT	px = 0, py = 0;
+	UINT	btn = 0;
+
+	if ( o == NULL || o->own == NULL ) {
+		return FALSE;
+	}
+	if ( e.wid != wid ) {
+		if ( wm_ref(wid, &w) < E_OK ) {
+			return FALSE;
+		}
+		if ( e.wid > 0 && wm_ref(e.wid, &at) >= E_OK ) {
+			px = at.work.left + e.x;
+			py = at.work.top + e.y;
+		} else if ( ts_hid_pointer(&px, &py, &btn) < E_OK ) {
+			return FALSE;
+		}
+		e.x = px - w.work.left;
+		e.y = py - w.work.top;
+		e.wid = wid;
+	}
+	return o->own->input(o, &e);
+}
+
+/* Each turn of the loop: what the parts follow (a program's requests, a check under way) */
+LOCAL void own_poll( void )
+{
+	INT	i;
+
+	for ( i = 0; i < DT_MAX_WIN; i++ ) {
+		if ( dt_win[i].used && dt_win[i].own != NULL && dt_win[i].own->poll != NULL ) {
+			dt_win[i].own->poll(&dt_win[i]);
+		}
+	}
 }
 
 /* A tool's page made again: the old one goes, and nothing stays taken */
@@ -1197,6 +1681,12 @@ EXPORT void dt_remade( DTWIN *d, T_TAD *rec )
 EXPORT DTWIN *dt_first_win( void )
 {
 	return dt_win_of(dt_first_wid);
+}
+
+/* The window at a place of the table (0 to DT_MAX_WIN - 1), used or not */
+EXPORT DTWIN *dt_win_at( INT i )
+{
+	return ( i >= 0 && i < DT_MAX_WIN ) ? &dt_win[i] : NULL;
 }
 
 /* The window a tool is shown in, if it is open */
@@ -1360,6 +1850,9 @@ LOCAL void win_close_asked( DTWIN *d )
 	if ( d == NULL || !d->used ) {
 		return;
 	}
+	if ( d->own != NULL && d->own->closing != NULL && !d->own->closing(d) ) {
+		return;				/* the part's: not now (a check running to its end) */
+	}
 	if ( d->wid == dt_first_wid && dt_first_wid > 0 ) {
 		if ( dt_confirm(d, "OSを終了しますか？", NULL, "いいえ", "はい") ) {
 			dt_poweroff = TRUE;
@@ -1375,6 +1868,24 @@ LOCAL void win_close( DTWIN *d )
 	INT	i;
 
 	if ( d == NULL || !d->used ) {
+		return;
+	}
+	if ( d->own != NULL ) {
+		/* a window with a part of its own: the part lets go of what it keeps, then the window goes */
+		CONST DTOWN	*own = d->own;
+
+		d->own = NULL;
+		own->close(d);
+		d->self = NULL;
+		wm_close(d->wid);
+		if ( d->okey > 0 ) {
+			(void)ob_cls_obj(d->okey);
+			d->okey = 0;
+		}
+		if ( dt_own_held == d->wid ) {
+			dt_own_held = 0;
+		}
+		d->used = FALSE;
 		return;
 	}
 	tip_forget(d);				/* a composition in it, committed */
@@ -1457,13 +1968,22 @@ EXPORT void dt_open_vobj( DTWIN *from, CONST T_VOBJ *v )
 	INT		i, n = 0, wid;
 	UB		app[DT_PROG_ID];
 
+	/* a 虚身: what it points at is on a volume that is not attached; which one is said */
+	if ( dt_disk_absent(from, v) ) {
+		return;
+	}
 	/* a program object: the program is run */
 	p = dt_prog_of(&v->target);
 	if ( p != NULL ) {
 		(void)dt_prog_run(from, p, NULL);
 		return;
 	}
+	/* a command (a program without a window of its own) wherever it is: run in a コンソール */
+	if ( dt_command_run(&v->target) != E_NOEXS ) {
+		return;
+	}
 	/* an object a program that is a process opens: that process */
+	app[0] = 0;
 	if ( win_app == NULL && om_link_default_app(v, app, DT_PROG_ID) > 0 ) {
 		p = dt_prog_find(app);
 		if ( p != NULL && !p->builtin ) {
@@ -1471,10 +1991,32 @@ EXPORT void dt_open_vobj( DTWIN *from, CONST T_VOBJ *v )
 			return;
 		}
 	}
+	/* スライド: the document's links shown one at a time, in a window of its own */
+	if ( app_is(( win_app != NULL ) ? win_app : app, "basic-slide") ) {
+		dt_slide_open(from, v);
+		return;
+	}
+	/*
+	 * 基本動画再生: a record of 実時間制御TAD played in a window of its
+	 * own -- asked for, or a record that is nothing but a <realtime>,
+	 * which the editors have no page for, opened by a double press
+	 */
+	if ( app_is(( win_app != NULL ) ? win_app : app, "basic-player") ) {
+		dt_rtwin_open(from, v);
+		return;
+	}
+	if ( win_app == NULL && w == NULL ) {
+		T_TAD	*rec = om_store_get(&v->target, ( v->recno >= 0 ) ? v->recno : 0);
+
+		if ( rec != NULL && tv_kind(rec) == TV_KIND_NONE && dtrt_has(rec) ) {
+			dt_rtwin_open(from, v);
+			return;
+		}
+	}
 	if ( w != NULL ) {
 		wm_raise(w->wid);
 		wm_focus(w->wid);
-		wm_composite();
+		wm_update();
 		return;
 	}
 	/*
@@ -1497,7 +2039,13 @@ EXPORT void dt_open_vobj( DTWIN *from, CONST T_VOBJ *v )
 		}
 		from_link(w, v);
 		auto_open(w);
-		wm_composite();
+		wm_update();
+	} else if ( wid == E_LIMIT ) {
+		/* the table of windows full: said, not left to look as if nothing was asked */
+		tm_printf((UB *)"desktop: no window opened: %d are open already\n", DT_MAX_WIN);
+		(void)wm_msg_put("これ以上ウインドウを開けません。どれかを閉じてください");
+	} else {
+		tm_printf((UB *)"desktop: no window opened for the object: %d\n", (INT)wid);
 	}
 }
 
@@ -1587,7 +2135,7 @@ EXPORT void dt_fullscreen( DTWIN *d )
 	if ( wm_move(d->wid, &o) >= E_OK ) {
 		d->full = (BOOL)!d->full;
 		dt_draw(d);
-		wm_composite();
+		wm_update();
 	}
 }
 
@@ -1600,6 +2148,10 @@ EXPORT ER dt_open_as( DTWIN *from, CONST T_VOBJ *v, CONST UB *app )
 {
 	CONST DTPROG	*p = dt_prog_find(app);
 
+	if ( app_is(app, "basic-print") ) {
+		dt_print_vobj(from, v);		/* 基本印刷: printed without being opened */
+		return E_OK;
+	}
 	if ( p != NULL && ( !p->builtin || p->kind != DT_PK_APP ) ) {
 		return dt_prog_run(from, p, v);
 	}
@@ -1618,14 +2170,31 @@ EXPORT ER dt_open_as( DTWIN *from, CONST T_VOBJ *v, CONST UB *app )
 EXPORT void dt_exec( DTWIN *from, CONST T_VOBJ *v, INT index )
 {
 	UB	app[DT_PROG_ID];
+	UB	(*names)[OM_APP_NAME] = (UB (*)[OM_APP_NAME])Kmalloc(sizeof(UB) * OM_APP_NAME * 16);
+	INT	napp = 0;
 
-	if ( om_link_app_id(v, index, app, DT_PROG_ID) > 0 ) {
+	/* the applist's programs counted as the menu lists them (dtvmn.c) */
+	if ( names != NULL ) {
+		napp = om_link_apps(v, names, 16);
+		Kfree(names);
+		if ( napp < 0 ) napp = 0;
+	}
+	if ( index < napp && om_link_app_id(v, index, app, DT_PROG_ID) > 0 ) {
 		if ( !dt_app_locked(v) ) {
 			(void)om_store_set_default_app(&v->target, app);
 		}
 		(void)dt_open_as(from, v, app);
 	} else {
-		dt_open_vobj(from, v);
+		/* past the applist: a program that opens objects of its kind, the object's default left as it is */
+		CONST DTPROG	*by[16];
+		INT		k, m = dt_prog_by_type(v, by, 16);
+
+		k = index - napp;
+		if ( k >= 0 && k < m ) {
+			(void)dt_open_as(from, v, by[k]->id);
+		} else {
+			dt_open_vobj(from, v);
+		}
 	}
 }
 
@@ -1636,7 +2205,7 @@ EXPORT void dt_close_vobj( CONST T_VOBJ *v )
 
 	if ( w != NULL ) {
 		win_close_asked(w);
-		wm_composite();
+		wm_update();
 	}
 }
 
@@ -1647,12 +2216,10 @@ EXPORT void dt_close_vobj( CONST T_VOBJ *v )
  * place: whether the press was on a virtual object, whether that one is
  * open in a window, whether anything is taken.
  *
- * It is used in either of two ways. The button is pressed and let go
- * at once: the menu stays, and a row is chosen with the first button,
- * and a press anywhere off the menu puts it away. Or the button is held,
- * carried to a row and let go there, which chooses that row. Which of
- * the two it was is told by how long the button was down -- as long as
- * a press of a double press, and it was a click.
+ * The button that opened it is pressed and let go: the menu stays, and
+ * a row is chosen with the first button only (wm_menu_event), and a
+ * press anywhere off the menu puts it away. The button held, carried
+ * off the menu and let go there puts it away too.
  */
 EXPORT INT dt_run_menu( DTWIN *d, INT pid, UD when )
 {
@@ -1661,7 +2228,7 @@ EXPORT INT dt_run_menu( DTWIN *d, INT pid, UD when )
 	UD	gap;
 
 	wm_panel_draw(pid);
-	wm_composite();
+	wm_update();
 
 	gap = (UD)wm_num(WM_LOOK_DBLTIME, 400) * 1000000U;
 	while ( !dt_stop ) {
@@ -1694,7 +2261,7 @@ EXPORT INT dt_run_menu( DTWIN *d, INT pid, UD when )
 		}
 	}
 	wm_panel_close(pid);
-	wm_composite();
+	wm_update();
 
 	return cmd;
 }
@@ -1717,6 +2284,8 @@ LOCAL ER doc_menu( DTWIN *d, ID *p_mid )
 				  || d->cpos != d->apos );
 	st.nrecent   = dd_recent_faces(st.recent, DM_RECENT_MAX);
 	st.can_paste = (BOOL)( dt_tray_kind(NULL) != DT_TRAY_NONE );
+	st.vertical  = (BOOL)( d->doc != NULL && d->doc->vert );
+	dd_menu_state(d, &st.comb, &st.turned);
 
 	return doc_menu_make(&st, p_mid);
 }
@@ -1731,6 +2300,31 @@ LOCAL ER win_menu( DTWIN *d, BOOL on_vobj, CONST T_VOBJ *v, ID *p_mid )
 {
 	ER	er;
 
+	if ( d->own != NULL ) {
+		/*
+		 * A part's: its definition, set by the part, with 小物 and
+		 * 実行 of the tail filled in as for every window -- 実行 for
+		 * a link in it, grey away from one
+		 */
+		TS_UUID	def, td;
+
+		er = ts_str_to_uuid(d->own->menu, &def);
+		if ( er >= E_OK ) {
+			er = mn_cre_men(&def, p_mid);
+		}
+		if ( er < E_OK ) {
+			return er;
+		}
+		dt_tail_fill(*p_mid);
+		dt_get_vmn(d, *p_mid, on_vobj, v);
+		if ( on_vobj && ts_str_to_uuid(SYSDEF_MENU_TAIL, &td) >= E_OK ) {
+			(void)mn_chg_atr(*p_mid, &td, "exec", 0);
+		}
+		if ( d->own->menu_set != NULL ) {
+			d->own->menu_set(d, *p_mid);
+		}
+		return E_OK;
+	}
 	if ( d->tool != DT_TOOL_NONE ) {
 		er = dt_tool_menu_make(d, on_vobj, p_mid);
 	} else if ( d->fig != NULL ) {
@@ -1750,6 +2344,11 @@ LOCAL void win_menu_do( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj, CONST T_VOBJ
 	if ( dt_exe_vmn(d, sel, on_vobj, v) ) {
 		return;				/* the window may be gone */
 	}
+	if ( d->own != NULL ) {
+		d->own->menu_do(d, sel);	/* the part's own items */
+		wm_update();
+		return;
+	}
 	if ( d->tool != DT_TOOL_NONE ) {
 		dt_tool_menu_do(d, sel, on_vobj, v);
 	} else if ( d->fig != NULL ) {
@@ -1761,7 +2360,7 @@ LOCAL void win_menu_do( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj, CONST T_VOBJ
 	} else {
 		doc_do(d, doc_menu_cmd(sel), on_vobj, v);
 	}
-	wm_composite();
+	wm_update();
 }
 
 LOCAL void menu_at( DTWIN *d, INT x, INT y, UD when )
@@ -1801,8 +2400,10 @@ LOCAL void menu_at( DTWIN *d, INT x, INT y, UD when )
 		if ( er >= E_OK && !ed_picked(d, which) ) {
 			ed_pick_only(d, which);
 			dt_draw(d);
-			wm_composite();
+			wm_update();
 		}
+	} else if ( d->own != NULL && d->own->link_at != NULL ) {
+		er = d->own->link_at(d, x, y, &v) ? E_OK : E_NOEXS;
 	}
 no_object:
 	on = (BOOL)( er >= E_OK );
@@ -1811,14 +2412,20 @@ no_object:
 	}
 	pid = mn_opn_men(mid, d->wid, x, y);
 	if ( pid >= 0 ) {
+		if ( d->own != NULL ) {
+			tm_printf((UB *)"desktop: menu %s\n", d->name);	/* for the tests, as a process's says it */
+		}
 		cmd = dt_run_menu(d, pid, when);
 	}
 	er = mn_get_sel(mid, cmd, &sel);
 	(void)mn_del_men(mid);
 	if ( er >= E_OK ) {
+		if ( d->own != NULL ) {
+			tm_printf((UB *)"desktop: chosen %s\n", sel.code);
+		}
 		win_menu_do(d, &sel, on, &v);
 	}
-	wm_composite();
+	wm_update();
 }
 
 /*
@@ -1860,6 +2467,9 @@ LOCAL void doc_do( DTWIN *d, INT cmd, BOOL on_vobj, CONST T_VOBJ *v )
 	case DM_PAPER_FRAME:
 		d->paper_frame = (BOOL)!d->paper_frame;
 		dd_view(d);
+		break;
+	case DM_PRINT:
+		dt_print_window(d);
 		break;
 	case DM_VIEW_SET_XML:
 		if ( !d->xml_view ) {
@@ -1997,7 +2607,7 @@ EXPORT BOOL dt_ask_name( DTWIN *d, CONST char *prompt, CONST UB *start,
 	}
 	wm_panel_close(pid);
 	dt_draw(d);
-	wm_composite();
+	wm_update();
 
 	return (BOOL)( ans == WM_ANS_OK && out[0] != 0 );
 }
@@ -2011,6 +2621,9 @@ LOCAL void scroll_to( DTWIN *d, INT to )
 
 	dt_work_rect(d, &r);
 	room = d->height - ( r.bottom - r.top );
+	if ( d->doc != NULL && d->doc->vert && !d->xml_view ) {
+		room = d->height - ( r.right - r.left );	/* 縦書き: across */
+	}
 	if ( room < 0 ) {
 		room = 0;
 	}
@@ -2021,7 +2634,7 @@ LOCAL void scroll_to( DTWIN *d, INT to )
 	}
 	d->scroll_y = to;
 	dt_draw(d);
-	wm_composite();
+	wm_update();
 }
 
 /* Across: a document is as wide as its page and does not go across */
@@ -2031,6 +2644,23 @@ LOCAL void scroll_x_to( DTWIN *d, INT to )
 	INT		room;
 
 	dt_work_rect(d, &r);
+	if ( d->doc != NULL && d->doc->vert && !d->xml_view ) {
+		/*
+		 * 縦書き: the bar across winds the text, its knob at the
+		 * right end showing the head; the text is wound as far as the
+		 * knob is from that end.
+		 */
+		INT	view = r.right - r.left;
+
+		room = d->height - view;
+		if ( room < 0 ) {
+			room = 0;
+		}
+		if ( to > room ) to = room;
+		if ( to < 0 )    to = 0;
+		scroll_to(d, room - to);
+		return;
+	}
 	room = ( d->doc == NULL ) ? d->width - ( r.right - r.left ) : 0;
 	if ( room < 0 ) {
 		room = 0;
@@ -2042,7 +2672,7 @@ LOCAL void scroll_x_to( DTWIN *d, INT to )
 	}
 	d->scroll_x = to;
 	dt_draw(d);
-	wm_composite();
+	wm_update();
 }
 
 /*
@@ -2058,6 +2688,10 @@ LOCAL void wheel( DTWIN *d, CONST T_WMEV *ev )
 	BOOL	across = (BOOL)( ev->code == HID_WHEEL_H
 			      || ( ev->mods & ( HID_MOD_LSHIFT | HID_MOD_RSHIFT ) ) != 0 );
 
+	if ( d != NULL && d->own != NULL ) {
+		(void)own_give(d->wid, ev);	/* the part's to make what it will of */
+		return;
+	}
 	if ( d == NULL || ev->dz == 0 || wm_num(LK_PD_WHEEL, 1) == 0 ) {
 		return;
 	}
@@ -2240,7 +2874,7 @@ LOCAL void press( DTWIN *d, CONST T_WMEV *ev )
 		if ( wm_part_at(sx, sy, &got, &bar) == WM_PART_PICT && got == d->wid ) {
 			if ( wm_pict_close(d->wid, sx, sy, ev->when) ) {
 				win_close_asked(d);
-				wm_composite();
+				wm_update();
 			}
 			return;
 		}
@@ -2280,6 +2914,12 @@ LOCAL void press( DTWIN *d, CONST T_WMEV *ev )
 		return;
 	}
 
+	/* a window with a part of its own: the press is the part's, and so is the let go */
+	if ( d->own != NULL ) {
+		dt_own_held = d->wid;
+		(void)own_give(d->wid, ev);
+		return;
+	}
 	/* a piece of text in a figure: edited where it stands */
 	if ( df_text_press(d, ev->x, ev->y, ev->when) ) {
 		return;
@@ -2356,7 +2996,7 @@ LOCAL void obj_press( CONST T_WMEV *ev )
 			wm_set_pointer(( which == WM_BAR_B ) ? WM_PT_HGRIP : WM_PT_VGRIP);
 			break;
 		}
-		wm_composite();
+		wm_update();
 		return;
 	}
 	if ( ev->code == 0 && ( ev->x < 0 || ev->y < 0
@@ -2369,7 +3009,7 @@ LOCAL void obj_press( CONST T_WMEV *ev )
 		dt_grab_dy = sy - ( dt_sizing ? w.outer.bottom : w.outer.top );
 		wm_set_pointer(dt_sizing ? WM_PT_PICK : WM_PT_MOVE);
 	}
-	wm_composite();
+	wm_update();
 }
 
 /*
@@ -2406,6 +3046,23 @@ LOCAL void key( DTWIN *d, CONST T_WMEV *ev )
 		return;				/* a modifier key, alone */
 	}
 	if ( d == NULL ) {
+		return;
+	}
+	if ( d->own != NULL ) {
+		/* the part's key first; one with Ctrl it leaves is a letter of its menu */
+		T_WMEV	e = *ev;
+
+		e.wid = d->wid;
+		if ( own_give(d->wid, &e) ) {
+			return;
+		}
+		if ( ctrl && key_letter(ev->code, &letter) && win_menu(d, FALSE, NULL, &mid) >= E_OK ) {
+			er = mn_fnd_key(mid, letter, &sel);
+			(void)mn_del_men(mid);
+			if ( er >= E_OK ) {
+				win_menu_do(d, &sel, FALSE, NULL);
+			}
+		}
 		return;
 	}
 	if ( d->tool != DT_TOOL_NONE && dt_tool_key(d, ev->code, ev->mods) ) {
@@ -2450,7 +3107,7 @@ LOCAL void key( DTWIN *d, CONST T_WMEV *ev )
 	case KEY_A:
 		ed_pick_all(d);
 		dt_draw(d);
-		wm_composite();
+		wm_update();
 		break;
 	default:
 		break;
@@ -2545,6 +3202,23 @@ LOCAL void desktop_run( void )
 	if ( face_open() < E_OK ) {
 		tm_printf((UB *)"TessronOS desktop: no face on the disk\n");
 	}
+	/* a window with no icon of its own shows the gear of the settings in colour */
+	{
+		TS_UUID	gear;
+		UB	*file;
+		UW	*px = NULL;
+		SZ	size = 0;
+		INT	w = 0, h = 0;
+
+		file = ( ts_str_to_uuid(SYSDEF_PROG_SYSENV, &gear) >= E_OK ) ? om_obj_icon(&gear, &size) : NULL;
+		if ( file != NULL && img_decode(file, size, &px, &w, &h) >= E_OK && px != NULL ) {
+			(void)wm_set_icon_default(px, w, h);
+			Kfree(px);
+		} else {
+			tm_printf((UB *)"TessronOS desktop: no icon for windows without one\n");
+		}
+		if ( file != NULL ) Kfree(file);
+	}
 	{
 		T_OBVOL	vol;
 
@@ -2564,6 +3238,7 @@ LOCAL void desktop_run( void )
 	(void)dt_prog_start();			/* the programs, as real objects */
 	wm_obj_painter(tv_paint, tv_shape);	/* what a window's drawing and shape records show */
 	port_open();
+	dt_tail_start();			/* 小物 and 実行 in the programs' menus */
 	dt_fault_forget();			/* exceptions before the desktop was up: the console said them */
 	(void)kc_start();			/* かな漢字変換: mozc starts behind */
 	if ( dt_res_wall(WM_WALL_FIT) < E_OK ) {	/* a picture of the 壁紙箱 */
@@ -2586,6 +3261,7 @@ LOCAL void desktop_run( void )
 	}
 	wm_composite();
 	video_confirm(dt_win_of(dt_first_wid));
+	dt_fix_boot();				/* the system volume repaired at this start: what came of it */
 
 	while ( !dt_stop ) {
 		DTWIN	*d;
@@ -2595,9 +3271,26 @@ LOCAL void desktop_run( void )
 		if ( dt_port <= 0 || dt_req <= 0 ) {
 			port_open();		/* one that could not be made at the start */
 		}
+		knl_wdog_alive();		/* the loop came round (lockup.c tells one that does not) */
+#if USE_KTEST
+		/* the tests stop the loop here: 1 waits, 2 runs on the spot */
+		while ( dt_test_stall == 1 ) {
+			tk_dly_tsk(20);
+		}
+		while ( dt_test_stall == 2 ) {
+			;
+		}
+#endif
 		close_requests();
 		process_requests();
 		dt_fault_poll();		/* a process ended by an exception: told in a dialog */
+		own_poll();			/* a slide's or a player's program asked for something */
+		dt_tail_poll();			/* an accessory chosen in a program's menu */
+		dt_winlist_poll();		/* ウインドウ一覧, when the windows changed */
+		dt_scr_poll();			/* 画面印刷: its panel, and the count down */
+		dt_fix_poll();			/* ディスク修復: the check followed */
+		dt_disk_poll();			/* disks attached, taken away, taken out, come back */
+		dt_type_poll();			/* where the keys went, for DT_RQ_TYPE */
 		if ( wm_layout_serial() != dt_layout ) {
 			/* the frames were measured again: every window's page with them */
 			INT	i;
@@ -2608,7 +3301,7 @@ LOCAL void desktop_run( void )
 					dt_draw(&dt_win[i]);
 				}
 			}
-			wm_composite();
+			wm_update();
 		}
 		if ( wm_read_event(&ev, DT_BLINK_MS / 2) < E_OK ) {
 			blink_step();
@@ -2622,8 +3315,8 @@ LOCAL void desktop_run( void )
 		} else {
 			blink_step();
 		}
-		/* a window of 管理情報 is worked by its own code (dtinfo.c) */
-		if ( dt_info_event(&ev) ) {
+		/* 画面印刷 first: PrintScreen, and a rectangle being dragged out (dtscr.c) */
+		if ( dt_scr_event(&ev) ) {
 			continue;
 		}
 		/* and the dialog of a program ended by an exception (dtfault.c) */
@@ -2681,13 +3374,13 @@ LOCAL void desktop_run( void )
 						o.right = o.left + dw;
 						o.bottom = o.top + dh;
 					}
-					if ( wm_move(dt_move_wid, &o) >= E_OK ) {
+					if ( dt_carry_window(dt_move_wid, &o) ) {
 						DTWIN	*m = dt_win_of(dt_move_wid);
 
 						if ( m != NULL && dt_sizing ) {
 							dt_draw(m);
 						}
-						wm_composite();
+						wm_update();
 					}
 				}
 			} else if ( dt_hold_wid != 0 ) {
@@ -2702,7 +3395,7 @@ LOCAL void desktop_run( void )
 						if ( dt_hold_bar == WM_BAR_B ) scroll_x_to(h, b.clo);
 						else scroll_to(h, b.clo);
 					} else {
-						wm_composite();	/* the knob alone */
+						wm_update();	/* the knob alone */
 					}
 				} else {
 					/* a program's window: it is told where the knob went */
@@ -2713,10 +3406,14 @@ LOCAL void desktop_run( void )
 						dt_hold_at = b.clo;
 						wm_obj_scroll(dt_hold_wid, dt_hold_bar, b.clo, OB_SCR_KNOB);
 					}
-					wm_composite();
+					wm_update();
 				}
 			}
-			if ( d != NULL && !ed_holding() && !df_drawing_now()
+			if ( dt_own_held != 0 ) {
+				(void)own_give(dt_own_held, &ev);	/* the button went down in a part's window */
+			} else if ( d != NULL && d->own != NULL && dt_move_wid == 0 ) {
+				(void)own_give(d->wid, &ev);		/* the pointer over a part's window */
+			} else if ( d != NULL && !ed_holding() && !df_drawing_now()
 			  && !df_end_carrying() && !df_transform_carrying()
 			  && !df_canvas_painting() ) {
 				df_hover(d, ev.x, ev.y);
@@ -2737,7 +3434,15 @@ LOCAL void desktop_run( void )
 				}
 				break;
 			}
-			if ( ev.code != 0 && ( ed_holding() || dd_link_carrying() ) ) {
+			if ( dt_own_held != 0 ) {
+				/* let go of what was pressed in a part's window, wherever the pointer is */
+				INT	held = dt_own_held;
+
+				dt_own_held = 0;
+				(void)own_give(held, &ev);
+				break;
+			}
+			if ( ev.code != 0 && ( ed_holding() || dd_link_carrying() || dd_sel_carrying() ) ) {
 				/* the second button let go first: the first still carries */
 				break;
 			}
@@ -2760,17 +3465,27 @@ LOCAL void desktop_run( void )
 					wm_obj_scroll(dt_hold_wid, dt_hold_bar, b.clo, OB_SCR_DONE);
 				}
 			}
+			if ( dt_move_wid != 0 && dt_carry_end(dt_move_wid) ) {
+				DTWIN	*m = dt_win_of(dt_move_wid);
+
+				if ( m != NULL && dt_sizing ) {
+					dt_draw(m);
+				}
+			}
 			if ( dt_hold_wid != 0 || dt_move_wid != 0 ) {
 				wm_set_pointer(WM_PT_SELECT);
-				wm_composite();
+				wm_update();
 			}
 			dt_hold_wid = 0;
 			dt_move_wid = 0;
+			if ( dd_sel_carrying() && ts_hid_pointer(&px, &py, &btn) >= E_OK ) {
+				dd_sel_release(px, py);	/* selected letters carried, let go */
+			}
 			dd_release();
 			df_tool_release();
 			if ( df_end_carrying() ) {
 				df_end_release();
-				wm_composite();
+				wm_update();
 			}
 			if ( df_transform_carrying() ) {
 				df_transform_release();
@@ -2791,19 +3506,28 @@ LOCAL void desktop_run( void )
 
 		case HID_EV_BTN_DOWN:
 			if ( carry.on ) {
-				break;		/* another button, while a program's link is carried */
+				/* another button, while a program's link is carried: the second makes it a copy */
+				if ( ev.code == 1 ) {
+					carry.copy = TRUE;
+				}
+				break;
 			}
 			if ( df_panel_press(&ev) ) {
+				break;
+			}
+			if ( ev.code == 1 && dd_sel_carrying() ) {
+				dd_sel_copy();		/* letters carried over any window: a copy */
 				break;
 			}
 			if ( d == NULL ) {
 				obj_press(&ev);		/* a program's own window */
 				break;
 			}
-			if ( ev.code == 1 && ( ed_holding() || dd_link_carrying() ) ) {
+			if ( ev.code == 1 && ( ed_holding() || dd_link_carrying() || dd_sel_carrying() ) ) {
 				/* 複写ドラッグ: what is carried goes as a copy */
 				ed_hold_copy();
 				dd_link_copy();
+				dd_sel_copy();
 				break;
 			}
 			wm_raise(d->wid);
@@ -2819,6 +3543,20 @@ LOCAL void desktop_run( void )
 			key(dt_win_of(wm_focused()), &ev);
 			break;
 
+		case HID_EV_KEY_UP:
+			{
+				/* a key let go: only a part may want it (a program played that waits for it) */
+				DTWIN	*f = dt_win_of(wm_focused());
+
+				if ( f != NULL && f->own != NULL ) {
+					T_WMEV	e = ev;
+
+					e.wid = f->wid;
+					(void)own_give(f->wid, &e);
+				}
+			}
+			break;
+
 		case HID_EV_WHEEL:
 			wheel(d, &ev);		/* a program's own window is told by its notice */
 			break;
@@ -2827,7 +3565,6 @@ LOCAL void desktop_run( void )
 			break;
 		}
 	}
-	dt_info_close_all();
 	dt_fault_close_all();
 	for ( i = 0; i < DT_MAX_WIN; i++ ) {
 		win_close(&dt_win[i]);
@@ -2848,11 +3585,63 @@ LOCAL void desktop_run( void )
 
 LOCAL void desktop_task( INT stacd, void *exinf )
 {
+	/* what it makes as the person works is the person's (design 8.7) */
+	knl_ob_make_for_person(TRUE);
+	knl_wdog_watch(tk_get_tid());		/* a loop that stops coming round is told (lockup.c) */
 	desktop_run();
+	knl_wdog_watch(0);
+	knl_ob_make_for_person(FALSE);
+	dt_tail_stop();
 	port_close();
 	dt_tskid = 0;
 	tk_exd_tsk();
 }
+
+/*
+ * What 強制終了 is told of the desktop (include/ts/fquit.h): its task,
+ * the windows with changes not saved, and how it is started again.
+ * The windows are read without a lock: the desktop may have stopped
+ * anywhere, and this is asked from another task only to say what will
+ * be lost.
+ */
+LOCAL ID fq_task_of( void )
+{
+	return dt_tskid;
+}
+
+LOCAL INT fq_unsaved_of( UB *names, INT max )
+{
+	INT	i, n = 0, k = 0, j;
+
+	if ( names != NULL && max > 0 ) {
+		names[0] = 0;
+	}
+	for ( i = 0; i < DT_MAX_WIN; i++ ) {
+		DTWIN	*d = &dt_win[i];
+
+		if ( !d->used || !d->dirty ) {
+			continue;
+		}
+		n++;
+		if ( names == NULL || max <= 0 ) {
+			continue;
+		}
+		if ( n > 1 && k + 4 < max ) {
+			for ( j = 0; "、"[j] != 0; j++ ) names[k++] = (UB)"、"[j];
+		}
+		for ( j = 0; j < TAD_NAME_MAX && d->name[j] != 0 && k < max - 1; j++ ) {
+			names[k++] = d->name[j];
+		}
+		/* never half a character */
+		while ( k > 0 && k >= max - 1 && ( names[k - 1] & 0xC0 ) == 0x80 ) {
+			k--;
+		}
+		names[k] = 0;
+	}
+	return n;
+}
+
+LOCAL CONST T_FQDESK	dt_fq_ops = { fq_task_of, fq_unsaved_of, dt_start };
 
 /*
  * The desktop is run in a task of its own, with a stack large enough
@@ -2874,6 +3663,7 @@ EXPORT ER dt_start( void )
 	if ( dt_tskid > 0 ) {
 		return E_OBJ;
 	}
+	knl_fq_desktop(&dt_fq_ops);		/* 強制終了 knows it from now on */
 	dt_stop = FALSE;
 	knl_memset(&ctsk, 0, sizeof(ctsk));
 	ctsk.exinf   = NULL;
@@ -2927,11 +3717,16 @@ EXPORT INT ts_desktop( void )
 	dt_uitest_start();		/* nothing unless built with UITEST=1 */
 	/*
 	 * The desktop does not end. This waits rather than returning,
-	 * because returning from usermain shuts the machine down.
+	 * because returning from usermain shuts the machine down. It kicks
+	 * the watchdog as it waits: when this task, the first of all and
+	 * above every other, is not let run for twenty seconds, the machine
+	 * has stopped (lockup.c), and is reset after the time set.
 	 */
 	while ( !dt_stop ) {
+		knl_wdog_kick();
 		tk_dly_tsk(1000);
 	}
+	knl_wdog_kick_stop();			/* what follows takes as long as it takes */
 	/*
 	 * Turned off from the desktop: its windows are saved and closed by
 	 * its own task on the way out, which is waited for, and what the

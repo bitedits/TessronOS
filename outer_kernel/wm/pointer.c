@@ -21,10 +21,14 @@
  *	The picture over each shape has '#' where the pixel is black and
  *	'+' where it is white.
  *
- *	The pointer is laid down last, after the windows, at every screen.
- *	Nothing is saved from under it: the screen is built afresh from
- *	the ground up each time, so what was under the pointer is drawn
- *	again anyway.
+ *	The pointer is laid into the back buffer last, over the windows and
+ *	the outlines of what is carried, and what it covers is kept as it
+ *	is laid. Moving it is then putting those pixels back, keeping the
+ *	ones at the new place and laying it there: two small squares sent
+ *	to the screen and no window laid again. Whoever builds a part of
+ *	the screen the pointer lies on takes it up first (knl_pt_lift), so
+ *	that what is kept is always what the windows would show there, and
+ *	lays it again afterwards (knl_pt_lay).
  */
 
 #include <sys/machine.h>
@@ -1321,11 +1325,6 @@ EXPORT ER wm_show_pointer( BOOL on )
 }
 
 /*
- * The pointer, laid on the screen where the input layer says it is.
- * Called at the end of building a screen, so it is over everything:
- * the mask in white, then the body over it in black.
- */
-/*
  * The size ユーザ環境設定 asks for (LK_PTR_SIZE): 小 three quarters, 中 as
  * drawn, 大 half as large again. A shape is made at that size from the
  * drawn one, dot by nearest dot, when the size or the shape changes.
@@ -1365,6 +1364,12 @@ LOCAL void pt_scale( CONST UB *src, UB *dst, INT side )
 	}
 }
 
+/*
+ * The pointer drawn through a drawing environment where the input layer
+ * says it is: the mask in white, then the body over it in black. The
+ * window manager lays its own with knl_pt_lay, which keeps what it
+ * covers; this one keeps nothing and does not move that one.
+ */
 EXPORT void wm_draw_pointer( INT gid )
 {
 	CONST PTSHAPE	*sh = &pt_shape[pt_kind];
@@ -1396,10 +1401,182 @@ EXPORT void wm_draw_pointer( INT gid )
 		dp_put_mono(gid, x, y, pt_sc_mask, ( side + 7 ) / 8, side, side, 0x00FFFFFFU);
 		dp_put_mono(gid, x, y, pt_sc_body, ( side + 7 ) / 8, side, side, 0x00000000U);
 	}
-	pt_drawn_x = x;
-	pt_drawn_y = y;
+}
+
+/*
+ * What lies under the pointer while it is in the back buffer: the
+ * pixels of the part of its square that is on the screen, a row of
+ * pt_under_r's width after another. The window manager calls these with
+ * its lock held, which is what keeps them in step with the back buffer.
+ */
+LOCAL UW	pt_under[PT_BIG * PT_BIG];
+LOCAL T_DPRECT	pt_under_r;
+LOCAL BOOL	pt_on = FALSE;		/* it lies in the back buffer at pt_drawn_* */
+LOCAL UINT	pt_on_kind = WM_PT_SELECT;
+
+/*
+ * Where the pointer is to lie now: the square of its shape and size at
+ * the place the input layer says it is. FALSE when it is not to be on
+ * the screen at all (turned off, or nothing pointing).
+ */
+EXPORT BOOL knl_pt_want( T_DPRECT *r )
+{
+	INT	x = 0, y = 0;
+	UINT	buttons = 0;
+
+	if ( !pt_shown || ts_hid_pointer(&x, &y, &buttons) < E_OK ) {
+		return FALSE;
+	}
+	wm_pointer_box(x, y, r);
+	return TRUE;
+}
+
+/* Whether it lies in the back buffer, and the square it was laid in */
+EXPORT BOOL knl_pt_on( T_DPRECT *r )
+{
+	if ( pt_on && r != NULL ) {
+		r->left = pt_drawn_x;
+		r->top = pt_drawn_y;
+		r->right = pt_drawn_x + pt_drawn_side;
+		r->bottom = pt_drawn_y + pt_drawn_side;
+	}
+	return pt_on;
+}
+
+/* Whether it lies in the back buffer as it is wanted: in that square, in the shape it has now */
+EXPORT BOOL knl_pt_fresh( CONST T_DPRECT *want )
+{
+	return ( pt_on && pt_on_kind == pt_kind
+		 && want->left == pt_drawn_x && want->top == pt_drawn_y
+		 && want->right - want->left == pt_drawn_side );
+}
+
+/* A square cut to a screen of sw by sh; FALSE when nothing of it is on it */
+LOCAL BOOL pt_cut( CONST T_DPRECT *r, INT sw, INT sh, T_DPRECT *c )
+{
+	*c = *r;
+	if ( c->left < 0 )    c->left = 0;
+	if ( c->top < 0 )     c->top = 0;
+	if ( c->right > sw )  c->right = sw;
+	if ( c->bottom > sh ) c->bottom = sh;
+	return ( c->left < c->right && c->top < c->bottom );
+}
+
+/*
+ * The pointer taken up: what it covered put back into the back buffer.
+ * The caller says that part changed (knl_pt_on gave where it was).
+ */
+EXPORT void knl_pt_lift( UB *back, UINT pitch, INT sw, INT sh )
+{
+	T_DPRECT	c;
+	INT		w = pt_under_r.right - pt_under_r.left, y;
+
+	if ( !pt_on ) {
+		return;
+	}
+	pt_on = FALSE;
+	if ( !pt_cut(&pt_under_r, sw, sh, &c) ) {
+		return;
+	}
+	for ( y = c.top; y < c.bottom; y++ ) {
+		knl_memcpy(back + (UBINT)y * pitch + (UBINT)c.left * sizeof(UW),
+			   pt_under + (SZ)( y - pt_under_r.top ) * w + ( c.left - pt_under_r.left ),
+			   (SZ)( c.right - c.left ) * sizeof(UW));
+	}
+}
+
+/*
+ * The pointer laid in the square 'at' (as knl_pt_want gave it), what it
+ * covers kept first: the mask in white and the body over it in black,
+ * as wm_draw_pointer lays them. The caller says that part changed.
+ */
+EXPORT void knl_pt_lay( UB *back, UINT pitch, INT sw, INT sh, CONST T_DPRECT *at )
+{
+	CONST PTSHAPE	*shp = &pt_shape[pt_kind];
+	CONST UB	*mask, *body;
+	T_DPRECT	c;
+	INT		side = at->right - at->left, bpitch, x, y, w;
+
+	if ( side <= 0 || side > PT_BIG ) {
+		return;
+	}
+	if ( side == PT_SIDE ) {
+		mask = shp->mask;
+		body = shp->body;
+		bpitch = PT_PITCH;
+	} else {
+		if ( side != pt_sc_side || pt_kind != pt_sc_kind ) {
+			pt_scale(shp->mask, pt_sc_mask, side);
+			pt_scale(shp->body, pt_sc_body, side);
+			pt_sc_side = side;
+			pt_sc_kind = pt_kind;
+		}
+		mask = pt_sc_mask;
+		body = pt_sc_body;
+		bpitch = ( side + 7 ) / 8;
+	}
+	pt_drawn_x = at->left;
+	pt_drawn_y = at->top;
 	pt_drawn_side = side;
 	pt_drawn = TRUE;
+	pt_on_kind = pt_kind;
+	pt_on = FALSE;
+	if ( !pt_cut(at, sw, sh, &c) ) {
+		return;				/* wholly off the screen */
+	}
+	pt_under_r = c;
+	w = c.right - c.left;
+	for ( y = c.top; y < c.bottom; y++ ) {
+		UW		*p = (UW *)( back + (UBINT)y * pitch );
+		CONST UB	*mr = mask + (SZ)( y - at->top ) * bpitch;
+		CONST UB	*br = body + (SZ)( y - at->top ) * bpitch;
+
+		knl_memcpy(pt_under + (SZ)( y - c.top ) * w, p + c.left, (SZ)w * sizeof(UW));
+		for ( x = c.left; x < c.right; x++ ) {
+			INT	bx = x - at->left;
+			UB	bit = (UB)( 0x80 >> ( bx & 7 ) );
+
+			if ( ( br[bx >> 3] & bit ) != 0 ) {
+				p[x] = 0x00000000U;
+			} else if ( ( mr[bx >> 3] & bit ) != 0 ) {
+				p[x] = 0x00FFFFFFU;
+			}
+		}
+	}
+	pt_on = TRUE;
+}
+
+/*
+ * A copy of the screen's rectangle 'at' (dst, rows 'pitch' pixels apart,
+ * its corner at at's) given back what the pointer covers where it lies
+ * in the back buffer. Called with the window manager's lock held.
+ */
+EXPORT void knl_pt_under( UW *dst, INT pitch, CONST T_DPRECT *at )
+{
+	T_DPRECT	c;
+	INT		w = pt_under_r.right - pt_under_r.left, y;
+
+	if ( !pt_on || dst == NULL || at == NULL ) {
+		return;
+	}
+	c.left = ( pt_under_r.left > at->left ) ? pt_under_r.left : at->left;
+	c.top = ( pt_under_r.top > at->top ) ? pt_under_r.top : at->top;
+	c.right = ( pt_under_r.right < at->right ) ? pt_under_r.right : at->right;
+	c.bottom = ( pt_under_r.bottom < at->bottom ) ? pt_under_r.bottom : at->bottom;
+	if ( c.left >= c.right || c.top >= c.bottom ) {
+		return;
+	}
+	for ( y = c.top; y < c.bottom; y++ ) {
+		knl_memcpy(dst + (SZ)( y - at->top ) * pitch + ( c.left - at->left ),
+			   pt_under + (SZ)( y - pt_under_r.top ) * w + ( c.left - pt_under_r.left ),
+			   (SZ)( c.right - c.left ) * sizeof(UW));
+	}
+}
+
+/* What was kept belongs to a back buffer that is gone (the screen changed size) */
+EXPORT void knl_pt_forget( void )
+{
+	pt_on = FALSE;
 }
 
 EXPORT void wm_pointer_box( INT x, INT y, T_DPRECT *r )

@@ -99,6 +99,16 @@ LOCAL void test_object( void )
 	od = ts_opn_obj(vol, &uuid, TFO_READ | TFO_WRITE);
 	KT_ASSERT(od > 0);
 	KT_ASSERT_EQ(ts_opn_obj(vol, &uuid, TFO_READ), E_BUSY);
+	/* but one for the attributes alone shares it, both ways */
+	{
+		ID ods = ts_opn_obj(vol, &uuid, TFO_READ | TFO_SHARE);
+		KT_ASSERT(ods > 0);
+		KT_ASSERT_ER(ts_cls_obj(od), E_OK);
+		od = ts_opn_obj(vol, &uuid, TFO_READ | TFO_WRITE);
+		KT_ASSERT(od > 0);
+		KT_ASSERT_EQ(ts_opn_obj(vol, &uuid, TFO_READ | TFO_WRITE), E_BUSY);
+		if ( ods > 0 ) KT_ASSERT_ER(ts_cls_obj(ods), E_OK);
+	}
 	KT_ASSERT_ER(ts_cls_obj(od), E_OK);
 
 	/* two readers are allowed */

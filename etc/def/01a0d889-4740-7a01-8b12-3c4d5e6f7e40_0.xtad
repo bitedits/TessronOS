@@ -1,0 +1,18 @@
+<tad version="1.0" encoding="UTF-8" filename="キー配列のメニュー">
+<document>
+<p>キー配列のメニュー</p>
+<p>キー配列の窓のメニュー。閉じる、英字配列、かな配列、キーボードの形、表示、付け替え、付け替えをやめる、付け替えをすべて元に戻すと、ウインドウ、小物、実行。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2040-7001-9a10-c1d2e3f44001"/></include>
+<item>英字配列<link id="01a0d889-4741-7a12-8b23-3c4d5e6f7e41_0.xtad" vobjid="01a0d8c3-2040-7002-9a10-c1d2e3f44002"/></item>
+<item>かな配列<link id="01a0d889-4742-7a23-8b34-3c4d5e6f7e42_0.xtad" vobjid="01a0d8c3-2040-7003-9a10-c1d2e3f44003"/></item>
+<item>キーボードの形<link id="01a0d889-4743-7a34-8b45-3c4d5e6f7e43_0.xtad" vobjid="01a0d8c3-2040-7004-9a10-c1d2e3f44004"/></item>
+<item>表示<link id="01a0d889-4744-7a45-8b56-3c4d5e6f7e44_0.xtad" vobjid="01a0d8c3-2040-7005-9a10-c1d2e3f44005"/></item>
+<line/>
+<item code="pick">付け替え</item>
+<item code="unpick">付け替えをやめる</item>
+<item code="reset">付け替えをすべて元に戻す</item>
+<include><link id="01a0d889-46bd-7f9c-8bad-e3f4a5b6c789_0.xtad" vobjid="01a0d8c3-2040-7006-9a10-c1d2e3f44006"/></include>
+</menu>
+</tad>

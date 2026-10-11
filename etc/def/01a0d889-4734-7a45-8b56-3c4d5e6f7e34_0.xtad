@@ -1,0 +1,21 @@
+<tad version="1.0" encoding="UTF-8" filename="マイクロカードのカード">
+<document>
+<p>マイクロカードのカード</p>
+<p>カードの新規、複製、空欄化、削除とめくり。メニューの定義。</p>
+</document>
+<menu>
+<item code="card.new" key="N">新規</item>
+<item code="card.dup" key="D">複製</item>
+<item code="card.blank">空欄にする</item>
+<line/>
+<item code="card.del">1枚削除</item>
+<item code="card.delfound">検索カード全削除</item>
+<line/>
+<item code="go.prev">前へ</item>
+<item code="go.next">次へ</item>
+<item code="go.first">先頭へ</item>
+<item code="go.last">最後へ</item>
+<item code="go.pmark">前のマークへ</item>
+<item code="go.nmark">次のマークへ</item>
+</menu>
+</tad>

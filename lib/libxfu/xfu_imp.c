@@ -82,6 +82,7 @@ LOCAL CONST XEXT ext_tab[] = {
 	{ ".dic",  K_DICT,	"application/x-dictionary" },
 	{ ".bpk",  K_ARCHIVE,	"application/x-btron-archive" },
 	{ ".tpk",  K_BINARY,	"application/x-tessronos-package" },
+	{ ".pdf",  K_BINARY,	"application/pdf" },
 };
 
 #define NEXT	( (INT)( sizeof(ext_tab) / sizeof(ext_tab[0]) ) )

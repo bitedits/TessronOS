@@ -14,13 +14,14 @@
  *	A set of several kinds of tray record put in and read back byte for
  *	byte; the levels kept newest first and the oldest falling off; the
  *	level in hand chosen, added to, moved and taken out; the place of
- *	its own; and the tray as a real object whose record 0 says what it
- *	holds.
+ *	its own; the tray as a real object whose record 0 says what it
+ *	holds; and the tray as a process uses it, through its calls.
  */
 
 #include "ktest.h"
 #include "tstdlib.h"
 #include <ts/tray.h>
+#include <ts/proc.h>
 #include <ts/ob.h>
 #include <ts/om.h>
 #include <ts/sysdef.h>
@@ -291,6 +292,59 @@ LOCAL void test_frag( void )
 	KT_ASSERT_EQ(dt_tray_kind(NULL), DT_TRAY_NONE);
 }
 
+/*
+ * The tray from a process (tests/uprog/svcprog.c, SP_TRAY): the set it
+ * put in is the tray's, as the kernel reads it, and what it handed
+ * that was not its own did not go in.
+ */
+#define SVCPROG		"/boot/SVCPROG.ELF"
+#define SP_TRAY		28		/* as tests/uprog/svcprog.c */
+
+LOCAL void test_process( void )
+{
+	static CONST char	frag[] = "<tad version=\"1.0\" encoding=\"UTF-8\"><figure>"
+					 "<link id=\"0199ce60-532a-7670-b8bc-84c970de11dc_0.xtad\"/></figure></tad>";
+	T_CPRC	cprc;
+	T_PSTS	psts;
+	T_TRSTS	*sts;
+	T_TRINF	inf;
+	UW	arg[8];
+	UB	buf[sizeof(frag)];
+	SZ	asz = 0;
+	ID	pid;
+
+	KT_ASSERT_ER(tr_clr_tra(), E_OK);
+	knl_memset(arg, 0, sizeof(arg));
+	arg[0] = SP_TRAY;
+	cprc.pri    = KT_PRI_HIGH;
+	cprc.prcatr = 0;
+	cprc.stksz  = 0;
+	cprc.arg    = arg;
+	cprc.argsz  = sizeof(arg);
+	pid = ts_cre_prc(SVCPROG, &cprc);
+	if ( pid <= 0 ) KT_SKIP("no SVCPROG.ELF");
+	psts.exitcd = -1;
+	KT_ASSERT_ER(ts_wai_prc(pid, &psts, 30000), E_OK);
+	tm_printf((UB *)"  the process's tray: exit %d\n", psts.exitcd);
+	KT_ASSERT_EQ(psts.exitcd, 0);
+
+	sts = (T_TRSTS *)Kmalloc(sizeof(T_TRSTS));
+	KT_ASSERT(sts != NULL);
+	if ( sts == NULL ) return;
+	KT_ASSERT_ER(tr_get_sts(sts), E_OK);
+	KT_ASSERT_EQ(sts->nlevel, 1);
+	KT_ASSERT_EQ(sts->hand, 1);
+	KT_ASSERT_EQ(sts->set[1].nrec, 2);
+	KT_ASSERT(same_name(sts->set[1].name, "プロセスの組"));
+	Kfree(sts);
+	KT_ASSERT_ER(tr_ref_rec(TR_HAND, 1, &inf), E_OK);
+	KT_ASSERT_EQ(inf.kind, TR_PNG);
+	KT_ASSERT_ER(tr_rea_rec(TR_HAND, 0, buf, sizeof(buf), &asz), E_OK);
+	KT_ASSERT_EQ(asz, sizeof(frag) - 1);
+	KT_ASSERT(same_bytes(buf, (CONST UB *)frag, (INT)sizeof(frag) - 1));
+	KT_ASSERT_ER(tr_clr_tra(), E_OK);
+}
+
 EXPORT void ktest_tray( void )
 {
 	KT_RUN(test_set);
@@ -298,4 +352,5 @@ EXPORT void ktest_tray( void )
 	KT_RUN(test_put);
 	KT_RUN(test_object);
 	KT_RUN_SCREEN(test_frag);
+	KT_RUN(test_process);
 }

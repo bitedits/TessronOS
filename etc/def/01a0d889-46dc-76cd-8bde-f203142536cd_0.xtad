@@ -1,0 +1,18 @@
+<tad version="1.0" encoding="UTF-8" filename="基本表計算の線の色">
+<document>
+<p>基本表計算の線の色</p>
+<p>基本表計算の罫線の色。メニューの定義。</p>
+</document>
+<menu>
+<item code="linecolour" value="0">黒色</item>
+<item code="linecolour" value="255">青色</item>
+<item code="linecolour" value="15597568">赤色</item>
+<item code="linecolour" value="16738740">ピンク色</item>
+<item code="linecolour" value="16747520">橙色</item>
+<item code="linecolour" value="32768">緑色</item>
+<item code="linecolour" value="10145074">黄緑色</item>
+<item code="linecolour" value="49151">水色</item>
+<item code="linecolour" value="16776960">黄色</item>
+<item code="linecolour" value="16777215">白色</item>
+</menu>
+</tad>

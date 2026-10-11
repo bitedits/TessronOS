@@ -198,6 +198,7 @@ EXPORT BOOL xfc_ask_export( XWIN *w, INT n, CONST UB *first, CONST UB *dir, XFCE
 	case 3:	how->flags = XFU_F_TEXT; how->outenc = TXC_UTF8; break;
 	case 4:	how->flags = XFU_F_TAD | XFU_F_ONE; break;
 	case 5:	how->flags = XFU_F_TADJS; break;
+	case 6:	how->flags = XFU_F_IMAGE; break;
 	default: break;
 	}
 	if ( ui_value(&q, X_LAYOUT) != 0 ) how->flags |= XFU_F_LAYOUT;

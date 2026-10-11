@@ -23,6 +23,7 @@
 #include "../../../sysdepend.h"
 #include "../../../../tkernel/task.h"
 #include "../../../../tkernel/ready_queue.h"
+#include "../../../../tkernel/timer.h"
 #include "sysman/space.h"
 #include <tm/tmonitor.h>
 
@@ -38,6 +39,7 @@ LOCAL UB	knl_pcpu_irq_stack[CNF_MAX_PRCID][CNF_EXC_STACK_SIZE] __attribute__((al
 
 IMPORT UD	__tmp_stack_start;		/* linker: boot stack of the primary */
 IMPORT UD	knl_secondary_entry_pa;		/* boot.S: physical entry of a secondary core */
+IMPORT UD	knl_secondary_spin_pa;		/* boot.S: the same, released from a spin table */
 
 /* ------------------------------------------------------------------------ */
 /*
@@ -47,9 +49,31 @@ IMPORT UD	knl_secondary_entry_pa;		/* boot.S: physical entry of a secondary core
  *	handler called from inside a critical section (cyclic handler,
  *	SVC from an interrupt) can call kernel APIs.
  */
-LOCAL T_SPLOCK		knl_klock;
-LOCAL volatile ID	knl_klock_holder = 0;	/* PRC ID, 0 = free */
+EXPORT T_SPLOCK		knl_klock;
+EXPORT volatile ID	knl_klock_holder = 0;	/* PRC ID, 0 = free */
 LOCAL UW		knl_klock_depth = 0;
+
+/*
+ * Where the lock was last taken from, when, and how many times it has
+ * been taken: what the lockup report (lockup.c) says of a lock held
+ * too long. Written by the holder only.
+ */
+#if USE_KTEST
+/*
+ * For the tests (ktest_smp.c, test_wait_result): turns of a loop made
+ * after a critical section lets go of the lock, and between a wait
+ * being ended and its result being written (cpu_status.h, wait.c). They
+ * make the moments in which two processors meet long enough to be met
+ * every time. 0 outside that test.
+ */
+EXPORT volatile UW	knl_kt_unlock_spin = 0;
+EXPORT volatile UW	knl_kt_release_spin = 0;
+EXPORT volatile UW	knl_kt_exit_spin = 0;	/* a task's end between letting go of the lock and leaving its stack */
+#endif
+
+EXPORT volatile UBINT	knl_klock_pc = 0;
+EXPORT volatile UD	knl_klock_since = 0;
+EXPORT volatile UD	knl_klock_count = 0;
 
 #if CNF_KLOCK_STAT
 /*
@@ -57,6 +81,7 @@ LOCAL UW		knl_klock_depth = 0;
  * Kept under the lock itself, so nothing here needs to be atomic.
  */
 #include <ts/klstat.h>
+#include <ts/time.h>
 
 #define KL_SITES	96
 
@@ -162,6 +187,9 @@ EXPORT UINT knl_lock_kernel( void )
 #endif
 	knl_klock_holder = me;
 	knl_klock_depth = 1;
+	knl_klock_pc = (UBINT)__builtin_return_address(0);
+	Asm("mrs %0, cntpct_el0" : "=r"(knl_klock_since));
+	knl_klock_count++;
 	return intsts;
 }
 
@@ -188,6 +216,128 @@ EXPORT void knl_unlock_kernel_keep( void )
  *	task's context is still held by the processor that ran it last.
  *	Called with interrupts disabled on the temporary stack.
  */
+/*
+ * The time each task runs (TCB runcyc): the task a processor took and
+ * when, charged with what has gone by when the processor gives its
+ * context up (knl_acct_leave, from dispatch.S as it goes to its
+ * temporary stack). Only the processor itself writes its own entry,
+ * with interrupts disabled.
+ */
+LOCAL TCB	*acct_tsk[CNF_MAX_PRCID];
+LOCAL UD	acct_at[CNF_MAX_PRCID];
+LOCAL UD	acct_busy[CNF_MAX_PRCID];	/* each processor's counts spent running tasks */
+
+Inline UD acct_now( void )
+{
+	UD	t;
+
+	Asm("isb; mrs %0, cntpct_el0" : "=r"(t) :: "memory");
+	return t;
+}
+
+EXPORT void knl_acct_leave( void )
+{
+	INT	i = knl_pcpu()->prcid - 1;
+	TCB	*t;
+
+	if ( i < 0 || i >= CNF_MAX_PRCID ) {
+		return;
+	}
+	t = acct_tsk[i];
+	if ( t != NULL ) {
+		UD	now = acct_now();
+
+		if ( now > acct_at[i] ) {
+			t->runcyc += now - acct_at[i];
+			acct_busy[i] += now - acct_at[i];
+		}
+		acct_tsk[i] = NULL;
+	}
+}
+
+/*
+ * The processors online and the time each has run tasks (ts_ref_cpu,
+ * design 7.3): a task running now is counted up to now
+ */
+EXPORT ER ts_ref_cpu( T_TSCPU *pk )
+{
+	UD	now = acct_now(), f;
+	INT	i;
+
+	Asm("mrs %0, cntfrq_el0" : "=r"(f));
+	knl_memset(pk, 0, sizeof(*pk));
+	pk->ncpu = knl_num_prc;
+	pk->freq = (UW)f;
+	pk->now = now;
+	for ( i = 0; i < CNF_MAX_PRCID && i < TS_CPU_MAX; i++ ) {
+		UD	b = __atomic_load_n(&acct_busy[i], __ATOMIC_RELAXED);
+		UD	at = __atomic_load_n(&acct_at[i], __ATOMIC_RELAXED);
+
+		if ( __atomic_load_n(&acct_tsk[i], __ATOMIC_RELAXED) != NULL && now > at ) b += now - at;
+		pk->busy[i] = b;
+	}
+	return E_OK;
+}
+
+#if CNF_STK_WATCH
+/*
+ * make STKWATCH=1 (design 4.7.6): while a task is not running, nothing
+ * may write over the return addresses its frames hold. The dispatcher
+ * notes them as the task's processor gives its context up (dispatch.S,
+ * before another processor may take the task) and reads them again as
+ * a processor takes it. A difference means something wrote into the
+ * stack of a task that was not running; it is said there and then,
+ * with where and what, rather than when the task returns into it.
+ * Only a context of EL1 has frames of the kernel's; a word is noted
+ * only when it points into the kernel's code.
+ */
+IMPORT UB	__kernel_start[], __text_end[];
+
+EXPORT void knl_stk_snap( TCB *t )
+{
+	UD	*f = (UD *)t->tskctxb.ssp + 10;	/* the callee registers, then the exception frame */
+	UBINT	hi = (UBINT)t->isstack, lo = hi - (UBINT)t->sstksz, fp, next;
+	UD	v;
+	INT	i, n = 0;
+
+	t->swn = 0;
+	if ( (UBINT)f < lo || (UBINT)f + 208 > hi || ( f[22] & PSR_M_MASK ) == PSR_M_EL0t ) {
+		return;
+	}
+	fp = (UBINT)f[19];				/* x29 */
+	for ( i = 0; i < 32 && n < STK_WATCH_N; i++ ) {
+		if ( fp < lo || fp + 16 > hi || ( fp & 0xf ) != 0 ) {
+			break;
+		}
+		v = ((UD *)fp)[1];
+		if ( v >= (UD)(UBINT)__kernel_start && v < (UD)(UBINT)__text_end ) {
+			t->swaddr[n] = &((UD *)fp)[1];
+			t->swval[n] = v;
+			n++;
+		}
+		next = (UBINT)((UD *)fp)[0];
+		if ( next <= fp ) {
+			break;
+		}
+		fp = next;
+	}
+	t->swn = n;
+	t->swprc = (UB)knl_pcpu()->prcid;
+	Asm("mrs %0, cntpct_el0" : "=r"(t->swat));
+}
+
+LOCAL void stk_check( TCB *t )
+{
+	INT	i;
+
+	for ( i = 0; i < t->swn; i++ ) {
+		if ( *t->swaddr[i] != t->swval[i] ) {
+			knl_stack_overwritten(t, t->swaddr[i], t->swval[i], t->swprc, t->swat);
+		}
+	}
+}
+#endif
+
 EXPORT TCB *knl_dispatch_pick( void )
 {
 	T_PCPU	*p = knl_pcpu();
@@ -202,6 +352,11 @@ EXPORT TCB *knl_dispatch_pick( void )
 			tcb->runprc = (UB)p->prcid;
 			p->ctxtsk = tcb;
 			p->ctxsw_cnt++;
+			if ( p->prcid >= 1 && p->prcid <= CNF_MAX_PRCID ) {
+				acct_tsk[p->prcid - 1] = tcb;
+				acct_at[p->prcid - 1] = acct_now();
+			}
+			tcb->slice_at = acct_now();	/* its turn runs from here */
 		}
 	}
 	knl_unlock_kernel_keep();
@@ -215,6 +370,11 @@ EXPORT TCB *knl_dispatch_pick( void )
 	if ( tcb != NULL && *TaskStackFoot(tcb) != TASK_STK_MAGIC ) {
 		knl_stack_broken(tcb);
 	}
+#if CNF_STK_WATCH
+	if ( tcb != NULL ) {
+		stk_check(tcb);
+	}
+#endif
 
 	return tcb;
 }
@@ -254,6 +414,52 @@ LOCAL void knl_ipi_dispatch_handler( UINT intno, UW iar )
 }
 
 /*
+ * Every other processor that runs a task of the space 'ttbr0' takes an
+ * interrupt before this returns. Taking an exception is a context
+ * synchronization event: instructions it fetched before code of the
+ * space was rewritten (knl_icache_sync) are thrown away. A processor
+ * that starts a task of the space later enters it by an exception
+ * return, which is one too. The interrupt is the reschedule request,
+ * which changes nothing when there is nothing to change; its handler
+ * counts it, and the count is what is waited for. Called with
+ * interrupts enabled, so that two processors doing this at once each
+ * take the other's. A processor that does not answer within a bound
+ * (one stopped) is not waited for longer.
+ */
+#define SYNC_SPINS	20000000
+
+EXPORT void knl_sync_cores( UD ttbr0 )
+{
+	T_PCPU	*me = knl_pcpu();
+	UD	seen[CNF_MAX_PRCID];
+	UW	mask = 0;
+	INT	i, n;
+
+	Asm("dsb ish" ::: "memory");
+	for ( i = 0; i < knl_num_prc; i++ ) {
+		T_PCPU	*p = &knl_pcpu_tbl[i];
+		TCB	*t = p->ctxtsk;
+
+		if ( p == me || p->state != PC_ONLINE || t == NULL || t->tskctxb.ttbr0 != ttbr0 ) {
+			continue;
+		}
+		seen[i] = *(volatile UD *)&p->ipi_cnt;
+		mask |= 1U << i;
+	}
+	if ( mask == 0 ) return;
+	knl_send_ipi(mask, SGI_DISPATCH);
+	for ( n = 0; n < SYNC_SPINS && mask != 0; n++ ) {
+		for ( i = 0; i < knl_num_prc; i++ ) {
+			if ( ( mask & ( 1U << i ) ) != 0
+			  && *(volatile UD *)&knl_pcpu_tbl[i].ipi_cnt != seen[i] ) {
+				mask &= ~( 1U << i );
+			}
+		}
+		Asm("yield");
+	}
+}
+
+/*
  * SGI_STOP: park this processor (panic, shutdown)
  */
 LOCAL void knl_ipi_stop_handler( UINT intno, UW iar )
@@ -284,6 +490,14 @@ LOCAL BOOL knl_task_assigned( TCB *tcb, TCB **assign, INT n )
 	return FALSE;
 }
 
+/* Processors whose task has just given way at the end of its turn (slice_expire) */
+LOCAL UW	slice_yield = 0;
+
+/*
+ * A running task keeps its processor. Another takes, first, one whose
+ * task has just given way, then an idle one, so that a turn moves no
+ * task that keeps running to another processor.
+ */
 LOCAL INT knl_pick_prc( TCB *tcb, UW cand )
 {
 	INT	i;
@@ -292,9 +506,158 @@ LOCAL INT knl_pick_prc( TCB *tcb, UW cand )
 		return tcb->runprc - 1;
 	}
 	for ( i = 0; i < CNF_MAX_PRCID; i++ ) {
+		if ( ( cand & slice_yield & (1U << i) ) != 0 ) return i;
+	}
+	for ( i = 0; i < CNF_MAX_PRCID; i++ ) {
+		if ( ( cand & (1U << i) ) != 0 && knl_pcpu_tbl[i].ctxtsk == NULL ) return i;
+	}
+	for ( i = 0; i < CNF_MAX_PRCID; i++ ) {
 		if ( cand & (1U << i) ) return i;
 	}
 	return -1;
+}
+
+/* ------------------------------------------------------------------------ */
+/*
+ * Turns among the tasks of one priority (design 4.3.1)
+ *	Priorities 1..CNF_RT_PRI_LAST are the real-time band: strict
+ *	priority, and FIFO within one, unless tk_chg_slt gave a task a
+ *	time. Above it, the tasks of processes and of the desktop take
+ *	turns of CNF_SLICE_MS with the others of their priority. The tasks
+ *	of the kernel and of the drivers are never made to give way.
+ *
+ *	The clock stays tickless: a single timer event is set only while a
+ *	task that takes turns has a processor and another task of its
+ *	priority that could run there has none (the end of knl_reschedule).
+ *	When it fires, each such task whose turn is over goes behind the
+ *	others of its priority, as many of them as wait, and the processors
+ *	are assigned again. Everything is decided holding the kernel lock.
+ */
+IMPORT UB	__dt_text_start[], __dt_text_end[];
+
+LOCAL TMEB	slice_tmeb;
+LOCAL BOOL	slice_armed = FALSE;
+
+/* Whether t takes turns at all: a task of a process, or one of the desktop */
+LOCAL BOOL slice_taker( TCB *t )
+{
+	UBINT	a = (UBINT)t->task;
+
+	if ( t->owner > 0 && ( t->tskatr & TA_RNG3 ) >= TA_RNG2 ) {
+		return TRUE;
+	}
+	return (BOOL)( a >= (UBINT)__dt_text_start && a < (UBINT)__dt_text_end );
+}
+
+/* t's turn (ms), 0 when it is not made to give way */
+LOCAL UW slice_ms( TCB *t )
+{
+	BOOL	rt;
+
+	if ( !slice_taker(t) ) {
+		return 0;
+	}
+	rt = (BOOL)( ext_tskpri(t->priority) <= CNF_RT_PRI_LAST );
+	if ( t->slice_set ) {
+		return ( t->slicetime == 0 && !rt ) ? CNF_SLICE_MS : t->slicetime;
+	}
+	return rt ? 0 : CNF_SLICE_MS;
+}
+
+Inline UD slice_cyc( UW ms )
+{
+	return knl_cntfrq / 1000 * ms;
+}
+
+/* Whether a ready task of t's priority that has no processor in run[] could run on processor i */
+LOCAL INT slice_waiters( TCB *t, INT i, TCB **run, INT n )
+{
+	QUEUE	*h = &knl_ready_queue.tskque[t->priority], *q;
+	TCB	*u;
+	INT	w = 0;
+
+	for ( q = h->next; q != h; q = q->next ) {
+		u = (TCB *)q;
+		if ( u != t && !knl_task_assigned(u, run, n)
+		  && ( u->assprc == 0 || ( u->assprc & ( 1U << i ) ) != 0 ) ) {
+			w++;
+		}
+	}
+	return w;
+}
+
+LOCAL void slice_expire( void *arg )
+{
+	TCB	*run[CNF_MAX_PRCID], *t;
+	UB	gone[NUM_TSKPRI];
+	UD	now = acct_now();
+	INT	n = knl_num_prc, i;
+	UW	ms;
+
+	(void)arg;
+	slice_armed = FALSE;
+	for ( i = 0; i < NUM_TSKPRI; i++ ) gone[i] = 0;
+	for ( i = 0; i < n; i++ ) {
+		T_PCPU	*p = &knl_pcpu_tbl[i];
+
+		run[i] = ( p->state == PC_ONLINE && p->dispatch_disabled < DDS_DISABLE ) ? p->schedtsk : NULL;
+	}
+	slice_yield = 0;
+	for ( i = 0; i < n; i++ ) {
+		t = run[i];
+		if ( t == NULL || t->state != TS_READY || t->runprc == 0 || ( ms = slice_ms(t) ) == 0 ) {
+			continue;
+		}
+		if ( now - t->slice_at < slice_cyc(ms) ) {
+			continue;			/* its turn is not over */
+		}
+		if ( slice_waiters(t, i, run, n) <= (INT)gone[t->priority] ) {
+			continue;			/* as many have given way as wait */
+		}
+		(void)knl_ready_queue_move_last(&knl_ready_queue, t);
+		gone[t->priority]++;
+		t->slice_at = now;
+		slice_yield |= 1U << i;
+	}
+	knl_reschedule();
+	slice_yield = 0;
+}
+
+/*
+ * At the end of knl_reschedule: the timer event set when a task that
+ * takes turns runs while another of its priority waits for it, at the
+ * end of the nearest such turn
+ */
+LOCAL void slice_arm( TCB **assign, INT n )
+{
+	UD	now, left, near = 0;
+	UW	ms;
+	INT	i;
+	TCB	*t;
+
+	if ( slice_armed ) {
+		return;
+	}
+	now = acct_now();
+	for ( i = 0; i < n; i++ ) {
+		t = assign[i];
+		if ( t == NULL || knl_pcpu_tbl[i].dispatch_disabled >= DDS_DISABLE
+		  || ( ms = slice_ms(t) ) == 0 || slice_waiters(t, i, assign, n) == 0 ) {
+			continue;
+		}
+		left = slice_cyc(ms);
+		if ( t->runprc != 0 && now - t->slice_at < left ) {
+			left -= now - t->slice_at;
+		}
+		if ( near == 0 || left < near ) {
+			near = left;
+		}
+	}
+	if ( near != 0 ) {
+		if ( near < slice_cyc(1) ) near = slice_cyc(1);
+		knl_timer_insert_rel_ns(&slice_tmeb, near * 1000000ULL / ( knl_cntfrq / 1000 ), slice_expire, NULL);
+		slice_armed = TRUE;
+	}
 }
 
 EXPORT void knl_reschedule( void )
@@ -352,6 +715,7 @@ EXPORT void knl_reschedule( void )
 			if ( p != me ) ipi |= 1U << i;
 		}
 	}
+	slice_arm(assign, n);
 	if ( ipi != 0 ) {
 		knl_send_ipi(ipi, SGI_DISPATCH);
 	}
@@ -423,6 +787,7 @@ EXPORT void knl_gic_cpu_init( void )
 	EnableInt(SGI_DISPATCH, INTPRI_HIGHEST);
 	EnableInt(SGI_STOP, INTPRI_HIGHEST);
 	EnableInt(SGI_TIMER, INTPRI_SYSTICK);
+	knl_lockup_cpu_init();				/* its own timer, for the lockup checks (lockup.c) */
 }
 
 /*
@@ -433,6 +798,7 @@ EXPORT void knl_smp_init_interrupt( void )
 	knl_define_inthdr(SGI_DISPATCH, TA_HLNG, (FP)knl_ipi_dispatch_handler);
 	knl_define_inthdr(SGI_STOP, TA_HLNG, (FP)knl_ipi_stop_handler);
 	knl_define_inthdr(SGI_TIMER, TA_HLNG, (FP)knl_timer_ipi_handler);
+	knl_lockup_init_interrupt();
 }
 
 /* ------------------------------------------------------------------------ */
@@ -453,6 +819,7 @@ EXPORT void knl_secondary_main( INT i )
 
 	/* Process space: the empty table, like an idle primary */
 	Asm("msr ttbr0_el1, %0" :: "r"(knl_ttbr0_null));
+	knl_pan_setup();			/* PAN as on the primary (sysdepend.h) */
 	Asm("isb");
 	Asm("tlbi vmalle1");
 	Asm("dsb ish");
@@ -480,8 +847,34 @@ EXPORT void knl_secondary_main( INT i )
 }
 
 /*
+ * Release a processor that waits in the firmware's spin table: the
+ * physical address to go to is written where it looks, out to memory
+ * because it reads with its caches off, and the event wakes it from its
+ * wait. It arrives with nothing in its registers, so it takes its slot
+ * from its own affinity (boot.S); a slot that is not its affinity level
+ * 0 is not released at all.
+ */
+LOCAL ER knl_spin_release( INT i )
+{
+	volatile UD	*rel;
+
+	if ( knl_cpu_release[i] == 0 || ( knl_cpu_mpidr[i] & 0xffffff ) != (UD)i ) {
+		return E_PAR;
+	}
+	rel = (volatile UD *)PA2VA(knl_cpu_release[i]);
+	*rel = knl_secondary_spin_pa;
+	Asm("dsb sy");
+	Asm("dc civac, %0" :: "r"(rel) : "memory");
+	Asm("dsb sy");
+	Asm("sev");
+	return E_OK;
+}
+
+/*
  * Start the secondary processors (called from the kernel initialization
- * after the timer is running, interrupts disabled)
+ * after the timer is running, interrupts disabled). Each is started the
+ * way its node in the device tree says: PSCI CPU_ON, or a release from
+ * the spin table.
  */
 EXPORT void knl_smp_start_secondaries( void )
 {
@@ -499,7 +892,16 @@ EXPORT void knl_smp_start_secondaries( void )
 		p->state = PC_BOOTING;
 		Asm("dsb ish");
 
-		er = knl_psci_cpu_on(knl_cpu_mpidr[i], knl_secondary_entry_pa, (UD)i);
+		if ( knl_cpu_enable[i] == CPU_ENABLE_SPIN ) {
+			er = knl_spin_release(i);
+			if ( er != E_OK ) {
+				tm_printf((UB*)"TessronOS: CPU%d: no spin table release address\n", i);
+				p->state = PC_OFFLINE;
+				continue;
+			}
+		} else {
+			er = knl_psci_cpu_on(knl_cpu_mpidr[i], knl_secondary_entry_pa, (UD)i);
+		}
 		if ( er != E_OK ) {
 			tm_printf((UB*)"TessronOS: CPU%d: PSCI CPU_ON failed (%d)\n", i, er);
 			p->state = PC_OFFLINE;

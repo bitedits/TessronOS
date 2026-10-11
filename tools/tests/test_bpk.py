@@ -398,6 +398,38 @@ class TestBpk(unittest.TestCase):
                 self.assertEqual(doc.find("docoverlay").get("active"), "0")
         self.assertEqual(n_over, 33)
 
+    # ------------------------------------------------------------ writing (書庫管理, design 11.20)
+
+    def test_lh5_encode(self):
+        """lh5_encode's output read back by lh5_decode, for data of each kind"""
+        cases = {
+            "zero": bytes(100000),
+            "one": b"A",
+            "abab": b"AB" * 40,
+            "text": "".join("書庫管理の試験 BTRON archive %d\n" % i for i in range(3000)).encode(),
+            "noise": bytes((i * 2654435761 >> 13) & 0xFF for i in range(70000)),
+        }
+        with open(SAMPLE, "rb") as f:
+            cases["sample"] = f.read()
+        for name, data in cases.items():
+            src, out = self.path(name + ".in"), self.path(name + ".lh5")
+            with open(src, "wb") as f:
+                f.write(data)
+            code, text = self.run_exe("lh5", src, out)
+            self.assertEqual(code, 0, name + ": " + text.decode(errors="replace"))
+            self.assertIn(b"same 1", text)
+        self.assertLess(os.path.getsize(self.path("zero.lh5")), 200)
+
+    def test_rewrite(self):
+        """The sample written again from what was read: the very same stream and CRC"""
+        for method in ("lh5", "lh0"):
+            out = self.path("re_" + method)
+            code, text = self.run_exe("rewrite", SAMPLE, method, out)
+            self.assertEqual(code, 0, text)
+            self.assertIn(b"files 33 orig 147780", text)
+            self.assertIn(b"crc 517a was 517a same 1 crcok 1 filesize 141204 was 141204", text)
+        self.assertLess(os.path.getsize(self.path("re_lh5")), 30000)
+
 
 if __name__ == "__main__":
     unittest.main()

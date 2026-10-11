@@ -1,0 +1,73 @@
+<tad version="1.0" encoding="UTF-8" filename="10.2 複数パートの演奏">
+<realtime>
+<figure>
+<figView top="0" left="0" right="1920" bottom="1080"/>
+<figDraw top="0" left="0" right="1920" bottom="1080"/>
+<figScale hunit="-72" vunit="-72"/>
+<rect lineType="0" lineWidth="0" f_pat="1" left="0" top="0" right="1920" bottom="1080" fillColor="#16213e" zIndex="0"/>
+<document>
+<docView viewleft="120" viewtop="400" viewright="1800" viewbottom="500"/>
+<docDraw drawleft="120" drawtop="400" drawright="1800" drawbottom="500"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="10"/>
+<font size="72"/>
+<font color="#FFFFFF"/>
+10.2 複数パートの演奏
+</document>
+<document>
+<docView viewleft="120" viewtop="540" viewright="1800" viewbottom="620"/>
+<docDraw drawleft="120" drawtop="540" drawright="1800" drawbottom="620"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="10"/>
+<font size="36"/>
+<font color="#A0B4D0"/>
+二つのパートを並列のグループで同時に鳴らす
+</document>
+</figure>
+<realData>
+<!-- ストリーム定義 -->
+<stream number="1">
+<deviceName>inst:Piano</deviceName>
+<deviceParams>ch1</deviceParams>
+</stream>
+<stream number="2">
+<deviceName>inst:Bass</deviceName>
+<deviceParams>ch2</deviceParams>
+</stream>
+<stream number="3">
+<deviceName>inst:Drums</deviceName>
+<deviceParams>ch10</deviceParams>
+</stream>
+
+<!-- メロディパート -->
+<realGroup type="parallel" stream="1">
+<timeDelta value="0"/>
+<note pitch="C5" velocity="100" duration="480"/>
+<timeDelta value="480"/>
+<note pitch="E5" velocity="100" duration="480"/>
+<timeDelta value="480"/>
+<note pitch="G5" velocity="100" duration="960"/>
+</realGroup>
+
+<!-- ベースパート（並列実行） -->
+<realGroup type="parallel" stream="2">
+<timeDelta value="0"/>
+<note pitch="C3" velocity="80" duration="960"/>
+<timeDelta value="960"/>
+<note pitch="G2" velocity="80" duration="960"/>
+</realGroup>
+
+<!-- ドラムパート（並列実行） -->
+<realGroup type="parallel" stream="3">
+<timeDelta value="0"/>
+<note pitch="36" velocity="100" duration="120"/>  <!-- Kick -->
+<timeDelta value="480"/>
+<note pitch="38" velocity="100" duration="120"/>  <!-- Snare -->
+<timeDelta value="480"/>
+<note pitch="36" velocity="100" duration="120"/>  <!-- Kick -->
+<timeDelta value="480"/>
+<note pitch="38" velocity="100" duration="120"/>  <!-- Snare -->
+</realGroup>
+</realData>
+</realtime>
+</tad>

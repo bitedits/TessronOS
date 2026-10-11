@@ -240,7 +240,7 @@ EXPORT void dt_pn_done( DTWIN *d, INT pid )
 		wm_panel_close(pid);
 	}
 	dt_draw(d);
-	wm_composite();
+	wm_update();
 }
 
 EXPORT INT dt_pn_value( INT pid, INT num )

@@ -25,7 +25,7 @@
 extern "C" {
 #endif
 
-#define BLK_MAX_PART		8		/* partitions kept per device */
+#define BLK_MAX_PART		255		/* partitions kept per device, as many as a device has subunits (MAX_UNIT): GPT entries, or the MBR's primary and logical ones */
 #define BLK_SECTOR_SIZE		512
 
 /*

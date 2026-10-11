@@ -14,7 +14,9 @@
  *	Every port here is a PL011. Which there are comes from the device
  *	tree on QEMU virt (each /pl011@ node, the console's first) and from
  *	the board's own table on the Raspberry Pi 5: the three pin debug
- *	UART and UART0 of the RP1 on the 40 pin header.
+ *	UART and UART0 of the RP1 on the 40 pin header. The Raspberry Pi 4
+ *	has UART0 of the BCM2711 on the header (pins 8 and 10, given back
+ *	by the Bluetooth with dtoverlay=disable-bt), which is its console.
  *
  *	What comes in is taken off the port's FIFO by its interrupt into a
  *	ring of SER_RING bytes, where a read finds it. A port without an
@@ -189,6 +191,7 @@ LOCAL INT ser_read( SERPORT *p, UB *buf, INT size )
 {
 	UINT	ptn;
 	INT	n, waited = 0;
+	ER	er;
 
 	if ( size <= 0 ) {
 		return 0;
@@ -211,11 +214,21 @@ LOCAL INT ser_read( SERPORT *p, UB *buf, INT size )
 			if ( p->rcvtmo != TMO_FEVR && waited >= p->rcvtmo ) {
 				return 0;
 			}
-			tk_dly_tsk(SER_POLL_MS);
+			/*
+			 * A wait cut by someone else (tk_rel_wai: 強制終了 ending
+			 * the process whose call this is, design 5.5.4) ends the
+			 * read with what there is, however long it was to wait.
+			 */
+			if ( tk_dly_tsk(SER_POLL_MS) == E_RLWAI ) {
+				return 0;
+			}
 			waited += SER_POLL_MS;
-		} else if ( tk_wai_flg(p->flgid, FLG_RX, TWF_ORW | TWF_BITCLR, &ptn,
+		} else if ( ( er = tk_wai_flg(p->flgid, FLG_RX, TWF_ORW | TWF_BITCLR, &ptn,
 				       ( p->rcvtmo == TMO_FEVR || p->rcvtmo > SER_POLL_MS * 10 )
-				       ? SER_POLL_MS * 10 : p->rcvtmo) < E_OK ) {
+				       ? SER_POLL_MS * 10 : p->rcvtmo) ) < E_OK ) {
+			if ( er == E_RLWAI ) {
+				return 0;
+			}
 			/* nothing said so within the while: look at the FIFO itself */
 			(void)drain(p);
 			n = take(p, buf, size);
@@ -466,6 +479,10 @@ IMPORT ER rp1_uart_init( UW baud );
 #define RP1_UART_CLOCK		50000000
 #endif
 
+#ifdef RPI4
+#include "sysdepend/sysdepend.h"
+#endif
+
 /*
  * Every port of the machine, the console's first so that it is "sera".
  */
@@ -511,6 +528,18 @@ EXPORT INT knl_ser_init( void )
 		} else {
 			tm_printf((UB *)"TessronOS: RP1 UART0 not set up (%d)\n", (INT)er);
 		}
+	}
+#endif
+#ifdef RPI4
+	{
+		/* the UART's clock as the firmware set it (init_uart_clock), 48MHz unless told */
+		UW	clk = 0;
+
+		if ( knl_fw_value(TAG_GET_CLOCK_RATE, FW_CLOCK_UART, &clk) < E_OK
+		  || clk < 1000000 || clk > 200000000 ) {
+			clk = PL011_UART0_CLOCK;
+		}
+		(void)port_add(PL011_UART0_PA, PL011_UART0_INTNO, clk, "UART0", FALSE);
 	}
 #endif
 	return ser_n;

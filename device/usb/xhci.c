@@ -49,6 +49,7 @@
 #include "kernel.h"
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
+#include <ts/snd.h>
 #include "sysdepend.h"
 #include "usbdev.h"
 
@@ -194,7 +195,7 @@
  * has to hold more than that or it overflows while a port is reset.
  */
 #define EV_SEGS			8
-#define MAX_SLOTS		32
+#define MAX_SLOTS		255		/* every slot the controller may have: one page of DCBAA holds them */
 #define MAX_ROOTPORTS		32
 #define MAX_SCRATCH		64
 #define CTRL_BUF_BYTES		(4 * USB_PAGE)
@@ -719,6 +720,8 @@ LOCAL BOOL wait_for( XHCI *x, volatile BOOL *flag, TMO tmo )
 		if ( *flag ) {
 			return TRUE;
 		}
+		/* the manager's lock is held all the while: a sound stream not on USB is served meanwhile */
+		knl_snd_service();
 		if ( (INT)(knl_usb_ms() - start) > tmo ) {
 			return FALSE;
 		}
@@ -2455,7 +2458,8 @@ EXPORT ER knl_xhci_attach( UBINT regs, UD size, UD mmio, UINT intno,
 	if ( w == 0xffffffff
 	  || (UD)caplen + 0x400 + 0x10 * (UD)x->nports > size
 	  || (UD)(rd32(regs, CAP_RTSOFF) & ~0x1fU) + 0x40 > size
-	  || (UD)(rd32(regs, CAP_DBOFF) & ~0x3U) + 4 * (MAX_SLOTS + 1) > size ) {
+	  || (UD)(rd32(regs, CAP_DBOFF) & ~0x3U)
+	     + 4 * (UD)( ( HCS1_SLOTS(x->hcs1) < MAX_SLOTS ? HCS1_SLOTS(x->hcs1) : MAX_SLOTS ) + 1 ) > size ) {
 		USB_LOG("usb: xhci at %08x: registers outside its window\n", (UW)mmio);
 		Kfree(x);
 		return E_NOSPT;

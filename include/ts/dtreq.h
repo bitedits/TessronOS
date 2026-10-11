@@ -68,6 +68,156 @@ extern "C" {
 #define DT_HOW_NEW	1		/* a program the system did not have */
 #define DT_HOW_UPDATED	2		/* one it had, now the package's */
 
+/*
+ * The answer to DT_RQ_CARRY says in how whether the second button went
+ * down while the outline was carried (複写ドラッグ): the program leaves
+ * its own link where it is, as for a copy, rather than taking it away
+ * as for a move. Let go over win, the asking program's own window, the
+ * answer is E_NOEXS and nothing is said: what is inside its window the
+ * program does itself.
+ */
+#define DT_HOW_COPY	3
+
+/*
+ * DT_RQ_PLACE with DT_F_DUPLICATE in flags (実身複製ドラッグ): the object
+ * target is copied first, with all it holds, under a name asked for in
+ * the window the outline was let go over, and the link put is to the
+ * copy, which the answer names in into.
+ */
+#define DT_F_DUPLICATE	0x0001
+
+/*
+ * The 仮身操作 and 実身操作 of a link a program shows itself, done by the
+ * desktop as for a link in a window of its own; what changes the link
+ * comes back in the answer, for the program to write into its record.
+ * A panel the desktop asks with is put in the middle of win, the asking
+ * program's window (0: the desktop's first window). target is the
+ * object the link points at.
+ *
+ *   DT_RQ_CLOSE	the window the object is open in, closed
+ *   DT_RQ_ATTR		属性変更 of a link that looks as look (w and h its
+ *			box), hidden when flags has DT_F_HIDDEN: E_OK with
+ *			the look and flags chosen, E_ABORT when the panel
+ *			was put away
+ *   DT_RQ_RELATION	続柄設定: name is the link's own relationship. The
+ *			object's tags (in brackets) are kept by the desktop;
+ *			the link's come back in text
+ *   DT_RQ_RENAME	実身名変更: the new name in text
+ *   DT_RQ_DUPLICATE	実身複製: the name asked for, the object copied with
+ *			all it holds; the copy in into
+ *   DT_RQ_NEWVER	新版作成: the copy, under the same name, in into
+ *   DT_RQ_INFO		管理情報 of the object, in a window of its own
+ *   DT_RQ_NETWORK	仮身ネットワーク, from the object
+ *   DT_RQ_SEARCH	実身/仮身検索
+ *   DT_RQ_EXEC		実行: the object opened with the program whose id
+ *			(its applist's key) is in name. Unless flags has
+ *			DT_F_KEEP (the link keeps to the program it opens
+ *			with), that one is what the object opens with from
+ *			then on
+ *   DT_RQ_PAPER	背景色変更: the colour asked for, starting from
+ *			look.bgcol, kept as the paper of the object; it
+ *			comes back in look.bgcol
+ *   DT_RQ_FULL		win made the size of the screen above the message
+ *			line (全画面表示); the program puts it back itself
+ */
+#define DT_RQ_CLOSE	8
+#define DT_RQ_ATTR	9
+#define DT_RQ_RELATION	10
+#define DT_RQ_RENAME	11
+#define DT_RQ_DUPLICATE	12
+#define DT_RQ_NEWVER	13
+#define DT_RQ_INFO	14
+#define DT_RQ_NETWORK	15
+#define DT_RQ_SEARCH	16
+#define DT_RQ_EXEC	17
+#define DT_RQ_PAPER	18
+#define DT_RQ_FULL	19
+
+/*
+ * Letters typed for the asking program (文字検索's 入力): name holds them
+ * (UTF-8, ending in 0), win is the program's window. They go into the
+ * window the keys went to last before win -- a text of the desktop's at
+ * its caret, or the box of a panel that has the keys -- and the answer
+ * says which in how (DT_HOW_TEXT, DT_HOW_BOX), or is E_NOEXS when there
+ * is no such window or it takes no letters.
+ */
+#define DT_RQ_TYPE	20
+#define DT_HOW_TEXT	4
+#define DT_HOW_BOX	5
+
+/*
+ * 印刷 of pages a process made (design 11.22): target is an object the
+ * process made for them, a page of xmlTAD in each record -- a document,
+ * which may run to several pages of its paper, or a figure, one sheet
+ * of its paper -- and name is what is printed (UTF-8), the name the
+ * file is given. The desktop asks with its panels in the middle of win,
+ * shows the pages when asked, writes the file and puts a link to it on
+ * the desktop; the answer is E_OK when it was written, E_ABORT when the
+ * panel was put away. The object is the process's to throw away after
+ * the answer.
+ */
+#define DT_RQ_PRINT	21
+
+/*
+ * The administrator's rights for one operation (design 8.7): name says
+ * what the asking process is about to do (UTF-8). The desktop asks the
+ * person, in a panel over a window of its own (never over the asking
+ * program's, whose parts would take the keys too), for the
+ * administrator's password -- the process never sees it -- and when it
+ * is typed right the process acts as an administrator until it calls
+ * ob_end_adm, for OB_ADM_MS at most. On a machine whose administrator
+ * has no password yet, the panel asks for one to be chosen first. The
+ * answer is E_OK (also when the process is an administrator already),
+ * E_ABORT when the panel was put away, E_OACV when the password was
+ * typed wrong three times. DT_RQ_INSTALL and DT_RQ_REMOVE from a
+ * process that is not an administrator ask in the same way.
+ */
+#define DT_RQ_ADMIN	22
+
+/*
+ * 通知 (design 11.28): a notice a process shows the person, in a small
+ * window of the desktop's at the screen's top right that does not take
+ * the keys. text is the title, a line feed, then what it says (UTF-8);
+ * name is where it comes from (a page's origin, a program's name); ask
+ * holds the words of up to two buttons of the process's own, empty for
+ * none; recno is the process's number for it. One with the number of a
+ * notice of the same reply channel still shown takes its place. The
+ * answer is at once, E_OK and DT_HOW_NOTE_SHOWN in how; then, at the
+ * same reply channel with the same seq, one more answer says what came
+ * of it: DT_HOW_NOTE_CLICK with flags 0 for 〈開く〉 and 1 or 2 for the
+ * process's buttons, DT_HOW_NOTE_CLOSED when the person closed it
+ * (〈閉じる〉, its frame, its menu), DT_HOW_NOTE_GONE when it went by
+ * itself after DT_NOTE_MS. With DT_F_NOTE_CLOSE in flags the notice of
+ * that number goes, and nothing more is answered for it. DT_F_NOTE_STAY:
+ * it stays until it is answered.
+ */
+#define DT_RQ_NOTIFY	23
+#define DT_F_NOTE_CLOSE	0x0010
+#define DT_F_NOTE_STAY	0x0020
+#define DT_HOW_NOTE_SHOWN	6
+#define DT_HOW_NOTE_CLICK	7
+#define DT_HOW_NOTE_CLOSED	8
+#define DT_HOW_NOTE_GONE	9
+#define DT_NOTE_MS	10000
+
+#define DT_F_HIDDEN	0x0002		/* the link is hidden (隠蔽仮身) */
+#define DT_F_KEEP	0x0004		/* the link keeps to its program (起動アプリの固定) */
+
+/*
+ * DT_RQ_CARRY with DT_F_TEXT in flags: what is carried is letters, the
+ * line of UTF-8 in text, not a link. Let go over a text of the desktop's
+ * they go in where the outline's corner stood (E_OK); over the window of
+ * another program that takes letters (OB_E_TEXT) they are dropped on it
+ * (E_OK); anywhere else E_NOEXS, and over the asking program's own window
+ * E_NOEXS and nothing said, as for a link. how says DT_HOW_COPY when the
+ * second button went down on the way: the program keeps its letters;
+ * else it takes them away (a move).
+ */
+#define DT_F_TEXT	0x0008
+#define DT_CARRY_TEXT	512		/* bytes of the letters carried, with their terminator */
+
+#define DT_TEXT_MAX	192		/* bytes of an answer's text, with its terminator */
+
 /* How a link is to look: its outline while carried, and the link put */
 typedef struct {
 	INT	w, h;			/* the frame, in screen pixels */
@@ -89,15 +239,28 @@ typedef struct {
 	UB	ask[2][96];		/* DT_RQ_CARRY: the question where it is let go, UTF-8; empty: none */
 	UB	yes[16];		/* and the word on the button that goes ahead; empty: 「実行」 */
 	UINT	carry;			/* DT_RQ_PLACE: the seq of the DT_RQ_CARRY it ends */
+	TS_UUID	win;			/* the asking program's window; 0 none said */
+	UINT	flags;			/* DT_F_* */
+	UB	text[DT_CARRY_TEXT];	/* DT_RQ_CARRY with DT_F_TEXT: the letters */
 } T_DTREQ;
 
+/*
+ * A request written in the size it had before win and flags (a program
+ * built before them) is still taken, and answered in the size the
+ * answer had then, without look, flags and text. One written in the size
+ * it had before text is taken as it is, with no letters.
+ */
 typedef struct {
 	UINT	seq;
 	ER	er;			/* E_OK, or why not */
 	TS_UUID	proc;			/* the process it started; 0 when a window of the desktop's own opened */
 	TS_UUID	into;			/* DT_RQ_CARRY: the object of the window it was let go over;
-					   DT_RQ_INSTALL: the program */
-	UINT	how;			/* DT_RQ_INSTALL: DT_HOW_* */
+					   DT_RQ_INSTALL: the program; DT_RQ_DUPLICATE, DT_RQ_NEWVER,
+					   DT_RQ_PLACE with DT_F_DUPLICATE: the copy */
+	UINT	how;			/* DT_RQ_INSTALL, DT_RQ_CARRY: DT_HOW_* */
+	T_DTLOOK look;			/* DT_RQ_ATTR, DT_RQ_PAPER */
+	UINT	flags;			/* DT_RQ_ATTR: DT_F_HIDDEN */
+	UB	text[DT_TEXT_MAX];	/* DT_RQ_RELATION, DT_RQ_RENAME: UTF-8 */
 } T_DTANS;
 
 #ifdef __cplusplus

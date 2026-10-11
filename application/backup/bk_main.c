@@ -193,7 +193,9 @@ LOCAL void list_objects( const TS_UUID *cab )
 		INT	i;
 		BOOL	dup = FALSE;
 
-		if ( id == NULL || end == NULL || id > end || !bk_uuid_parse(id + 5, &it->uuid) ) continue;
+		if ( id == NULL || end == NULL || id > end ) continue;
+		id += ts_lnk_split((const UB *)id + 5, (INT)( end - id - 5 ), NULL, NULL);	/* past a volume it names */
+		if ( !bk_uuid_parse(id + 5, &it->uuid) ) continue;
 		if ( ob_ref_obj(&it->uuid, &r) < E_OK || r.type != OB_T_STORAGE ) continue;
 		for ( i = 0; i < nitem; i++ ) {
 			if ( memcmp(&items[i].uuid, &it->uuid, sizeof(TS_UUID)) == 0 ) dup = TRUE;
@@ -1282,7 +1284,7 @@ LOCAL ER open_window( void )
 	c.json = (const UB *)json;
 	c.jsonsz = (SZ)strlen(json);
 	if ( ob_cre_obj(&c, &win) < E_OK ) return E_OBJ;
-	kw = ob_opn_obj(&win, OB_OP_ALL);
+	kw = ob_opn_obj(&win, OB_OP_R | OB_OP_W | OB_OP_PROT);
 	gid = ( kw > 0 ) ? wm_obj_gid(kw) : E_ID;
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_CHANNEL;

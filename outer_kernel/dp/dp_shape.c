@@ -43,6 +43,9 @@
 #include <ts/disp.h>
 
 #define SHAPE_MAX_X	64		/* crossings of one row a polygon may have */
+
+/* A shape handed on whole when the environment records (dp.c) */
+IMPORT BOOL knl_dp_rec_draw( INT gid, CONST T_DPRECOP *op, CONST T_DPPAT *pat );
 #define SEED_MAX	2048		/* runs waiting in a seeded fill */
 
 /* ---------------------------------------------------------------- polygons */
@@ -96,6 +99,18 @@ EXPORT ER dp_fill_poly( INT gid, CONST T_DPPOINT *p, INT n, UINT rule,
 	if ( p == NULL || n < 3 || pat == NULL ) {
 		return E_PAR;
 	}
+	{
+		T_DPRECOP	op;
+
+		knl_memset(&op, 0, sizeof(op));
+		op.kind = DP_REC_FILL;
+		op.p = p;
+		op.n = n;
+		op.rule = rule;
+		if ( knl_dp_rec_draw(gid, &op, pat) ) {
+			return E_OK;
+		}
+	}
 	box.left = box.right = p[0].x;
 	box.top = box.bottom = p[0].y;
 	for ( i = 1; i < n; i++ ) {
@@ -134,6 +149,20 @@ EXPORT ER dp_draw_poly( INT gid, CONST T_DPPOINT *p, INT n, BOOL closed,
 
 	if ( p == NULL || n < 2 || pat == NULL ) {
 		return E_PAR;
+	}
+	{
+		T_DPRECOP	op;
+
+		knl_memset(&op, 0, sizeof(op));
+		op.kind = DP_REC_STROKE;
+		op.p = p;
+		op.n = n;
+		op.closed = closed;
+		op.width = width;
+		op.line = kind;
+		if ( knl_dp_rec_draw(gid, &op, pat) ) {
+			return E_OK;
+		}
 	}
 	for ( i = 0; i + 1 < n; i++ ) {
 		er = dp_line_wide(gid, p[i].x, p[i].y, p[i + 1].x, p[i + 1].y,
@@ -311,6 +340,24 @@ EXPORT ER dp_line_wide( INT gid, INT x0, INT y0, INT x1, INT y1, INT width,
 	}
 	if ( width <= 1 && kind == DP_LINE_SOLID ) {
 		return dp_line_pat(gid, x0, y0, x1, y1, pat);
+	}
+	{
+		T_DPRECOP	op;
+		T_DPPOINT	pt[2];
+
+		knl_memset(&op, 0, sizeof(op));
+		op.kind = DP_REC_STROKE;
+		pt[0].x = x0;
+		pt[0].y = y0;
+		pt[1].x = x1;
+		pt[1].y = y1;
+		op.p = pt;
+		op.n = 2;
+		op.width = width;
+		op.line = kind;
+		if ( knl_dp_rec_draw(gid, &op, pat) ) {
+			return E_OK;
+		}
 	}
 	if ( width < 1 ) {
 		width = 1;

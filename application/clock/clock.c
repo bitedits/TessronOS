@@ -19,11 +19,13 @@
  *	It shows the time until it is asked to close -- the pictogram in its
  *	band pressed, or its window deleted by another program -- and then
  *	takes its window away and ends. A press in it switches between the
- *	time and the date.
+ *	time and the date; the second button opens its menu (閉じる,
+ *	日付を表示, and the items every window's menu ends with).
  */
 
 #include <tk/typedef.h>
 #include <ts/uapp.h>
+#include <ts/sysdef.h>
 
 #define PORT_NAME	"clock.port"
 #define TICK_MS		250
@@ -80,6 +82,66 @@ LOCAL void now_text( ID kclk, BOOL date, UB *out )
 	out[n] = 0;
 }
 
+LOCAL INT hexv( char c )
+{
+	if ( c >= '0' && c <= '9' ) return c - '0';
+	if ( c >= 'a' && c <= 'f' ) return c - 'a' + 10;
+	if ( c >= 'A' && c <= 'F' ) return c - 'A' + 10;
+	return -1;
+}
+
+/* A UUID written out, as the system's definitions name them */
+LOCAL ER uuid_of( CONST char *s, TS_UUID *u )
+{
+	INT	i = 0, k = 0, h, l;
+
+	while ( k < 16 ) {
+		if ( s[i] == '-' ) {
+			i++;
+			continue;
+		}
+		h = hexv(s[i]);
+		l = ( h >= 0 ) ? hexv(s[i + 1]) : -1;
+		if ( l < 0 ) {
+			return E_PAR;
+		}
+		u->b[k++] = (UB)( h * 16 + l );
+		i += 2;
+	}
+	return E_OK;
+}
+
+LOCAL BOOL is_code( CONST T_MNSEL *sel, CONST char *code )
+{
+	INT	i;
+
+	for ( i = 0; code[i] != 0; i++ ) {
+		if ( sel->code[i] != (UB)code[i] ) return FALSE;
+	}
+	return (BOOL)( sel->code[i] == 0 );
+}
+
+/* The second button: the menu, and what was chosen in it */
+LOCAL void menu( ID kw, CONST T_OBNTM *m, BOOL *p_date, BOOL *p_done )
+{
+	TS_UUID	def;
+	T_MNSEL	sel;
+	ID	mid;
+
+	if ( uuid_of(SYSDEF_MENU_CLOCK, &def) < E_OK || mn_cre_men(&def, &mid) < E_OK ) {
+		return;
+	}
+	(void)mn_chg_atr(mid, NULL, "date", *p_date ? MN_TICK : 0);
+	if ( mn_pop_men(mid, kw, m->x, m->y, m->when, &sel) >= E_OK ) {
+		if ( is_code(&sel, "close") ) {
+			*p_done = TRUE;
+		} else if ( is_code(&sel, "date") ) {
+			*p_date = (BOOL)!*p_date;
+		}
+	}
+	(void)mn_del_men(mid);
+}
+
 /* Drawn and shown; below E_OK when the window is no longer there */
 LOCAL ER draw( INT gid, ID kw, CONST UB *text )
 {
@@ -118,7 +180,7 @@ int main( void )
 		tm_putstring((CONST UB *)"clock: no window\n");
 		return 1;
 	}
-	kw = ob_opn_obj(&win, OB_OP_ALL);
+	kw = ob_opn_obj(&win, OB_OP_R | OB_OP_W | OB_OP_PROT);
 	gid = ( kw > 0 ) ? wm_obj_gid(kw) : E_ID;
 	kclk = ob_opn_obj(&clk, OB_OP_READ);
 
@@ -146,6 +208,9 @@ int main( void )
 		while ( ob_rea_rec(port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) {
 			if ( m.event == OB_E_CLOSE || m.event == OB_E_DELETE ) {
 				done = TRUE;
+			} else if ( m.event == OB_E_PRESS && m.code == 1 ) {
+				menu(kw, &m, &date, &done);
+				again = TRUE;
 			} else if ( m.event == OB_E_PRESS ) {
 				date = !date;
 				again = TRUE;

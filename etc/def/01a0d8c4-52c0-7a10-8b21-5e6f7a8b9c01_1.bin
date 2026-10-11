@@ -12,3 +12,11 @@ $$GW
 # Time Server
 #
 $$NTP	pool.ntp.org
+#
+# IPv6
+#
+$$IPV6	on auto
+$$IPV6ADDR
+$$IPV6GW
+$$IPV6DNS
+$$IPV6DNS

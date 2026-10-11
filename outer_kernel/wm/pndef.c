@@ -304,6 +304,10 @@ LOCAL BOOL part( T_WMPANEL *def, CONST T_TADNODE *nd )
 		pt->hi = num(nd, "hi", 100);
 		pt->value = num(nd, "value", pt->lo);
 		pt->sub = num(nd, "box", 0);
+	} else if ( is(nd, "icon") ) {
+		pt->type |= WM_PT_ICON;
+		(void)words(nd, w, sizeof(w));
+		label(pt, w);
 	} else if ( is(nd, "line") ) {
 		pt->type |= WM_PT_LINE;
 		if ( pt->r.bottom <= pt->r.top ) pt->r.bottom = pt->r.top + 1;

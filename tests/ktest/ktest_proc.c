@@ -17,13 +17,40 @@
  */
 
 #include "ktest.h"
+#include "kernel.h"
 #include "tstdlib.h"
 #include <ts/proc.h>
 #include <ts/fs.h>
 #include <ts/ob.h>
 
 IMPORT UD knl_pf_free_count( INT zone );
+IMPORT BOOL knl_pt_reclaim( void );
 IMPORT CONST T_OBCRD *knl_ob_crd_of( ID pid );
+
+#if TS_NETSTACK_NETBSD
+IMPORT UD knl_rump_pages( void );
+#endif
+
+/*
+ * The free pages, with those the network stack has taken for its own
+ * counted as free: it keeps every single page it takes (rumpuser.c), and
+ * its pools grow now and then while a test runs, for nothing the test
+ * did.
+ */
+LOCAL UD free_pages( void )
+{
+#if TS_NETSTACK_NETBSD
+	UD	r, f;
+
+	do {
+		r = knl_rump_pages();
+		f = knl_pf_free_count(-1);
+	} while ( knl_rump_pages() != r );
+	return f + r;
+#else
+	return knl_pf_free_count(-1);
+#endif
+}
 
 #define PROG		"/boot/HELLO.ELF"
 
@@ -159,7 +186,7 @@ LOCAL void test_resources( void )
 	if ( pid <= 0 ) return;
 	KT_ASSERT_ER(ts_wai_prc(pid, &psts, 5000), E_OK);
 
-	before = knl_pf_free_count(-1);
+	before = free_pages();
 	for ( i = 0; i < 3; i++ ) {
 		pid = ts_cre_prc(PROG, &cprc);
 		KT_ASSERT(pid > 0);
@@ -167,9 +194,210 @@ LOCAL void test_resources( void )
 		KT_ASSERT_ER(ts_wai_prc(pid, &psts, 5000), E_OK);
 		KT_ASSERT_EQ(psts.exitcd, (INT)arg);
 	}
-	after = knl_pf_free_count(-1);
+	after = free_pages();
 	tm_printf((UB*)"  free pages %d -> %d over three runs\n", (INT)before, (INT)after);
 	KT_ASSERT_EQ(before, after);
+}
+
+/*
+ * A process that has ended and has not been collected says so: once its
+ * end has been told its state is PS_ZOMBIE ("ended"), not PS_EXITING,
+ * it has no task left and its space and pages have been given back.
+ * Only the control block with the exit code waits for the collector
+ * (design 5.5). One the kernel started may not be collected for a long
+ * while, or ever; whoever watches it (the sound device, the list of
+ * 強制終了) must not take it for one still ending.
+ */
+LOCAL void test_end_uncollected( void )
+{
+	T_CPRC		cprc;
+	T_PSTS		psts;
+	T_RPRC		r;
+	T_PRCINFO	pi;
+	UW		arg = 7;
+	UD		ended, collected;
+	ID		pid;
+	INT		t;
+
+	if ( !have_prog ) KT_SKIP("no program");
+
+	cprc.pri = KT_PRI_HIGH;
+	cprc.prcatr = 0;
+	cprc.stksz = 0;
+	cprc.arg = &arg;
+	cprc.argsz = sizeof(arg);
+
+	pid = ts_cre_prc(PROG, &cprc);
+	KT_ASSERT(pid > 0);
+	if ( pid <= 0 ) return;
+
+	knl_memset(&pi, 0, sizeof(pi));
+	for ( t = 0; t < 500 && !( knl_prc_info(pid, &pi) >= E_OK && pi.done ); t++ ) {
+		tk_dly_tsk(10);
+	}
+	KT_ASSERT(pi.done);			/* its end has been told */
+	knl_memset(&r, 0, sizeof(r));
+	for ( t = 0; t < 200; t++ ) {
+		if ( ts_ref_prc(pid, &r) >= E_OK && r.state == PS_ZOMBIE && r.ntsk == 0 ) {
+			break;
+		}
+		tk_dly_tsk(10);
+	}
+	ended = free_pages();
+	tm_printf((UB*)"  pid %d told its end: state %d, %d task(s), %d bytes mapped before it is collected\n",
+		  pid, (INT)r.state, (INT)r.ntsk, (INT)r.memsz);
+	KT_ASSERT_EQ(r.state, PS_ZOMBIE);
+	KT_ASSERT_EQ(r.ntsk, 0);
+	KT_ASSERT_EQ(r.memsz, 0);
+
+	/* the collector still gets the exit code, and has no page left to give back */
+	psts.exitcd = -1;
+	KT_ASSERT_ER(ts_wai_prc(pid, &psts, 1000), E_OK);
+	KT_ASSERT_EQ(psts.exitcd, (INT)arg);
+	KT_ASSERT_ER(ts_ref_prc(pid, &r), E_NOEXS);
+	collected = free_pages();
+	tm_printf((UB*)"  free pages %d when it ended, %d once collected\n", (INT)ended, (INT)collected);
+	KT_ASSERT_EQ(collected, ended);
+}
+
+/*
+ * Processes the kernel starts and nobody collects, KT_CHURN_N of them
+ * one after another: their control blocks go once they have been ended
+ * for knl_prc_orphan_ms (made short here), so that neither the blocks
+ * nor the pages pile up; one that is waited for is not taken away from
+ * its waiter, and one asked for after that time is gone (design 5.5).
+ */
+IMPORT UW	knl_prc_orphan_ms;
+IMPORT INT	knl_prc_count( void );
+
+LOCAL void test_churn_uncollected( void )
+{
+	T_CPRC	cprc;
+	T_PSTS	psts;
+	T_RPRC	r;
+	UW	arg = 3, keep = knl_prc_orphan_ms;
+	UD	before, after = 0;
+	INT	n0, n = 0, most = 0, i, t, c;
+	ID	pid, last = 0;
+
+	if ( !have_prog ) KT_SKIP("no program");
+
+	cprc.pri = KT_PRI_HIGH;
+	cprc.prcatr = 0;
+	cprc.stksz = 0;
+	cprc.arg = &arg;
+	cprc.argsz = sizeof(arg);
+
+	knl_prc_orphan_ms = 100;
+	tk_dly_tsk(1500);			/* the ones left before go first */
+	(void)knl_pt_reclaim();
+	n0 = knl_prc_count();
+	before = free_pages();
+	for ( i = 0; i < KT_CHURN_N; i++ ) {
+		pid = ts_cre_prc(PROG, &cprc);
+		if ( pid == E_LIMIT || pid == E_NOMEM ) {
+			tk_dly_tsk(50);
+			i--;
+			continue;
+		}
+		KT_ASSERT(pid > 0);
+		if ( pid <= 0 ) break;
+		last = pid;
+		n++;
+		c = knl_prc_count();
+		if ( c > most ) most = c;
+		if ( ( i & 15 ) == 15 ) tk_dly_tsk(1);
+	}
+	for ( t = 0; t < 100; t++ ) {
+		(void)knl_pt_reclaim();
+		after = free_pages();
+		if ( knl_prc_count() == n0 && after == before ) break;
+		tk_dly_tsk(100);
+	}
+	tm_printf((UB*)"  %d processes not collected: blocks %d -> at most %d -> %d, free pages %d -> %d\n",
+		  n, n0, most, knl_prc_count(), (INT)before, (INT)after);
+	if ( knl_prc_count() != n0 ) {
+		/* where the ones left stand: what their main task waits for, and the reaper */
+		IMPORT ID	knl_prc_reaper_tid( void );
+		INT	shown = 0;
+		T_RTSK	rr;
+
+		knl_memset(&rr, 0, sizeof(rr));
+		(void)tk_ref_tsk(knl_prc_reaper_tid(), &rr);
+		tm_printf((UB*)"  the reaper %d: state %x waits %x on %d, orphan keep %d ms\n",
+			  (INT)knl_prc_reaper_tid(), (INT)rr.tskstat, (INT)rr.tskwait, (INT)rr.wid,
+			  (INT)knl_prc_orphan_ms);
+		{
+			TCB	*tcb = knl_tsk_tcb(knl_prc_reaper_tid());
+
+			if ( tcb != NULL && rr.tskstat != TTS_RUN ) {
+				/* its saved context: the callee registers, then the exception frame */
+				UD	*f = (UD *)tcb->tskctxb.ssp + 10;
+
+				tm_printf((UB*)"  the reaper stopped at %lx\n", f[21]);
+				knl_lockup_say_frames("  ", (UBINT)f[19]);
+			}
+			if ( rr.tskwait == TTW_MTX ) {
+				T_RMTX	rm;
+				T_RTSK	rh;
+				TCB	*h;
+
+				knl_memset(&rm, 0, sizeof(rm));
+				knl_memset(&rh, 0, sizeof(rh));
+				(void)tk_ref_mtx(rr.wid, &rm);
+				(void)tk_ref_tsk(rm.htsk, &rh);
+				h = knl_tsk_tcb(rm.htsk);
+				tm_printf((UB*)"  mutex %d is held by task %d: state %x waits %x on %d, entry %lx\n",
+					  (INT)rr.wid, (INT)rm.htsk, (INT)rh.tskstat, (INT)rh.tskwait, (INT)rh.wid,
+					  ( h != NULL ) ? (UD)(UBINT)h->task : 0);
+				if ( h != NULL ) {
+					INT	k;
+
+					for ( k = 0; k < 200 && h->runprc != 0; k++ ) {
+						tk_dly_tsk(10);
+					}
+					tm_printf((UB*)"  holder: owner %d pri %d sysmode %d svcdepth %d svcin %d runprc %d state %x after %d tries; still holds %d\n",
+						  (INT)h->owner, (INT)h->priority, (INT)h->sysmode, (INT)h->svcdepth,
+						  (INT)h->svcin, (INT)h->runprc, (INT)h->state, k,
+						  ( tk_ref_mtx(rr.wid, &rm) == E_OK ) ? (INT)rm.htsk : -1);
+					if ( h->runprc == 0 ) {
+						UD	*g = (UD *)h->tskctxb.ssp + 10;
+
+						tm_printf((UB*)"  it stopped at %lx\n", g[21]);
+						knl_lockup_say_frames("  ", (UBINT)g[19]);
+					}
+				}
+			}
+		}
+
+		for ( pid = 1; pid < last && shown < 4; pid++ ) {
+			T_PRCINFO	pi;
+			T_RTSK		rt;
+
+			if ( knl_prc_info(pid, &pi) < E_OK || ts_ref_prc(pid, &r) < E_OK ) continue;
+			knl_memset(&rt, 0, sizeof(rt));
+			(void)tk_ref_tsk(r.maintsk, &rt);
+			tm_printf((UB*)"  pid %d: state %d ending %d incall %d done %d tasks %d;"
+				  " main task %d state %x waits %x on %d\n",
+				  pid, (INT)pi.state, (INT)pi.ending, (INT)pi.incall, (INT)pi.done, (INT)pi.ntsk,
+				  (INT)r.maintsk, (INT)rt.tskstat, (INT)rt.tskwait, (INT)rt.wid);
+			shown++;
+		}
+	}
+	KT_ASSERT_EQ(n, KT_CHURN_N);
+	KT_ASSERT_EQ(knl_prc_count(), n0);
+	KT_ASSERT_EQ(after, before);
+	KT_ASSERT_ER(ts_ref_prc(last, &r), E_NOEXS);	/* asked for too late: gone */
+
+	/* one that is waited for keeps its exit code for its waiter */
+	pid = ts_cre_prc(PROG, &cprc);
+	KT_ASSERT(pid > 0);
+	if ( pid > 0 ) {
+		psts.exitcd = -1;
+		KT_ASSERT_ER(ts_wai_prc(pid, &psts, 5000), E_OK);
+		KT_ASSERT_EQ(psts.exitcd, (INT)arg);
+	}
+	knl_prc_orphan_ms = keep;
 }
 
 /* a message sent to a process reaches it, and a child reports its end */
@@ -256,7 +484,7 @@ LOCAL void test_many( void )
 	cprc.arg    = arg;
 	cprc.argsz  = sizeof(arg);
 
-	before = knl_pf_free_count(-1);
+	before = free_pages();
 	for ( n = 0; n < MANY_PRC; n++ ) {
 		pids[n] = ts_cre_prc(PROG, &cprc);
 		if ( pids[n] <= 0 ) {
@@ -294,7 +522,7 @@ LOCAL void test_many( void )
 		}
 	}
 	KT_ASSERT_EQ(codes, n);
-	after = knl_pf_free_count(-1);
+	after = free_pages();
 	tm_printf((UB*)"  %d processes; free pages %d -> %d\n", n, (INT)before, (INT)after);
 	KT_ASSERT_EQ(before, after);
 	Kfree(pids);
@@ -438,7 +666,7 @@ LOCAL void test_big( void )
 		(void)fs_unlink(BIG_PROG);
 		KT_SKIP("no room for a large program on /boot");
 	}
-	before = knl_pf_free_count(-1);
+	before = free_pages();
 	big.done = FALSE;
 	big.pid = 0;
 	big.code = 57;
@@ -472,7 +700,7 @@ LOCAL void test_big( void )
 		KT_ASSERT_ER(ts_wai_prc(big.pid, &psts, 10000), E_OK);
 		KT_ASSERT_EQ(psts.exitcd, 57);
 	}
-	after = knl_pf_free_count(-1);
+	after = free_pages();
 	KT_ASSERT_EQ(before, after);
 out:
 	(void)fs_unlink(BIG_PROG);
@@ -488,4 +716,6 @@ EXPORT void ktest_proc( void )
 	KT_RUN(test_resources);
 	KT_RUN(test_many);
 	KT_RUN(test_big);
+	KT_RUN(test_end_uncollected);
+	KT_RUN(test_churn_uncollected);
 }

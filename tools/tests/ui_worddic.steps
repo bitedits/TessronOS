@@ -1,0 +1,133 @@
+# 単語登録 (design 11.16), for tools/ui_run.py: the accessory opened from its program
+# (its work area at 207,108), a word typed and registered, then converted to in the
+# search box (a box of the panel converts as a text does; mozc gives the letters in
+# full width, as it does all letters converted), a second word, the list of
+# both, one changed and the other deleted.
+open 01a0d8c4-5312-7c23-8d34-5e6f7b8c9d12
+expect worddic: ready
+# mozc is up some seconds after the desktop: letters typed while it starts do not all arrive
+expect kconv: mozc started
+wait 800
+win 単語登録
+# 読み: てすろん, typed in 日本語 and committed as kana
+click 407 132
+key 88
+text tesuronn
+key 28
+# 単語: in 英字
+click 507 166
+key 39
+text tessronos
+# 品詞: 固有名詞
+click 330 218
+wait 150
+shot wd_typed
+click 605 201
+expect worddic: put てすろん tessronos 固有名詞
+wait 300
+shot wd_put
+# the reading converted to the word in the search box, and found
+click 407 356
+key 88
+text tesuronn
+key 2C
+wait 300
+shot wd_conv
+key 28
+click 605 356
+expect worddic: found 1 for "
+# a second word: あいう aiu-test 名詞
+click 605 303
+click 407 132
+key 88
+text aiu
+key 28
+click 507 166
+key 39
+text aiu-test
+click 605 201
+expect worddic: put あいう aiu-test 名詞
+click 707 356
+expect worddic: found 2 for ""
+wait 300
+shot wd_list
+# the second changed to 人名
+click 300 408
+expect worddic: picked てすろん tessronos
+click 330 235
+click 605 235
+expect worddic: changed てすろん tessronos to てすろん tessronos 人名
+# the list is made again after the line is written, the changed word picked in it
+wait 300
+# the first deleted, asked first
+click 300 391
+expect worddic: picked あいう aiu-test
+click 605 269
+wait 500
+shot wd_ask
+key 28
+expect worddic: deleted あいう aiu-test
+wait 300
+shot wd_deleted
+# 書出し: the words to the tray as a text, from the menu
+click 450 470 1
+wait 600
+shot wd_menu
+move 470 531
+wait 150
+click 470 531
+expect worddic: written out 1
+# 読込み: read back from the tray (the menu opens with 書出し under the pointer)
+click 450 470 1
+wait 600
+move 470 450
+wait 150
+click 470 450
+expect worddic: read in 1 bad 0
+wait 300
+shot wd_readin
+# closed from the menu (it opens with 読込み under the pointer)
+click 450 470 1
+wait 600
+move 470 430
+wait 150
+click 470 430
+expect worddic: closed
+# a text's selection to 単語登録 (編集 > 単語登録): the word box holds it
+click 600 650
+wait 300
+drag 153 597 244 597
+wait 300
+click 400 640 1
+wait 600
+move 410 546
+wait 150
+move 490 546
+wait 300
+move 500 785
+wait 150
+shot wd_doc_menu
+click 500 785
+expect worddic: handed TADjs Desktop
+wait 800
+win 単語登録
+click 407 132
+key 88
+text tesuto
+key 28
+click 605 201
+expect worddic: put てすと TADjs Desktop 名詞
+wait 300
+shot wd_from_doc
+# the word converted to in the text at once, 単語登録 still open beside it
+click 1000 620
+wait 200
+key 88
+text tesuto
+key 2C
+wait 300
+shot wd_doc_conv
+key 29
+key 29
+# nothing it did was refused for want of a right
+absent !OACV!

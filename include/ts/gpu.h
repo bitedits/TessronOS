@@ -145,10 +145,17 @@ typedef struct {
 
 /* ------------------------------------------------------------------------ */
 /*
- * The kernel's interface. Processes are to reach the same through SVC
- * class 10 (gp_, not yet in svc.h; 13-gpu.md 13.5), which keeps a table of the BOs
- * each process holds and gives the process numbers instead of pointers.
+ * The kernel's interface. Processes reach the same through SVC class 10
+ * (gp_, include/ts/gpuapp.h; 13-gpu.md 13.5), which keeps a table of the
+ * BOs each process holds and gives the process numbers instead of
+ * pointers.
  */
+
+/* What a process held through gp_, let go of as it ends */
+IMPORT void	knl_gpu_prc_end( ID pid );
+
+/* For a test: the gp_ contexts open, and the BOs they hold */
+IMPORT INT	knl_gpu_ctx_count( INT *p_bos );
 
 /* The common layer: its task and objects. Answers E_OK once it runs */
 IMPORT ER	knl_gpu_init( void );
@@ -201,6 +208,31 @@ IMPORT D	knl_gpu_done( void );
 
 /* Wait until no job uses the BO */
 IMPORT ER	knl_gpu_bo_wait( T_GPUBO *bo, TMO_U tmout );
+
+/*
+ * An address space of the GPU of its own: a page table that holds only
+ * the BOs entered in it (13-gpu.md 13.5). A job submitted with it
+ * reaches those BOs and nothing else -- not the kernel's BOs, not those
+ * of another space. E_NOSPT when the backend has none to give. The
+ * space holds one reference, which knl_gpu_as_put gives back; queued
+ * jobs hold their own, and the table goes once the last one does.
+ */
+typedef struct gpuas	T_GPUAS;
+
+IMPORT T_GPUAS	*knl_gpu_as_create( ER *p_er );
+IMPORT void	knl_gpu_as_get( T_GPUAS *as );
+IMPORT void	knl_gpu_as_put( T_GPUAS *as );
+
+/*
+ * A BO (made with GPU_BO_NOGPU, or any) entered in the space at a new
+ * address, which is answered; and taken out. The space does not hold a
+ * reference: the caller keeps the BO alive while it is entered.
+ */
+IMPORT ER	knl_gpu_as_bind( T_GPUAS *as, T_GPUBO *bo, UW *p_va );
+IMPORT void	knl_gpu_as_unbind( T_GPUAS *as, T_GPUBO *bo, UW va );
+
+/* knl_gpu_submit in a space of its own (NULL: the kernel's) */
+IMPORT D	knl_gpu_submit_as( CONST T_GPUJOB *job, T_GPUBO *CONST *bo, INT nbo, T_GPUAS *as );
 
 #ifdef __cplusplus
 }

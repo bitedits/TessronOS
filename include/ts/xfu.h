@@ -106,6 +106,8 @@ typedef struct {
 					   directory */
 #define XFU_F_TEXT	0x0010		/* a text document given out as text in outenc
 					   even when it is a file taken in unchanged */
+#define XFU_F_IMAGE	0x0020		/* a figure given out as the first picture in it,
+					   a PNG file (<name>.png) */
 
 /*
  * Told of each file or object as it is done: the name, and E_OK or what

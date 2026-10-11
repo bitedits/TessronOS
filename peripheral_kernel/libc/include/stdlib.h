@@ -15,7 +15,8 @@
  *	number at the end). FreeType wants sorting, a few conversions, and
  *	the allocator -- although the font layer gives it an allocator of
  *	its own, so malloc is only ever reached by parts that are not built
- *	in (design 16.6).
+ *	in (design 16.6). The converter of binary TAD (lib/libbpk) that the
+ *	kernel's tests take in reads numbers with strtoul.
  */
 
 #ifndef __TS_LIBC_STDLIB_H__
@@ -25,6 +26,7 @@
 
 int	atoi( const char *s );
 long	atol( const char *s );
+unsigned long strtoul( const char *s, char **end, int base );
 long	labs( long v );
 
 void	qsort( void *base, size_t n, size_t size,

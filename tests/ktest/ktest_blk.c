@@ -39,7 +39,7 @@ LOCAL void test_open( void )
 	ID		dd;
 	SZ		asize;
 
-#ifdef RPI5
+#if KT_BOARD
 	dd = tk_opn_dev((UB*)KT_DISK, TD_READ);
 #else
 	dd = tk_opn_dev((UB*)KT_DISK, TD_UPDATE);
@@ -56,7 +56,7 @@ LOCAL void test_open( void )
 	whole_blocks = (UD)info.blockcont;
 	tm_printf((UB*)"  %s: %d blocks of %d bytes\n", KT_DISK, (INT)whole_blocks, info.blocksize);
 
-#ifdef RPI5
+#if KT_BOARD
 	if ( kt_scratch() != NULL ) {
 		dd_raw = tk_opn_dev((UB*)kt_scratch(), TD_UPDATE);
 		if ( dd_raw > 0 && tk_srea_dev(dd_raw, TDN_DISKINFO, &info, sizeof(info), &asize) >= E_OK ) {

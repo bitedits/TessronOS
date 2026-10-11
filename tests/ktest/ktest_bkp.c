@@ -30,6 +30,7 @@
 #include <ts/uuid.h>
 #include <ts/sysdef.h>
 #include <ts/btbk.h>
+#include <ts/bpk.h>
 #include <ts/tsfs.h>
 #include <ts/tsfsblk.h>
 #include <ts/om.h>
@@ -798,6 +799,286 @@ LOCAL void test_btron( void )
 	(void)fs_unlink(BTRON_FILE);
 }
 
+/* ---------------------------------------------------------------- a マイクロカード実身 BTRON saved */
+
+#define MC_FILE		"/boot/BTRONMC.TAD"
+#define MC_NREC		6
+#define MC_DATA		300
+#define MC_VOL		8192
+
+/* One object of the volume made here: its head and its records */
+typedef struct {
+	UINT	objid;
+	UH	name[BK_NAME_TC];
+	BK_FSTATE st;
+	INT	nrec;
+	UH	type[MC_NREC], sub[MC_NREC];
+	INT	size[MC_NREC];
+	UINT	link[MC_NREC];		/* a link record's target */
+	UB	data[MC_NREC][MC_DATA];
+} MCOBJ;
+
+typedef struct {
+	UB	b[MC_VOL];
+	INT	len;
+} MCOUT;
+
+LOCAL ER mc_info( void *arg, INT rec, UH *type, UH *subtype, INT *size )
+{
+	MCOBJ	*o = arg;
+
+	if ( rec < 0 || rec >= o->nrec ) return E_PAR;
+	*type = o->type[rec];
+	*subtype = o->sub[rec];
+	*size = o->size[rec];
+	return E_OK;
+}
+
+LOCAL INT mc_read( void *arg, INT rec, INT off, UB *buf, INT len )
+{
+	MCOBJ	*o = arg;
+
+	if ( rec < 0 || rec >= o->nrec || off < 0 || off + len > o->size[rec] ) return E_PAR;
+	knl_memcpy(buf, o->data[rec] + off, len);
+	return len;
+}
+
+LOCAL ER mc_link( void *arg, INT rec, BK_LINKDESC *ld )
+{
+	MCOBJ	*o = arg;
+
+	knl_memset(ld, 0, sizeof(*ld));
+	ld->atr[0] = 0x0008;
+	ld->objid = o->link[rec];
+	ld->f_atype = 1;
+	return E_OK;
+}
+
+LOCAL INT mc_out( void *arg, UD off, CONST UB *buf, INT len )
+{
+	MCOUT	*m = arg;
+
+	if ( off + (UD)len > MC_VOL ) return E_LIMIT;
+	knl_memcpy(m->b + off, buf, len);
+	if ( (INT)off + len > m->len ) m->len = (INT)off + len;
+	return E_OK;
+}
+
+LOCAL void mc_rec( MCOBJ *o, UH type, UH sub, INT size )
+{
+	o->type[o->nrec] = type;
+	o->sub[o->nrec] = sub;
+	o->size[o->nrec] = size;
+	o->nrec++;
+	if ( type == 0 ) o->st.f_nlink++;
+	else o->st.f_size += size;
+}
+
+LOCAL void put16le( UB *p, UINT v )
+{
+	p[0] = (UB)v;
+	p[1] = (UB)( v >> 8 );
+}
+
+/*
+ * A volume as BTRON writes it, made here: a マイクロカード実身 with a
+ * 実行機能付箋 whose application TessronOS does not have, two link
+ * records -- one to a text of the set, one to an object left out of it --
+ * and its format and card records (type 31); then the text. Restored:
+ * the card opens in マイクロカード, record 0 names the link records'
+ * objects in their order after <mclinks/>, the type 31 records are there
+ * byte for byte, and the text is converted as any other.
+ */
+LOCAL void test_mcard( void )
+{
+	static T_BKARG	a;
+	static CONST UH	cname[] = { 0x234B, 0x2354, 0x252B, 0x213C, 0x2549 };	/* ＫＴカード */
+	static CONST UH	tname[] = { 0x234B, 0x2354, 0x4068 };			/* ＫＴ先 */
+	static CONST char txml[] = "<tad version=\"1.0\" encoding=\"UTF-8\"><document><p>カードの先の文章</p></document></tad>";
+	MCOBJ		*obj;
+	MCOUT		*out;
+	BK_WR		*w;
+	BK_TADW		*tw;
+	TS_UUID		k4, root, got[MADE_MAX], l[4];
+	UH		memo[BK_MEMO_TC];
+	UD		total = 0, src = 0;
+	UB		*x, *m;
+	INT		i, r, n, len = 0, fd, tlen = 0;
+	UINT		rt = 0;
+	ER		er;
+
+	obj = (MCOBJ *)Kmalloc(sizeof(MCOBJ) * 2);
+	out = (MCOUT *)Kmalloc(sizeof(MCOUT));
+	w = (BK_WR *)Kmalloc(sizeof(BK_WR));
+	tw = (BK_TADW *)Kmalloc(sizeof(BK_TADW));
+	KT_ASSERT(obj != NULL && out != NULL && w != NULL && tw != NULL);
+	if ( obj == NULL || out == NULL || w == NULL || tw == NULL ) goto done;
+	knl_memset(obj, 0, sizeof(MCOBJ) * 2);
+	knl_memset(out, 0, sizeof(MCOUT));
+
+	/* the card */
+	obj[0].objid = 0x00300001;
+	knl_memcpy(obj[0].name, cname, sizeof(cname));
+	obj[0].st.f_type = 0x1000;
+	obj[0].st.f_atype = 0;
+	obj[0].st.f_pubacc = 0x0FFF;
+	obj[0].st.f_ltime = 0xFFFFFFFFU;
+	obj[0].st.f_ctime = obj[0].st.f_mtime = obj[0].st.f_atime = 0x4CB01A1CU;
+	mc_rec(&obj[0], OB_RT_MFUSEN, 0, 108);
+	put16le(obj[0].data[0] + 24, 0x8000);		/* an application TessronOS has none for */
+	put16le(obj[0].data[0] + 26, 0x0021);
+	put16le(obj[0].data[0] + 28, 0x8000);
+	put16le(obj[0].data[0] + 100, 30);		/* its window: 30, 40 to 430, 340 */
+	put16le(obj[0].data[0] + 102, 40);
+	put16le(obj[0].data[0] + 104, 430);
+	put16le(obj[0].data[0] + 106, 340);
+	mc_rec(&obj[0], 0, 0, BK_LINK_SIZE);
+	obj[0].link[1] = 0x00310001;			/* the text */
+	mc_rec(&obj[0], 0, 0, BK_LINK_SIZE);
+	obj[0].link[2] = 0x00990001;			/* left out of the save */
+	mc_rec(&obj[0], BPK_RT_MCARD, BPK_MC_FORMAT, 64);
+	put16le(obj[0].data[3], 0x2343);		/* Ｃ Ｒ Ｄ, version 0x100 */
+	put16le(obj[0].data[3] + 2, 0x2352);
+	put16le(obj[0].data[3] + 4, 0x2344);
+	put16le(obj[0].data[3] + 6, 0x0100);
+	for ( i = 8; i < 64; i++ ) obj[0].data[3][i] = (UB)( i * 5 + 1 );
+	mc_rec(&obj[0], BPK_RT_MCARD, 2, MC_DATA);
+	for ( i = 0; i < MC_DATA; i++ ) obj[0].data[4][i] = (UB)( i * 3 + 7 );
+	mc_rec(&obj[0], BPK_RT_MCARD, 3, 40);
+	for ( i = 0; i < 40; i++ ) obj[0].data[5][i] = (UB)( 0xF0 - i );
+
+	/* the text it links to */
+	obj[1].objid = 0x00310001;
+	knl_memcpy(obj[1].name, tname, sizeof(tname));
+	obj[1].st = obj[0].st;
+	obj[1].st.f_atype = 1;
+	obj[1].st.f_nlink = 0;
+	obj[1].st.f_size = 0;
+	er = bk_tad_from_xml(tw, (CONST UB *)txml, s_len(txml), obj[1].data[0], MC_DATA, &tlen, NULL, NULL);
+	KT_ASSERT_ER(er, E_OK);
+	if ( er < E_OK ) goto done;
+	mc_rec(&obj[1], OB_RT_TAD, 0, tlen);
+
+	for ( i = 0; i < 2; i++ ) {
+		obj[i].st.f_nrec = obj[i].nrec;
+		obj[i].st.f_nblk = 2;
+		bk_estimate(&obj[i].st, 32768, &total, &src);
+	}
+	knl_memset(memo, 0, sizeof(memo));
+	knl_memcpy(memo, cname, sizeof(cname));
+	bk_wr_init(w, total, 2, src, memo);
+	KT_ASSERT_ER(bk_wr_begin(w, mc_out, out, MC_VOL), E_OK);
+	for ( i = 0; i < 2; i++ ) {
+		UB		meta[BK_META_SIZE];
+		BK_OBJSRC	os = { obj[i].nrec, mc_info, mc_read, mc_link, &obj[i] };
+
+		bk_meta_put(meta, obj[i].name, &obj[i].st);
+		KT_ASSERT_ER(bk_wr_object(w, obj[i].objid, meta, &os), E_OK);
+	}
+	KT_ASSERT_ER(bk_wr_end(w, FALSE), E_OK);
+
+	fd = fs_open(MC_FILE, O_WRONLY | O_CREAT | O_TRUNC);
+	KT_ASSERT(fd >= 0);
+	if ( fd < 0 ) goto done;
+	KT_ASSERT_EQ(fs_write(fd, out->b, (SZ)out->len), out->len);
+	fs_close(fd);
+
+	KT_ASSERT_ER(make("KT復帰箱カード", "virtual-object-list", "<tad version=\"1.0\" encoding=\"UTF-8\"><figure></figure></tad>\n",
+			  &k4), E_OK);
+	knl_memset(&a, 0, sizeof(a));
+	a.magic = BK_ARG_MAGIC;
+	a.op = BK_OP_RESTORE;
+	a.obj = k4;
+	knl_strcpy((char *)a.path, MC_FILE);
+	(void)log_from(&logpos, logbuf, LOG_MAX);
+	KT_ASSERT_EQ(run(&a, sizeof(a), 60000), 0);
+	KT_ASSERT(said("backup: restored 2 objects from 1 volumes, 2 links, 1 lost, 1 converted"));
+	if ( !said("backup: restored 2 objects") ) show_log();
+
+	x = rec_read(&k4, 0, &len, NULL);
+	KT_ASSERT(x != NULL && links_of(x, len, &root, 1) == 1);
+	if ( x != NULL ) Kfree(x);
+	n = reach(&root, got, MADE_MAX);
+	KT_ASSERT_EQ(n, 2);
+	m = (UB *)Kmalloc(OB_ATR_MAX + 1);
+	KT_ASSERT(m != NULL && name_of(&root, m, 128) && same(m, "KTカード"));
+
+	/* opens in マイクロカード, in the window the 実行機能付箋 gave */
+	if ( m != NULL ) {
+		SZ	asz = 0;
+		ID	k = ob_opn_obj(&root, OB_OP_ATRRD);
+
+		KT_ASSERT(k > 0 && ob_get_atr(k, m, OB_ATR_MAX, &asz) >= E_OK);
+		if ( asz > 0 ) {
+			KT_ASSERT(has(m, (INT)asz, "\"applist\":{\"" BPK_MC_PROG "\":{\"name\":\"" BPK_MC_NAME "\",\"defaultOpen\":true}}"));
+			KT_ASSERT(has(m, (INT)asz, "\"window\":{\"pos\":{\"x\":30,\"y\":40},\"width\":400,\"height\":300}"));
+			KT_ASSERT(has(m, (INT)asz, "\"btron\":{\"objid\":3145729,\"atype\":0"));
+		}
+		if ( k > 0 ) ob_cls_obj(k);
+	}
+
+	/* record 0: its name, then the link records' objects in their order, the lost one empty */
+	x = rec_read(&root, 0, &len, &rt);
+	KT_ASSERT(x != NULL && rt == OB_RT_TAD);
+	if ( x != NULL ) {
+		INT	ml = find(x, len, "<mclinks/>", 0), l0, l1;
+
+		KT_ASSERT(has(x, len, "<p>KTカード</p>"));
+		KT_ASSERT(ml > 0);
+		l0 = find(x, len, "<link id=\"", ml);
+		l1 = find(x, len, "<link id=\"\"/>", ml);
+		KT_ASSERT(l0 > ml && l1 > l0);
+		KT_ASSERT_EQ(links_of(x + ml, len - ml, l, 4), 1);
+		KT_ASSERT(ts_uuid_cmp(&l[0], &got[1]) == 0);
+		Kfree(x);
+	}
+
+	/* the 実行機能付箋 and the type 31 records, byte for byte, in their order */
+	KT_ASSERT_EQ(nrec_of(&root), 5);
+	for ( r = 1; r <= 4; r++ ) {
+		INT	src_rec = ( r == 1 ) ? 0 : r + 1;
+
+		x = rec_read(&root, r, &len, &rt);
+		KT_ASSERT(x != NULL && len == obj[0].size[src_rec] && rt == obj[0].type[src_rec]);
+		if ( x != NULL ) {
+			for ( i = 0; i < len && x[i] == obj[0].data[src_rec][i]; i++ ) ;
+			KT_ASSERT_EQ(i, obj[0].size[src_rec]);
+			Kfree(x);
+		}
+	}
+	{
+		T_OBREC	rr[8];
+		INT	cnt = 0, nsub = 0;
+		ID	k = ob_opn_obj(&root, OB_OP_R);
+
+		if ( k > 0 && ob_lst_rec(k, rr, 8, &cnt) >= E_OK ) {
+			for ( i = 0; i < cnt && i < 8; i++ ) {
+				if ( rr[i].rt == BPK_RT_MCARD ) nsub += rr[i].sub;
+			}
+		}
+		KT_ASSERT_EQ(nsub, 1 + 2 + 3);		/* their subtypes as they were */
+		if ( k > 0 ) ob_cls_obj(k);
+	}
+
+	/* the text: converted, linked from the card once */
+	x = rec_read(&got[1], 0, &len, NULL);
+	KT_ASSERT(x != NULL && has(x, len, "カードの先の文章"));
+	if ( x != NULL ) Kfree(x);
+	KT_ASSERT(m != NULL && name_of(&got[1], m, 128) && same(m, "KT先"));
+	KT_ASSERT_EQ(refcnt_of(&got[1]), 1);
+	KT_ASSERT_EQ(nrec_of(&got[1]), 1);
+
+	if ( m != NULL ) Kfree(m);
+	unmake(got, n);
+	(void)ob_del_obj(&k4);
+	(void)fs_unlink(MC_FILE);
+done:
+	if ( obj != NULL ) Kfree(obj);
+	if ( out != NULL ) Kfree(out);
+	if ( w != NULL ) Kfree(w);
+	if ( tw != NULL ) Kfree(tw);
+}
+
 /* ---------------------------------------------------------------- several roots, some left out */
 
 #define ROOTS_FILE	"/boot/\xEF\xBC\x91\xE3\x83\xBBKT\xE6\xA0\xB9.TAD"	/* １・KT根.TAD */
@@ -1306,6 +1587,10 @@ LOCAL BOOL menu_choose( INT wid, CONST char *label )
 	knl_memset(&ev, 0, sizeof(ev));			/* not there: put away */
 	ev.type = HID_EV_BTN_DOWN;
 	knl_wmobj_event(&ev);
+	ev.type = HID_EV_BTN_UP;
+	knl_wmobj_event(&ev);
+	/* gone before the next menu is looked for, or that one is taken for this */
+	for ( i = 0; i < 30 && wm_panel_wid(mp) > 0; i++ ) tk_dly_tsk(100);
 	return FALSE;
 }
 
@@ -1370,11 +1655,14 @@ EXPORT void ktest_bkp( void )
 	}
 	logbuf = (UB *)Kmalloc(LOG_MAX);
 	if ( logbuf == NULL ) return;
+	/* the objects made here are the person's, as the desktop makes them (design 8.7.4) */
+	knl_ob_make_for_person(TRUE);
 	KT_RUN(test_network);
 	KT_RUN(test_save);
 	KT_RUN(test_restore);
 	KT_RUN(test_volumes);
 	KT_RUN(test_btron);
+	KT_RUN(test_mcard);
 	KT_RUN(test_roots);
 	KT_RUN(test_room);
 	KT_RUN_SCREEN(test_window);
@@ -1386,6 +1674,7 @@ EXPORT void ktest_bkp( void )
 		(void)ob_del_obj(&nc);
 		made = FALSE;
 	}
+	knl_ob_make_for_person(FALSE);
 	Kfree(logbuf);
 	logbuf = NULL;
 }

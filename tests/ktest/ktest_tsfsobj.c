@@ -27,6 +27,7 @@
 #include <ts/tsfsblk.h>
 #include <ts/tsfsjrnl.h>
 #include <ts/tsfsobj.h>
+#include <ts/tsfsck.h>
 
 #define ODEV		kt_scratch()
 #define BIG_REC		10000		/* bytes: more than two blocks */
@@ -34,6 +35,7 @@
 #define MANY_REC	60
 #define SMALL_REC	100
 #define LINK_MANY	150		/* more than one step of relinking */
+#define OB_ATR_MAX_KT	16384		/* what a program reads of the metadata (OB_ATR_MAX) */
 
 LOCAL ID	bvol = 0;
 LOCAL TS_UUID	first_uuid;
@@ -409,6 +411,82 @@ LOCAL void test_order( void )
 	if ( bvol <= 0 ) return;
 	KT_ASSERT_EQ(order_is(&uuid, (CONST UB *)"xab", 3), 0);
 	KT_ASSERT_ER(ts_obj_delete(bvol, &uuid), E_OK);
+}
+
+/*
+ * As many records as an object may have (more than the inline area holds
+ * the placement table of): each its own byte and type, the order in the
+ * metadata, one more refused, all of it over a remount, and the check of
+ * the volume finding nothing wrong
+ */
+LOCAL void test_many_records( void )
+{
+	T_RREC		*rr;
+	T_TSFSCK	*ck;
+	TS_UUID		uuid;
+	UB		b, *t;
+	SZ		asize = 0;
+	INT		i, pos = -1, cnt = 0, bad, round, was = 0;
+
+	if ( bvol <= 0 ) KT_SKIP("no volume");
+	rr = (T_RREC *)Kmalloc(sizeof(T_RREC) * ( TSFS_MAX_REC + 8 ));
+	ck = (T_TSFSCK *)Kmalloc(sizeof(T_TSFSCK));
+	t = (UB *)Kmalloc(16384);
+	KT_ASSERT(rr != NULL && ck != NULL && t != NULL);
+	if ( rr == NULL || ck == NULL || t == NULL ) goto out;
+
+	/* what the check finds before, left by the tests before this one */
+	knl_memset(ck, 0, sizeof(*ck));
+	KT_ASSERT_ER(ts_obj_check(bvol, TSFSCK_FULL, ck, NULL, NULL), E_OK);
+	was = ck->problems;
+	KT_ASSERT_ER(ts_obj_create(bvol, (CONST UB *)"{\"name\":\"many\"}", 15, &uuid), E_OK);
+	for ( i = 0; i < TSFS_MAX_REC; i++ ) {
+		b = pat(i);
+		KT_ASSERT_ER(ts_obj_ins_rec(bvol, &uuid, -1, ( i % 3 == 0 ) ? 1 : 5, (UINT)i, &pos), E_OK);
+		KT_ASSERT_EQ(pos, i);
+		KT_ASSERT_ER(ts_obj_wri_rec(bvol, &uuid, i, 0, &b, 1, &asize), E_OK);
+	}
+	KT_ASSERT_ER(ts_obj_ins_rec(bvol, &uuid, -1, 5, 0, &pos), E_LIMIT);
+	KT_ASSERT_ER(ts_obj_get_meta(bvol, &uuid, t, 16384, &asize), E_OK);
+	KT_ASSERT(asize < OB_ATR_MAX_KT);
+	KT_ASSERT(has(t, (INT)asize, "\"recordCount\":256"));
+
+	for ( round = 0; round < 2; round++ ) {
+		KT_ASSERT_ER(ts_obj_lst_rec(bvol, &uuid, rr, TSFS_MAX_REC + 8, &cnt), E_OK);
+		KT_ASSERT_EQ(cnt, TSFS_MAX_REC);
+		for ( i = 0, bad = 0; i < cnt; i++ ) {
+			b = 0;
+			if ( ts_obj_rea_rec(bvol, &uuid, i, 0, &b, 1, &asize) < E_OK || b != pat(i)
+			  || rr[i].rt != (UINT)( ( i % 3 == 0 ) ? 1 : 5 ) || rr[i].sub != (UINT)i ) bad++;
+		}
+		KT_ASSERT_EQ(bad, 0);
+		/* a record in the middle taken out: the rest close up */
+		if ( round == 0 ) {
+			KT_ASSERT_ER(ts_obj_unmount(bvol), E_OK);
+			bvol = ts_obj_mount(ODEV);
+			KT_ASSERT(bvol > 0);
+			if ( bvol <= 0 ) goto out;
+		}
+	}
+	KT_ASSERT_ER(ts_obj_del_rec(bvol, &uuid, 100), E_OK);
+	KT_ASSERT_ER(ts_obj_lst_rec(bvol, &uuid, rr, TSFS_MAX_REC + 8, &cnt), E_OK);
+	KT_ASSERT_EQ(cnt, TSFS_MAX_REC - 1);
+	b = 0;
+	KT_ASSERT_ER(ts_obj_rea_rec(bvol, &uuid, 100, 0, &b, 1, &asize), E_OK);
+	KT_ASSERT_EQ(b, pat(101));
+
+	/* the check of the whole volume: nothing more than before, nothing of the object */
+	knl_memset(ck, 0, sizeof(*ck));
+	KT_ASSERT_ER(ts_obj_check(bvol, TSFSCK_FULL, ck, NULL, NULL), E_OK);
+	KT_ASSERT_EQ(ck->problems, was);
+	KT_ASSERT_EQ(ck->found[TSFSCK_K_HEAD] + ck->found[TSFSCK_K_PART] + ck->found[TSFSCK_K_TABLE]
+		     + ck->found[TSFSCK_K_DATA] + ck->found[TSFSCK_K_META], 0);
+	KT_ASSERT(ck->records >= (UD)( TSFS_MAX_REC - 1 ));
+	KT_ASSERT_ER(ts_obj_delete(bvol, &uuid), E_OK);
+    out:
+	if ( rr != NULL ) Kfree(rr);
+	if ( ck != NULL ) Kfree(ck);
+	if ( t != NULL ) Kfree(t);
 }
 
 /* ---------------------------------------------------------------- links */
@@ -1681,6 +1759,7 @@ EXPORT void ktest_tsfsobj( void )
 	KT_RUN(test_extents);
 	KT_RUN(test_replace);
 	KT_RUN(test_order);
+	KT_RUN(test_many_records);
 	KT_RUN(test_refcount);
 	KT_RUN(test_collect);
 	KT_RUN(test_collect_all);

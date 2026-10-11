@@ -402,7 +402,7 @@ static ER open_window( const char *title )
 	c.json = (const UB *)json;
 	c.jsonsz = (SZ)strlen(json);
 	if ( ob_cre_obj(&c, &win) < E_OK ) return E_OBJ;
-	kw = ob_opn_obj(&win, OB_OP_ALL);
+	kw = ob_opn_obj(&win, OB_OP_R | OB_OP_W | OB_OP_PROT);
 	gid = ( kw > 0 ) ? wm_obj_gid(kw) : E_ID;
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_CHANNEL;

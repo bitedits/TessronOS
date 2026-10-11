@@ -15,7 +15,7 @@
  *	SVC class 5, with the same names and arguments. The kernel's header
  *	brings the network stack's own; a process has no use for those, so
  *	the structures and constants it needs are given here, laid out as
- *	the stack lays them out. IPv4 only.
+ *	the stack lays them out. IPv4 and IPv6.
  *
  *	A socket is the process's that made it: another process's number is
  *	refused (E_ID), and what is left open is closed when the process
@@ -62,6 +62,19 @@ struct sockaddr_in {
 	char		sin_zero[8];
 };
 
+struct in6_addr {
+	UB	s6_addr[16];
+};
+
+struct sockaddr_in6 {
+	UB		sin6_len;		/* sizeof(struct sockaddr_in6), or 0 */
+	UB		sin6_family;		/* AF_INET6 */
+	UH		sin6_port;
+	UINT		sin6_flowinfo;
+	struct in6_addr	sin6_addr;
+	UINT		sin6_scope_id;		/* the interface of a link-local address */
+};
+
 /* One socket of so_poll: what is waited for, and what happened */
 struct pollfd {
 	int	fd;
@@ -71,7 +84,9 @@ struct pollfd {
 
 #define AF_UNSPEC	0
 #define AF_INET		2
+#define AF_INET6	10
 #define PF_INET		AF_INET
+#define PF_INET6	AF_INET6
 
 #define SOCK_STREAM	1
 #define SOCK_DGRAM	2
@@ -79,6 +94,9 @@ struct pollfd {
 #define IPPROTO_IP	0
 #define IPPROTO_TCP	6
 #define IPPROTO_UDP	17
+#define IPPROTO_IPV6	41
+
+#define IPV6_V6ONLY	27		/* level IPPROTO_IPV6: an AF_INET6 socket takes no IPv4 */
 
 #define INADDR_ANY	((UINT)0x00000000UL)
 #define INADDR_BROADCAST ((UINT)0xffffffffUL)
@@ -157,6 +175,9 @@ IMPORT INT so_sendto( INT s, CONST void *data, SZ size, INT flags,
 		      CONST struct sockaddr *to, socklen_t tolen );
 IMPORT INT so_recvfrom( INT s, void *mem, SZ size, INT flags,
 			struct sockaddr *from, socklen_t *fromlen );
+/* so_recvfrom with the type of service or traffic class it arrived with (-1: none) */
+IMPORT INT so_recvtos( INT s, void *mem, SZ size, INT flags,
+		       struct sockaddr *from, socklen_t *fromlen, INT *p_tos );
 
 /* Options of up to 64 bytes */
 IMPORT ER  so_getsockopt( INT s, INT level, INT optname,
@@ -176,6 +197,26 @@ IMPORT ER  so_fcntl( INT s, INT cmd, INT val );
 
 /* The first IPv4 address of a name: "10.0.2.2" as it is, a host name through DNS */
 IMPORT ER  so_resolve( CONST char *name, UINT *p_addr );
+
+#ifndef __TS_SO_H__
+/* An address of either family */
+typedef struct {
+	INT	family;		/* AF_INET or AF_INET6 */
+	UINT	scope;		/* the interface of a link-local IPv6 address, else 0 */
+	UB	addr[16];	/* network byte order; an IPv4 one in the first four */
+} T_SOADDR;
+
+#define SO_RA_ADDRCONFIG	0x0001
+#endif
+
+/*
+ * The addresses of a name, IPv4 and IPv6 (family AF_INET, AF_INET6 or
+ * AF_UNSPEC), up to 16 of them into addrs, the one to try first first;
+ * how many, or an error code. With SO_RA_ADDRCONFIG a family the
+ * interface has no address of to reach the world with is not asked for.
+ * A numeric address ("2001:db8::1", "fe80::1%neta0") is its own answer.
+ */
+IMPORT INT so_resolveall( CONST char *name, INT family, INT flags, T_SOADDR *addrs, INT max );
 
 /*
  * The interface: its address, mask and gateway, and the first name

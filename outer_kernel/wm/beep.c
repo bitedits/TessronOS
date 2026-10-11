@@ -22,6 +22,20 @@
  *
  *	A task of its own plays them, so that asking for one never waits:
  *	the last asked is played, one at a time.
+ *
+ *	This is the one way the system's sounds are played: the clicks and
+ *	the buzzer of the window layer, and 〈試聴〉 of ユーザ環境設定 and of
+ *	システム環境設定, which ask through the system object's record 8
+ *	(PLAY and what, obsys.c). They all go to the sound device as one
+ *	channel of this task, so they sound on the output the system has
+ *	chosen (design 6.5.1). wm_beep_try is the asking that waits: it plays
+ *	even with the speaker switched off, and answers whether the sound
+ *	started -- E_NOSPT when no output can sound -- so a settings
+ *	accessory can say so rather than stay silent. WM_BEEP_TONE plays an
+ *	object's tone even when its record 1 holds a WAV file (the tone is
+ *	what ユーザ環境設定 sets); WM_BEEP_TEST is half a second of 880Hz.
+ *	The channel is stopped before each sound, so a sound cut short by a
+ *	later one leaves nothing that would refuse the next.
  */
 
 #include <sys/machine.h>
@@ -33,16 +47,29 @@
 #include <ts/ob.h>
 #include <ts/uuid.h>
 #include <ts/sysdef.h>
+#include <tm/tmonitor.h>
 #include "obj/obj.h"
 
 #define TONE_RATE	48000
 #define SOUND_MAX	( 512 * 1024 )		/* bytes of a sound played */
 #define TONE_AMP	6000
+#define BEEP_TICK_MS	100			/* WM_BEEP_TICK: the buzzer's tone, short */
+#define BEEP_LONG_MS	600			/* WM_BEEP_LONG: and long */
+#define TEST_HZ		880			/* WM_BEEP_TEST */
+#define TEST_MS		500
+#define TRY_TMO		3000			/* the most wm_beep_try waits for the start */
+
+#define FLG_ASK		0x01			/* beep_flg: wm_beep asked */
+#define FLG_TRY		0x02			/* and wm_beep_try */
 
 LOCAL ID	beep_tsk = 0;
 LOCAL ID	beep_flg = 0;
 LOCAL volatile UINT beep_what;
 LOCAL UB	*beep_buf = NULL;
+LOCAL ID	try_sem = 0;			/* one wm_beep_try at a time */
+LOCAL ID	try_flg = 0;			/* its answer */
+LOCAL volatile UINT try_what;
+LOCAL volatile ER try_er;
 
 LOCAL CONST char *CONST beep_obj[3] = { SYSDEF_SND_BUZZER, SYSDEF_SND_PRESS, SYSDEF_SND_RELEASE };
 
@@ -114,8 +141,11 @@ LOCAL BOOL wav_parse( CONST UB *buf, INT len, INT *p_off, INT *p_n, SDPcmMode *m
 	return FALSE;
 }
 
-/* The tone an object's metadata says: a square wave of hz for ms, into buf */
-LOCAL INT tone_make( ID key, UB *buf, SDPcmMode *m )
+/*
+ * The tone an object's metadata says: a square wave of hz for ms, into
+ * buf; for len_ms above nought, that long instead
+ */
+LOCAL INT tone_make( ID key, UB *buf, SDPcmMode *m, INT len_ms, INT test_hz )
 {
 	UB	*j = (UB *)Kmalloc(OB_META_MAX);
 	SZ	asz = 0;
@@ -126,7 +156,7 @@ LOCAL INT tone_make( ID key, UB *buf, SDPcmMode *m )
 	if ( j == NULL ) {
 		return 0;
 	}
-	if ( ob_get_atr(key, j, OB_META_MAX - 1, &asz) >= E_OK ) {
+	if ( key > 0 && ob_get_atr(key, j, OB_META_MAX - 1, &asz) >= E_OK ) {
 		p = knl_oj_path(j, (INT)asz, "tessronos", "sound");
 		p = ( p >= 0 ) ? knl_oj_member(j, (INT)asz, p, "tone") : -1;
 		if ( p >= 0 ) {
@@ -138,6 +168,8 @@ LOCAL INT tone_make( ID key, UB *buf, SDPcmMode *m )
 		}
 	}
 	Kfree(j);
+	if ( len_ms > 0 ) ms = len_ms;
+	if ( test_hz > 0 ) hz = test_hz;
 	if ( hz < 50 ) hz = 50;
 	if ( hz > 12000 ) hz = 12000;
 	if ( ms < 5 ) ms = 5;
@@ -159,54 +191,102 @@ LOCAL INT tone_make( ID key, UB *buf, SDPcmMode *m )
 	return n * 2;
 }
 
-/* A sound object played through the sound device's object, to its end */
-LOCAL void play( CONST char *uuid )
+/* The start's answer, to the one that waits in wm_beep_try */
+LOCAL void answer( BOOL tell, ER er )
+{
+	if ( tell ) {
+		try_er = er;
+		tk_set_flg(try_flg, 1);
+	}
+}
+
+/*
+ * A sound played through the sound device's object, to its end: the
+ * object uuid's WAV file, or its tone (tone set, or no WAV there); for
+ * len_ms above nought, its tone that long whatever it holds; with uuid
+ * NULL, the test tone. tell: the start's answer is waited for.
+ */
+LOCAL void play( CONST char *uuid, INT len_ms, BOOL tone, BOOL tell )
 {
 	TS_UUID		u, dev;
 	SDPcmMode	m;
-	ID		key, dk;
+	ID		key = 0, dk;
 	SZ		asz = 0;
 	INT		off = 0, n = 0, i;
 	W		v;
+	ER		er;
 
-	if ( ts_str_to_uuid(uuid, &u) < E_OK || knl_obdev_uuid((CONST UB *)SND_DEVNM, &dev) < E_OK ) {
+	if ( knl_obdev_uuid((CONST UB *)SND_DEVNM, &dev) < E_OK ) {
+		answer(tell, E_NOEXS);
 		return;
 	}
-	key = ob_opn_obj(&u, OB_OP_R);
-	if ( key < E_OK ) {
-		return;
+	if ( uuid == NULL ) {
+		n = tone_make(0, beep_buf, &m, TEST_MS, TEST_HZ);
+	} else {
+		if ( ts_str_to_uuid(uuid, &u) < E_OK || ( key = ob_opn_obj(&u, OB_OP_R) ) < E_OK ) {
+			answer(tell, E_NOEXS);
+			return;
+		}
+		if ( len_ms > 0 || tone || ob_rea_rec(key, 1, 0, beep_buf, SOUND_MAX, &asz) < E_OK || asz <= 0
+		  || !wav_parse(beep_buf, (INT)( asz > SOUND_MAX ? SOUND_MAX : asz ), &off, &n, &m) ) {
+			off = 0;
+			n = tone_make(key, beep_buf, &m, len_ms, 0);
+		}
+		ob_cls_obj(key);
 	}
-	if ( ob_rea_rec(key, 1, 0, beep_buf, SOUND_MAX, &asz) < E_OK || asz <= 0
-	  || !wav_parse(beep_buf, (INT)( asz > SOUND_MAX ? SOUND_MAX : asz ), &off, &n, &m) ) {
-		off = 0;
-		n = tone_make(key, beep_buf, &m);
-	}
-	ob_cls_obj(key);
 	if ( n <= 0 ) {
+		answer(tell, E_NOMEM);
 		return;
 	}
 
 	dk = ob_opn_obj(&dev, OB_OP_R | OB_OP_WRITE);
 	if ( dk < E_OK ) {
+		answer(tell, (ER)dk);
 		return;
 	}
+	v = PCM_STOP;
+	(void)ob_wri_rec(dk, OB_SND_CTL, 0, &v, sizeof(v), &asz);
 	v = n;
-	if ( ob_wri_rec(dk, OB_SND_MODE, 0, &m, sizeof(m), &asz) >= E_OK
-	  && ob_wri_rec(dk, OB_SND_BUFSZ, 0, &v, sizeof(v), &asz) >= E_OK
-	  && ob_wri_rec(dk, OB_SND_PCM, 0, beep_buf + off, n, &asz) >= E_OK
-	  && ob_wri_rec(dk, OB_SND_ENDCNT, 0, &v, sizeof(v), &asz) >= E_OK ) {
+	er = ob_wri_rec(dk, OB_SND_MODE, 0, &m, sizeof(m), &asz);
+	if ( er >= E_OK ) er = ob_wri_rec(dk, OB_SND_BUFSZ, 0, &v, sizeof(v), &asz);
+	if ( er >= E_OK ) er = ob_wri_rec(dk, OB_SND_PCM, 0, beep_buf + off, n, &asz);
+	if ( er >= E_OK ) er = ob_wri_rec(dk, OB_SND_ENDCNT, 0, &v, sizeof(v), &asz);
+	if ( er >= E_OK ) {
 		v = PCM_PLAY;
-		if ( ob_wri_rec(dk, OB_SND_CTL, 0, &v, sizeof(v), &asz) >= E_OK ) {
-			/* until it has played, and no longer than the longest may take */
-			for ( i = 0; i < 400; i++ ) {
-				tk_dly_tsk(10);
-				if ( ob_rea_rec(dk, OB_SND_CTL, 0, &v, sizeof(v), &asz) < E_OK || v == PCM_STOP ) {
-					break;
-				}
+		er = ob_wri_rec(dk, OB_SND_CTL, 0, &v, sizeof(v), &asz);
+	}
+	answer(tell, er);
+	if ( er < E_OK ) {
+		tm_printf((UB *)"wm: beep: not played (%d)\n", (INT)er);
+	} else {
+		/* until it has played, and no longer than the longest may take */
+		for ( i = 0; i < 400; i++ ) {
+			tk_dly_tsk(10);
+			if ( ob_rea_rec(dk, OB_SND_CTL, 0, &v, sizeof(v), &asz) < E_OK || v == PCM_STOP ) {
+				break;
 			}
 		}
 	}
 	ob_cls_obj(dk);
+}
+
+/* One sound asked for: a WM_BEEP_* with its WM_BEEP_TONE */
+LOCAL void play_what( UINT what, BOOL tell )
+{
+	UINT	w = what & ~WM_BEEP_TONE;
+	BOOL	tone = ( ( what & WM_BEEP_TONE ) != 0 );
+
+	if ( w <= WM_BEEP_RELEASE ) {
+		play(beep_obj[w], 0, tone, tell);
+	} else if ( w == WM_BEEP_TICK ) {
+		play(beep_obj[WM_BEEP_BUZZER], BEEP_TICK_MS, TRUE, tell);
+	} else if ( w == WM_BEEP_LONG ) {
+		play(beep_obj[WM_BEEP_BUZZER], BEEP_LONG_MS, TRUE, tell);
+	} else if ( w == WM_BEEP_TEST ) {
+		play(NULL, 0, TRUE, tell);
+	} else {
+		answer(tell, E_PAR);
+	}
 }
 
 LOCAL void beep_task( INT stacd, void *exinf )
@@ -214,12 +294,16 @@ LOCAL void beep_task( INT stacd, void *exinf )
 	UINT	ptn;
 
 	for ( ;; ) {
-		if ( tk_wai_flg(beep_flg, 1, TWF_ORW | TWF_CLR, &ptn, TMO_FEVR) < E_OK ) {
+		if ( tk_wai_flg(beep_flg, FLG_ASK | FLG_TRY, TWF_ORW | TWF_CLR, &ptn, TMO_FEVR) < E_OK ) {
 			tk_dly_tsk(100);
 			continue;
 		}
-		if ( wm_num(LK_SPEAKER, 1) != 0 && beep_what <= WM_BEEP_RELEASE ) {
-			play(beep_obj[beep_what]);
+		/* the one that waits for its answer first, whatever the speaker */
+		if ( ( ptn & FLG_TRY ) != 0 ) {
+			play_what(try_what, TRUE);
+		}
+		if ( ( ptn & FLG_ASK ) != 0 && wm_num(LK_SPEAKER, 1) != 0 ) {
+			play_what(beep_what, FALSE);
 		}
 	}
 }
@@ -242,6 +326,22 @@ LOCAL ER beep_start( void )
 	if ( beep_flg <= 0 ) {
 		return (ER)beep_flg;
 	}
+	try_flg = tk_cre_flg(&cf);
+	if ( try_flg <= 0 ) {
+		return (ER)try_flg;
+	}
+	{
+		T_CSEM	cs;
+
+		knl_memset(&cs, 0, sizeof(cs));
+		cs.sematr = TA_TFIFO | TA_FIRST;
+		cs.isemcnt = 1;
+		cs.maxsem = 1;
+		try_sem = tk_cre_sem(&cs);
+		if ( try_sem <= 0 ) {
+			return (ER)try_sem;
+		}
+	}
 	knl_memset(&ct, 0, sizeof(ct));
 	ct.tskatr = TA_HLNG | TA_RNG0;
 	ct.task = (FP)beep_task;
@@ -258,7 +358,7 @@ EXPORT ER wm_beep( UINT what )
 {
 	ER	er;
 
-	if ( what > WM_BEEP_RELEASE ) {
+	if ( ( what & ~WM_BEEP_TONE ) > WM_BEEP_TEST ) {
 		return E_PAR;
 	}
 	if ( wm_num(LK_SPEAKER, 1) == 0 ) {
@@ -269,5 +369,29 @@ EXPORT ER wm_beep( UINT what )
 		return er;
 	}
 	beep_what = what;
-	return tk_set_flg(beep_flg, 1);
+	return tk_set_flg(beep_flg, FLG_ASK);
+}
+
+EXPORT ER wm_beep_try( UINT what )
+{
+	UINT	ptn;
+	ER	er;
+
+	if ( ( what & ~WM_BEEP_TONE ) > WM_BEEP_TEST ) {
+		return E_PAR;
+	}
+	er = beep_start();
+	if ( er < E_OK ) {
+		return er;
+	}
+	if ( tk_wai_sem(try_sem, 1, TRY_TMO) < E_OK ) {
+		return E_TMOUT;
+	}
+	tk_clr_flg(try_flg, 0);
+	try_er = E_TMOUT;
+	try_what = what;
+	tk_set_flg(beep_flg, FLG_TRY);
+	er = ( tk_wai_flg(try_flg, 1, TWF_ORW | TWF_CLR, &ptn, TRY_TMO) >= E_OK ) ? try_er : E_TMOUT;
+	tk_sig_sem(try_sem, 1);
+	return er;
 }

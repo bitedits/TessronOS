@@ -41,7 +41,7 @@
 #include <ts/snd.h>
 #include "sysdepend.h"
 #include "usbdev.h"
-#ifdef PCIE_ECAM_PA
+#if defined(PCIE_ECAM_PA) || defined(PCIE_CFG_BOARD)
 #include <ts/pcie.h>
 #endif
 #ifdef RPI5
@@ -95,7 +95,14 @@ EXPORT UW knl_usb_ms( void )
 
 EXPORT BOOL knl_usb_streaming( void )
 {
-	return knl_snd_active();
+	return knl_snd_active() || knl_uvc_active() || knl_uusb_active();
+}
+
+EXPORT void knl_usb_kick( void )
+{
+	if ( usb_flg > 0 ) {
+		tk_set_flg(usb_flg, USBF_STREAM);
+	}
 }
 
 EXPORT void knl_usb_hub_changed( void )
@@ -203,6 +210,12 @@ LOCAL void detach_tree( USBDEV *dev, CONST char *why )
 	if ( dev->audio != NULL ) {
 		knl_uac_detach(dev);
 	}
+	if ( dev->camera != NULL ) {
+		knl_uvc_detach(dev);
+	}
+	if ( dev->user != NULL ) {
+		knl_uusb_detach(dev);
+	}
 	USB_LOG("usb: %d-%d route %05x addr %d gone (%s)\n", dev->hc->index,
 		dev->root_port, dev->route, dev->addr, why);
 	i = dev_slot(dev);
@@ -241,6 +254,12 @@ LOCAL void give_role( USBDEV *dev )
 	} else if ( knl_hid_match(dev) ) {
 		if ( knl_hid_attach(dev) >= E_OK ) {
 			dev->role = USB_ROLE_HID;
+		}
+	}
+	/* a camera, its microphone taken below */
+	if ( dev->role == USB_ROLE_NONE && knl_uvc_match(dev) ) {
+		if ( knl_uvc_attach(dev) >= E_OK ) {
+			dev->role = USB_ROLE_CAMERA;
 		}
 	}
 	/* an audio function, alone or beside the device's other ones */
@@ -447,7 +466,7 @@ LOCAL void usb_task( INT stacd, void *exinf )
 			} else {
 				tmo = TMO_FEVR;
 			}
-			tk_wai_flg(usb_flg, USBF_IRQ | USBF_RESCAN | USBF_HUB,
+			tk_wai_flg(usb_flg, USBF_IRQ | USBF_RESCAN | USBF_HUB | USBF_STREAM,
 				   TWF_ORW | TWF_CLR, &ptn, tmo);
 		}
 		knl_usb_lock();
@@ -488,6 +507,7 @@ LOCAL void usb_task( INT stacd, void *exinf )
 		knl_usb_unlock();
 		knl_msc_notify();
 		knl_uac_notify();
+		knl_uvc_notify();
 		if ( knl_usb_stat.gen != obj_gen ) {
 			obj_gen = knl_usb_stat.gen;
 			knl_obusb_changed();	/* the devices' objects follow, outside the lock */
@@ -510,12 +530,38 @@ LOCAL void add_hc( USBHC *hc )
 	}
 }
 
-#ifdef PCIE_ECAM_PA
+#ifdef USE_KTEST
+/*
+ * A controller a test adds after the machine started (vhc.c), with the
+ * manager's lock held: served from the manager's next turn on, and its
+ * ports looked at when the test asks for a scan
+ */
+EXPORT ER knl_usb_add_hc( USBHC *hc )
+{
+	if ( nhc >= USB_MAX_HC || usb_flg <= 0 ) {
+		return E_LIMIT;
+	}
+	hc->flgid = usb_flg;
+	add_hc(hc);
+	return E_OK;
+}
+#endif
+
+#if defined(PCIE_ECAM_PA) || defined(PCIE_CFG_BOARD)
 #define PCI_CLASS_SERIAL	0x0c
 #define PCI_SUBCLASS_USB	0x03
 #define PCI_PROGIF_XHCI		0x30
 
-/* Every xHCI function on the PCI Express bus, with a message interrupt each */
+#ifndef CNF_PCIE_POLL
+#define CNF_PCIE_POLL		0
+#endif
+
+/*
+ * Every xHCI function on the PCI Express bus, with a message interrupt
+ * each; where the machine has nowhere to send messages (the Raspberry Pi
+ * 4), with the line the function raises, or polled when built so
+ * (CNF_PCIE_POLL).
+ */
 LOCAL void find_pci( void )
 {
 	T_PCIDEV	d;
@@ -535,7 +581,7 @@ LOCAL void find_pci( void )
 		}
 		ts_pcie_enable(&d);
 		if ( ts_pcie_msi_alloc(&d, &intno) < E_OK ) {
-			intno = 0;
+			intno = CNF_PCIE_POLL ? 0 : d.intno;
 		}
 		if ( knl_xhci_attach(base, d.bar_size[0], d.bar[0], intno,
 				     usb_flg, &hc) >= E_OK ) {
@@ -657,11 +703,11 @@ EXPORT INT knl_usb_init( void )
 	cflg.flgatr = TA_TFIFO | TA_WMUL;
 	cflg.iflgptn = 0;
 	usb_flg = tk_cre_flg(&cflg);
-	if ( usb_lock_id <= 0 || first_scan_sem <= 0 || usb_flg <= 0 ) {
+	if ( usb_lock_id <= 0 || first_scan_sem <= 0 || usb_flg <= 0 || knl_uusb_init() < E_OK ) {
 		return E_LIMIT;
 	}
 
-#ifdef PCIE_ECAM_PA
+#if defined(PCIE_ECAM_PA) || defined(PCIE_CFG_BOARD)
 	find_pci();
 #endif
 #ifdef RPI5
@@ -760,6 +806,12 @@ LOCAL void dev_info( USBDEV *d, T_USBDEV *o )
 	for ( k = 0; k < (INT)sizeof(o->devnm) - 1 && d->devnm[k] != 0; k++ ) {
 		o->devnm[k] = d->devnm[k];
 	}
+}
+
+/* A device of the tree by its number, for the calls of the programs (uusb.c): with the lock held */
+EXPORT USBDEV *knl_usb_dev_of( INT handle )
+{
+	return dev_of_handle(handle);
 }
 
 EXPORT INT ts_usb_lst_dev( T_USBDEV *buf, INT max )

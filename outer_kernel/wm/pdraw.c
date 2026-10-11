@@ -25,7 +25,8 @@
  *	A panel of tags is drawn as the application library's is: a frame
  *	round the sheet, the tags above it on the frame's ground, each tag a
  *	box with its upper corners cut, the tag shown joined to the sheet
- *	under it, and a second row inside the sheet for an upper tag that
+ *	under it (or, P_DOWN, a column of them beside the sheet, their left
+ *	corners cut), and a second row inside the sheet for an upper tag that
  *	has one.
  *
  *	Everything here is found again by the functions that answer where a
@@ -1298,11 +1299,52 @@ typedef struct {
  * the lower row three above a line the letters' height and ten below
  * the sheet's head, starting again from the sheet's left.
  */
+/*
+ * The tags of a column (P_DOWN) laid out: the same tags turned on their
+ * side. Each stands four below where the last one's room ended, the
+ * letters' height tall with seven more round them, and its letters' box
+ * ends three left of the sheet; every box is as wide as the widest name.
+ */
+LOCAL INT tag_column( CONST T_WMPART *pt, CONST UB *pool, PDTAG *t )
+{
+	INT	i, wide = 0, w, y = pt->inner.top;
+
+	for ( i = 0; i < pt->count && i < PD_TAG_MAX; i++ ) {
+		CONST UB	*s = pd_pool_name(pool, pt->pool, i);
+
+		if ( s == NULL ) {
+			break;
+		}
+		if ( IS_PLUS(s) || IS_AT(s) ) {
+			s += 3;
+		}
+		t[i].num = i + 1;
+		t[i].sub = 0;
+		t[i].row = -1;
+		t[i].name = s;
+		w = width(s, -1, 0);
+		if ( w > wide ) wide = w;
+	}
+	for ( w = 0; w < i; w++ ) {
+		t[w].r.right = pt->inner.left - 3;
+		t[w].r.left = t[w].r.right - wide - 4;
+		y += 4;
+		t[w].r.top = y;
+		y += PD_FH;
+		t[w].r.bottom = y;
+		y += 3 + 3;
+	}
+	return i;
+}
+
 LOCAL INT tag_layout( CONST T_WMPART *pt, CONST UB *pool, PDTAG *t )
 {
 	INT	i = 0, k, num = 1, x = pt->inner.left, saved = -1, grp = 0, nrow = 0, row = -1;
 	INT	top2 = pt->inner.top + PD_FH + 10;
 
+	if ( ( pt->type & P_DOWN ) != 0 ) {
+		return tag_column(pt, pool, t);
+	}
 	for ( k = 0; k < pt->count && i < PD_TAG_MAX; k++ ) {
 		CONST UB	*s = pd_pool_name(pool, pt->pool, k);
 		INT		parent = -1;
@@ -1370,76 +1412,99 @@ LOCAL BOOL tag_off( CONST T_WMPART *pt, INT num )
 	return (BOOL)( num >= 1 && num <= 32 && ( pt->inact & ( 1U << ( num - 1 ) ) ) != 0 );
 }
 
-/* One tag, over the sheet B it belongs to */
+/*
+ * One tag, over the sheet B it belongs to. The shape is worked out along
+ * the row of tags and across it, toward the sheet: along runs left to
+ * right in a row over the sheet and top to bottom in a column beside it
+ * (P_DOWN), so that a column's tags are a row's turned on their side,
+ * lit from the same corner.
+ */
+#define TAG_AT(i, al, ac)	( down ? ( p[i].x = (ac), p[i].y = (al) ) : ( p[i].x = (al), p[i].y = (ac) ) )
+
 LOCAL void draw_tag( INT gid, CONST T_WMPART *pt, CONST PDTAG *e, CONST T_DPRECT *B, BOOL shown )
 {
-	INT		a = e->r.left - 4, b = e->r.top - 4, cc = e->r.right + 3, d = e->r.bottom;
-	INT		L = B->left, T = B->top, R = B->right, Bt = B->bottom;
+	BOOL		down = (BOOL)( ( pt->type & P_DOWN ) != 0 );
+	INT		a, b, cc;		/* the tag's start and end along, its head across */
+	INT		L, T, R, Bt;		/* the sheet: start and end along, its edge and far side across */
 	T_DPPOINT	p[11];
 	T_DPPAT		in, blk, wht;
 	T_FNMET		met;
 	INT		x, y;
 
+	if ( down ) {
+		a = e->r.top - 4;   b = e->r.left - 4;  cc = e->r.bottom + 3;
+		L = B->top;  T = B->left;  R = B->bottom;  Bt = B->right;
+	} else {
+		a = e->r.left - 4;  b = e->r.top - 4;   cc = e->r.right + 3;
+		L = B->left;  T = B->top;  R = B->right;  Bt = B->bottom;
+	}
 	wm_look_pat(LK_PNLGROUND, &in);
 	dp_pat_colour(&blk, BLACK);
 	dp_pat_colour(&wht, WHITE);
 	if ( shown ) {
-		p[0].x = L;      p[0].y = Bt - 1;
-		p[1].x = L;      p[1].y = T;
-		p[2].x = a;      p[2].y = T;
-		p[3].x = a;      p[3].y = b + 4;
-		p[4].x = a + 4;  p[4].y = b;
-		p[5].x = cc - 4; p[5].y = b;
-		p[6].x = cc;     p[6].y = b + 4;
-		p[7].x = cc;     p[7].y = T;
-		p[8].x = R - 1;  p[8].y = T;
-		p[9].x = R - 1;  p[9].y = Bt - 1;
-		p[10].x = L;     p[10].y = Bt - 1;
+		TAG_AT(0, L, Bt - 1);
+		TAG_AT(1, L, T);
+		TAG_AT(2, a, T);
+		TAG_AT(3, a, b + 4);
+		TAG_AT(4, a + 4, b);
+		TAG_AT(5, cc - 4, b);
+		TAG_AT(6, cc, b + 4);
+		TAG_AT(7, cc, T);
+		TAG_AT(8, R - 1, T);
+		TAG_AT(9, R - 1, Bt - 1);
+		TAG_AT(10, L, Bt - 1);
 		dp_fill_poly(gid, p, 11, DP_POLY_ODD, &in);
 		dp_draw_poly(gid, p, 11, FALSE, 1, DP_LINE_SOLID, &blk);
-		p[0].x = R - 2;  p[0].y = T + 1;
-		p[1].x = R - 2;  p[1].y = Bt - 2;
-		p[2].x = L + 1;  p[2].y = Bt - 2;
+		TAG_AT(0, R - 2, T + 1);
+		TAG_AT(1, R - 2, Bt - 2);
+		TAG_AT(2, L + 1, Bt - 2);
 		dp_draw_poly(gid, p, 3, FALSE, 1, DP_LINE_SOLID, &blk);
-		p[0].x = L + 1;  p[0].y = Bt - 2;
-		p[1].x = L + 1;  p[1].y = T + 1;
-		p[2].x = a + 1;  p[2].y = T + 1;
-		p[3].x = a + 1;  p[3].y = b + 4;
-		p[4].x = a + 4;  p[4].y = b + 1;
-		p[5].x = cc - 4; p[5].y = b + 1;
-		p[6].x = cc - 1; p[6].y = b + 4;
-		p[7].x = cc - 1; p[7].y = T + 1;
-		p[8].x = R - 3;  p[8].y = T + 1;
+		TAG_AT(0, L + 1, Bt - 2);
+		TAG_AT(1, L + 1, T + 1);
+		TAG_AT(2, a + 1, T + 1);
+		TAG_AT(3, a + 1, b + 4);
+		TAG_AT(4, a + 4, b + 1);
+		TAG_AT(5, cc - 4, b + 1);
+		TAG_AT(6, cc - 1, b + 4);
+		TAG_AT(7, cc - 1, T + 1);
+		TAG_AT(8, R - 3, T + 1);
 		dp_draw_poly(gid, p, 9, FALSE, 1, DP_LINE_SOLID, &wht);
 	} else {
-		p[0].x = a;      p[0].y = T - 1;
-		p[1].x = a;      p[1].y = b + 4;
-		p[2].x = a + 4;  p[2].y = b;
-		p[3].x = cc - 4; p[3].y = b;
-		p[4].x = cc;     p[4].y = b + 4;
-		p[5].x = cc;     p[5].y = T - 1;
+		TAG_AT(0, a, T - 1);
+		TAG_AT(1, a, b + 4);
+		TAG_AT(2, a + 4, b);
+		TAG_AT(3, cc - 4, b);
+		TAG_AT(4, cc, b + 4);
+		TAG_AT(5, cc, T - 1);
 		dp_fill_poly(gid, p, 6, DP_POLY_ODD, &in);
 		dp_draw_poly(gid, p, 6, FALSE, 1, DP_LINE_SOLID, &blk);
-		p[0].x = a + 1;  p[0].y = T - 1;
-		p[1].x = a + 1;  p[1].y = b + 4;
-		p[2].x = a + 4;  p[2].y = b + 1;
-		p[3].x = cc - 4; p[3].y = b + 1;
+		TAG_AT(0, a + 1, T - 1);
+		TAG_AT(1, a + 1, b + 4);
+		TAG_AT(2, a + 4, b + 1);
+		TAG_AT(3, cc - 4, b + 1);
 		dp_draw_poly(gid, p, 4, FALSE, 1, DP_LINE_SOLID, &wht);
 	}
-	p[0].x = cc - 4; p[0].y = b + 1;
-	p[1].x = cc - 1; p[1].y = b + 4;
-	p[2].x = cc - 1; p[2].y = T;
+	TAG_AT(0, cc - 4, b + 1);
+	TAG_AT(1, cc - 1, b + 4);
+	TAG_AT(2, cc - 1, T);
 	dp_draw_poly(gid, p, 3, FALSE, 1, DP_LINE_SOLID, &blk);
 
 	/* the name: white a pixel down and to the right, then black or grey */
-	/* in the middle of the tag, from its cut head to the sheet's edge */
 	(void)face(&met);
-	x = a + 6;
-	y = ( b + T + met.ascent - met.descent ) / 2;
+	if ( down ) {
+		/* from the tag's cut head, in the middle of it from top to bottom */
+		x = b + 6;
+		y = ( a + cc + met.ascent - met.descent ) / 2;
+	} else {
+		/* in the middle of the tag, from its cut head to the sheet's edge */
+		x = a + 6;
+		y = ( b + T + met.ascent - met.descent ) / 2;
+	}
 	(void)text(gid, x + 1, y + 1, e->name, -1, 0, WHITE);
 	(void)text(gid, x, y, e->name, -1, 0, tag_off(pt, e->num) ? GREY : BLACK);
-	(void)d;
 }
+
+#undef TAG_AT
 
 /*
  * A panel of tags: the frame round the sheet as wide as the widest of
@@ -1457,7 +1522,12 @@ LOCAL void draw_tags( T_WMPART *pt, CONST T_DPRECT *F, T_PDCTX *c )
 
 	n = tag_layout(pt, c->pool, t);
 	I2.top += PD_FH + 10;
-	w = I.left - F->left;
+	/* the frame as wide as the widest of the sides the tags do not stand on */
+	if ( ( pt->type & P_DOWN ) != 0 ) {
+		w = I.top - F->top;
+	} else {
+		w = I.left - F->left;
+	}
 	if ( F->right - I.right > w ) w = F->right - I.right;
 	if ( F->bottom - I.bottom > w ) w = F->bottom - I.bottom;
 	wm_look_pat(LK_ACTFRAME, &fr);
@@ -1465,7 +1535,11 @@ LOCAL void draw_tags( T_WMPART *pt, CONST T_DPRECT *F, T_PDCTX *c )
 		dp_frame_rect_pat(gid, F, &fr, w);
 	}
 	top = *F;
-	top.bottom = I.top;
+	if ( ( pt->type & P_DOWN ) != 0 ) {
+		top.right = I.left;
+	} else {
+		top.bottom = I.top;
+	}
 	dp_fill_rect_pat(gid, &top, &fr);
 	for ( k = 0; k < n; k++ ) {
 		if ( t[k].name == NULL || t[k].sub > 0 ) {

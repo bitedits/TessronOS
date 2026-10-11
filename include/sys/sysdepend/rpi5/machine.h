@@ -24,6 +24,7 @@
 #define CPU_BCM2712		1		/* Target SoC : Broadcom BCM2712 */
 #define CPU_CORE_ARMV8A		1		/* Target CPU-Core type : ARMv8-A (AArch64) */
 #define CPU_CORE_ACA76		1		/* Target CPU-Core : Arm Cortex-A76 */
+#define RPI_VCFW		1		/* The VideoCore firmware: property mailbox, screen, board revision */
 
 #define TARGET_DIR		rpi5		/* Sysdepend-Directory name */
 #define KNL_SYSDEP_PATH		rpi5		/* Kernel sysdepend path */

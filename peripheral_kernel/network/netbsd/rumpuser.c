@@ -991,10 +991,25 @@ LOCAL ER cv_wait( RU_CV *cv, RU_MTX *m, D tmo_us, BOOL wrap )
 	}
 	sem_put(w.semid);
 
-	lk_lock(&m->lk);
-	mtx_owned(m);
-	if ( wrap ) {
+	if ( wrap && ( m->flags & ( RUMPUSER_MTX_SPIN | RUMPUSER_MTX_KMUTEX ) )
+		     == ( RUMPUSER_MTX_SPIN | RUMPUSER_MTX_KMUTEX ) ) {
+		/*
+		 * A spin mutex is taken by a thread that keeps its virtual
+		 * processor while it waits for it. Taking the mutex here
+		 * first and then waiting for a processor would hold what
+		 * such a thread waits for while waiting for what it holds;
+		 * with one processor, nothing would move again. The
+		 * processor comes first, as for everyone else.
+		 */
 		sched_il(n, m);
+		lk_lock(&m->lk);
+		mtx_owned(m);
+	} else {
+		lk_lock(&m->lk);
+		mtx_owned(m);
+		if ( wrap ) {
+			sched_il(n, m);
+		}
 	}
 	ISpinLock(&cv->sl, &imask);
 	cv->nwaiters--;
@@ -1234,9 +1249,17 @@ EXPORT int rumpuser_getparam( CONST char *name, void *buf, UD blen )
 	UD		i;
 
 	if ( knl_strcmp(name, "_RUMPUSER_NCPU") == 0 ) {
-		ncpu[0] = (char)( '0' + ( ( knl_num_prc > 0 && knl_num_prc < 10 ) ? knl_num_prc : 1 ) );
+		/*
+		 * One virtual processor, whatever the board has: with more, a
+		 * thread's lock and the processor it is on were seen to part
+		 * under the load of a page's many fetches on four real cores
+		 * (the scheduler's "l_mutex == spc_mutex" assertion). The
+		 * callers still run in parallel outside the rump kernel.
+		 */
+		ncpu[0] = '1';
 		ncpu[1] = '\0';
 		v = ncpu;
+		(void)knl_num_prc;
 	} else if ( knl_strcmp(name, "_RUMPUSER_HOSTNAME") == 0 ) {
 		v = "tessronos";
 	} else if ( knl_strcmp(name, "RUMP_MEMLIMIT") == 0 ) {

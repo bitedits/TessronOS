@@ -13,8 +13,11 @@
  *	tk_ref_smb in page units on top of the page frame allocator.
  *	Small requests get physically contiguous pages in the linear map;
  *	large or non-cacheable requests go through the kernel variable area.
- *	TA_RNG2/3 (user visible) is treated like the kernel until process
- *	spaces exist (design 6.5).
+ *	The blocks are the kernel's, in its half of the address space,
+ *	whatever protection level the attribute names: TA_RNG2/3 makes no
+ *	memory EL0 may reach. A process asks for its own with ts_map_mem
+ *	(umem.c), and is handed the kernel's pages only through the shared
+ *	window (knl_prc_map_kernel).
  */
 
 #include <sys/machine.h>

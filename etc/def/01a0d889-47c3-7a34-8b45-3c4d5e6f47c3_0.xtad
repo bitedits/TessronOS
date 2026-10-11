@@ -1,0 +1,18 @@
+<tad version="1.0" encoding="UTF-8" filename="電子手帳の編集">
+<document>
+<p>電子手帳の編集</p>
+<p>トレー、取り消し、トレーへ複写、トレーから複写、トレーへ移動、トレーから移動、削除。メニューの定義。</p>
+</document>
+<menu>
+<item code="tray">トレー<link id="01a0d889-460c-7eda-8b47-5745d175681c_0.xtad" vobjid="01a0d8c3-2060-7008-9a10-c1d2e3f46008"/></item>
+<line/>
+<item code="undo" key="Z">取り消し</item>
+<line/>
+<item code="copy" key="C">トレーへ複写</item>
+<item code="paste" key="V">トレーから複写</item>
+<item code="cut" key="X">トレーへ移動</item>
+<item code="moveback">トレーから移動</item>
+<line/>
+<item code="delete">削除</item>
+</menu>
+</tad>

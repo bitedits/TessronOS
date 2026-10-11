@@ -36,8 +36,38 @@
 #define SYSDEF_LEARN_BOX	"01a0d8c4-5210-7a20-9d31-6b0f2c4e8a17"	/* 学習箱 */
 #define SYSDEF_DICT_BOX		"01a0d8c4-5215-7d08-b3f1-6a2e9c4d7b19"	/* 辞書箱 */
 
+/*
+ * bin: a plain object whose record 0 links to the commands -- programs
+ * that run without a window of their own ("kind": "command"), on what
+ * the console gives them (design 16.5.19). The console starts in it and
+ * looks for a command there. Opened from the desktop, a command is run
+ * in a console. Linked from the システム箱 for now: the object the
+ * paths start from is still to be settled.
+ */
+#define SYSDEF_BIN		"01a0d8c4-5460-7a71-8c82-9fab0c1d5460"
+#define SYSDEF_PROG_HELLO	"01a0d8c4-5462-7c93-8ea4-bc1d2e3f5462"	/* hello */
+#define SYSDEF_PROG_V8PROG	"01a0d8c4-5464-7eb5-80c6-de3f405f5464"	/* v8prog (make BROWSER=1) */
+
+/*
+ * The tree of paths a POSIX program sees (design 5.8.1): plain objects
+ * whose record 0 links to what is below them. "/" links to bin, dev,
+ * home and tmp and is linked from the システム箱. dev links to the
+ * device objects, made again by the kernel as devices come and go; home
+ * to the cabinet the desktop opens with; tmp is emptied at each start.
+ */
+#define SYSDEF_ROOT		"01a0d8c4-5470-7a81-8c92-9fab0c1d5470"	/* / */
+#define SYSDEF_DEV		"01a0d8c4-5471-7a82-8c93-9fab0c1d5471"	/* dev */
+#define SYSDEF_HOME		"01a0d8c4-5472-7a83-8c94-9fab0c1d5472"	/* home */
+#define SYSDEF_TMP		"01a0d8c4-5473-7a84-8c95-9fab0c1d5473"	/* tmp */
+
 /* かな漢字変換の辞書: mozc's data set in record 1 (RT 12) */
 #define SYSDEF_DICT_MOZC	"01a0d8c4-5216-7f4a-8c27-1d5b3e9a6c02"
+
+/* ユーザ辞書: the words the person registered, as lines of text in record 1 (ts/udic.h) */
+#define SYSDEF_DICT_USER	"01a0d8c4-5310-7a01-8b12-3c4d5e6f7b10"
+
+/* 文字検索の辞書: readings, elements, codes and names of the characters, in record 1 (tools/gen_chardic.py) */
+#define SYSDEF_DICT_CHAR	"01a0d8c4-5354-7d94-8a05-cd2e3f405454"
 
 /* The clock: a program object whose record 1 is its executable */
 #define SYSDEF_PROG_CLOCK	"01a0d8c4-5212-7a19-8d63-e04b5c9f2a71"
@@ -50,7 +80,27 @@
 #define SYSDEF_PROG_BACKUP	"01a0d8c4-52b0-7d15-9a3c-4e6f8b2d1c07"	/* バックアップ */
 #define SYSDEF_PROG_NETENV	"01a0d8c4-52b5-7a41-8c61-2d7e9f0a1b31"	/* ネットワーク設定 */
 #define SYSDEF_PROG_SYSENV	"01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42"	/* システム環境設定 */
+#define SYSDEF_PROG_SNDMIX	"01a0d8c4-5440-7a51-8c62-7e8f90a15440"	/* 音量ミキサー */
 #define SYSDEF_PROG_USERENV	"01a0d8c4-52b7-7c63-8e83-4f9a012c3d53"	/* ユーザ環境設定 */
+#define SYSDEF_PROG_CALENDAR	"01a0d8c4-52d4-7b31-9c42-5d6e7f809a12"	/* 予定表 */
+#define SYSDEF_PROG_CALC	"01a0d8c4-52e5-7e86-8f97-0a1b2c3d4e51"	/* 基本表計算 */
+#define SYSDEF_PROG_KANATYPE	"01a0d8c4-52f0-7a01-8b12-3c4d5e6f7a90"	/* かな入力練習 */
+#define SYSDEF_PROG_KEYMAP	"01a0d8c4-52e8-7b19-9c2a-3d4e5f6a7b84"	/* キー配列 */
+#define SYSDEF_PROG_WORDDIC	"01a0d8c4-5312-7c23-8d34-5e6f7b8c9d12"	/* 単語登録 */
+#define SYSDEF_PROG_CALCU	"01a0d8c4-5320-7a41-8b52-6c7d8e9fa020"	/* 電卓 */
+#define SYSDEF_PROG_SCRPRINT	"01a0d8c4-53d0-7a21-8b32-4c5d6e7f53d0"	/* 画面印刷 */
+#define SYSDEF_PROG_TRAY	"01a0d8c4-5430-7a31-8b42-5c6d7e8f5430"	/* トレー */
+#define SYSDEF_PROG_DISKFIX	"01a0d8c4-53e0-7a31-8c42-5d6e7f8053e0"	/* ディスク修復 */
+#define SYSDEF_PROG_MCARD	"01a0d8c4-5330-7a51-8c62-7d8e9fab3030"	/* マイクロカード */
+#define SYSDEF_PROG_CHARSRCH	"01a0d8c4-5350-7a61-8d72-9fab0c1d5050"	/* 文字検索 */
+#define SYSDEF_PROG_ARCHIVE	"01a0d8c4-5370-7a71-8e82-9fab0c1d7070"	/* 書庫管理 */
+#define SYSDEF_PROG_FQUIT	"01a0d8c4-5420-7a10-8b21-6c3d4e5f5420"	/* 強制終了 */
+#define SYSDEF_TMPL_ARCHIVE	"01a0d8c4-5372-7c93-8aa4-bc1d2e3f7272"	/* 書庫管理の原紙「空書庫」 */
+#define SYSDEF_PROG_TECHO	"01a0d8c4-53c0-7a11-8b22-3c4d5e6f53c0"	/* 電子手帳 */
+#define SYSDEF_TMPL_TECHO	"01a0d8c4-53c4-7e55-8f66-7a8b9cad53c4"	/* 電子手帳の原紙「手帳用紙」 */
+#define SYSDEF_PROG_SLIDE	"01a0d8c4-52d5-7c42-8d53-6e7f8091ab23"	/* スライド (in the desktop) */
+#define SYSDEF_PROG_RTPLAY	"01a0d8c4-52db-7d45-8e56-cf708192a3b4"	/* 基本動画再生 (in the desktop) */
+#define SYSDEF_PROG_RTMEDIA	"01a0d8c4-52da-7c34-9d45-be6f708192a3"	/* 実時間メディア: what the player of 実時間制御TAD sounds with */
 
 /* The system itself: a virtual device whose records say and change what the machine is (OB_SYS_*) */
 #define SYSDEF_SYSTEM		"01a0d680-3aa6-7c52-9d6f-3e72a0b18f14"
@@ -81,6 +131,7 @@
 #define SYSDEF_BROWSER_COOKIE	"01a0d8c4-5b23-7c14-8e65-9b7f8a9dae12"	/* ブラウザのCookie */
 #define SYSDEF_BROWSER_STORAGE	"01a0d8c4-5b24-7d15-8f76-ac8f9baebf23"	/* ブラウザの保存域 */
 #define SYSDEF_BROWSER_CACHE	"01a0d8c4-5b25-7e16-8a87-bd9aacbfc034"	/* ブラウザの蓄え */
+#define SYSDEF_BROWSER_SAVE	"01a0d8c4-5b26-7f17-8b98-ceabbdc0d145"	/* ブラウザの保存箱: 頁から保存したもの(システム箱) */
 
 /* The menus every window has (SYSMENU.DEF) */
 #define SYSDEF_MENU_WINDOW	"01a0d889-45e7-7a0c-adb9-ddf2d690ef56"	/* 閉じる */
@@ -90,6 +141,7 @@
 #define SYSDEF_MENU_ACC		"01a0d889-45ea-781b-8701-66f15a81b862"	/* 小物 */
 #define SYSDEF_MENU_EXEC	"01a0d889-45eb-7624-bbda-d9863883da4b"	/* 実行 */
 #define SYSDEF_MENU_TRAY	"01a0d889-460c-7eda-8b47-5745d175681c"	/* トレーの履歴 */
+#define SYSDEF_MENU_DISK	"01a0d889-46c0-7d2a-8c3b-4e5f6a7b8c91"	/* ディスク操作 */
 
 /* 暦: the system's time zone, kept in its metadata (tessronos.calendar.tz, design 12.3.1) */
 #define SYSDEF_CALENDAR		"01a0d8c4-52b3-7e43-9c53-6b7f8e9dab13"
@@ -117,16 +169,71 @@
 #define SYSDEF_MENU_BACKUP	"01a0d889-46b0-7e21-8c4d-2a5f9e3b6d18"	/* バックアップ */
 #define SYSDEF_MENU_NETENV	"01a0d889-46b5-7d14-9a25-6b7c8d9eaf01"	/* ネットワーク設定 */
 #define SYSDEF_MENU_SYSENV	"01a0d889-46b6-7e25-8b36-7c8d9eaf0b12"	/* システム環境設定 */
+#define SYSDEF_MENU_SNDMIX	"01a0d889-46c0-7d64-8f85-a1b2c3d4e5f6"	/* 音量ミキサー */
 #define SYSDEF_MENU_BROWSER	"01a0d889-46bc-7e8b-8a9c-d2e3f4a5b678"	/* ブラウザ */
 #define SYSDEF_MENU_SYSENV_OP	"01a0d889-46bb-7d7a-9f8b-c1d2e3f4a567"	/* システム環境設定の操作 */
 #define SYSDEF_MENU_USERENV	"01a0d889-46b7-7f36-9c47-8d9eaf0b1c23"	/* ユーザ環境設定 */
 #define SYSDEF_MENU_INFO	"01a0d889-46b8-7a47-8d58-9eaf0b1c2d34"	/* 管理情報 */
 #define SYSDEF_MENU_WINLIST	"01a0d889-46ba-7c69-8f7a-b0c1d2e3f456"	/* ウインドウ */
+#define SYSDEF_MENU_TAIL	"01a0d889-46bd-7f9c-8bad-e3f4a5b6c789"	/* ウインドウ、小物、実行 */
+#define SYSDEF_MENU_CLOCK	"01a0d889-46be-7a0d-9bbe-f4a5b6c7d89a"	/* 時計のメニュー */
+#define SYSDEF_MENU_FQUIT	"01a0d889-5423-7d43-8e54-9f6071b2c423"	/* 強制終了 */
+#define SYSDEF_MENU_CALENDAR	"01a0d889-46c0-7a11-8b22-3c4d5e6f7a81"	/* 予定表 */
+#define SYSDEF_MENU_SLIDE	"01a0d889-46c1-7b22-9c33-4d5e6f7a8b92"	/* スライド */
+#define SYSDEF_MENU_RTPLAY	"01a0d889-46c2-7c33-8d44-5e6f7a8b9ca3"	/* 基本動画再生 */
+#define SYSDEF_MENU_RTPLAY_VIEW	"01a0d889-46c3-7d44-9e55-6f7a8b9cadb4"	/* 基本動画再生の表示 */
+#define SYSDEF_MENU_RTPLAY_OPS	"01a0d889-46c4-7e55-8f66-7a8b9cadbec5"	/* 基本動画再生の操作 */
+#define SYSDEF_MENU_CAL_VIEW	"01a0d889-46c5-7f66-9a77-8b9cadbecfd6"	/* 予定表の表示 */
+#define SYSDEF_MENU_CAL_EDIT	"01a0d889-46c6-7077-8b88-9cadbecfd0e7"	/* 予定表の編集 */
+#define SYSDEF_MENU_CALC	"01a0d889-46d0-7a01-8b12-3c4d5e6f7a01"	/* 基本表計算 */
+/* 基本表計算's menus that its 操作パネル opens under its buttons */
+#define SYSDEF_MENU_CALC_FACE	"01a0d889-46d3-7d34-9e45-6f7a8b9cad34"	/* 書体 */
+#define SYSDEF_MENU_CALC_SIZE	"01a0d889-46d5-7f56-9a67-8b9cadbecf56"	/* 文字サイズ */
+#define SYSDEF_MENU_CALC_COLOUR	"01a0d889-46d6-7067-8b78-9cadbecfd067"	/* 文字色 */
+#define SYSDEF_MENU_CALC_GROUND	"01a0d889-46da-74ab-8fbc-d0e1f20314ab"	/* セルの背景色 */
+#define SYSDEF_MENU_CALC_LCOLOUR "01a0d889-46dc-76cd-8bde-f203142536cd"	/* 線の色 */
+#define SYSDEF_MENU_CALC_ALIGN	"01a0d889-46f0-7a01-8b12-3c4d5e6f7c01"	/* 横の配置 */
+#define SYSDEF_MENU_CALC_VALIGN	"01a0d889-46f1-7b12-9c23-4d5e6f7c8d12"	/* 縦の配置 */
+#define SYSDEF_MENU_CALC_LINE	"01a0d889-46f2-7c23-8d34-5e6f7c8d9e23"	/* 線種 */
+#define SYSDEF_MENU_CALC_LWIDTH	"01a0d889-46f3-7d34-9e45-6f7c8d9eaf34"	/* 線幅 */
+#define SYSDEF_MENU_KANATYPE	"01a0d889-46e0-7a01-8b12-3c4d5e6f7b01"	/* かな入力練習 */
+#define SYSDEF_MENU_WORDDIC	"01a0d889-4710-7a01-8b12-3c4d5e6f7c10"	/* 単語登録 */
+#define SYSDEF_MENU_CALCU	"01a0d889-4720-7a01-8b12-3c4d5e6f7d20"	/* 電卓 */
+#define SYSDEF_MENU_KEYMAP	"01a0d889-4740-7a01-8b12-3c4d5e6f7e40"	/* キー配列 */
+#define SYSDEF_MENU_KM_LATIN	"01a0d889-4741-7a12-8b23-3c4d5e6f7e41"	/* キー配列の英字配列 */
+#define SYSDEF_MENU_KM_KANA	"01a0d889-4742-7a23-8b34-3c4d5e6f7e42"	/* キー配列のかな配列 */
+#define SYSDEF_MENU_KM_SHAPE	"01a0d889-4743-7a34-8b45-3c4d5e6f7e43"	/* キー配列のキーボードの形 */
+#define SYSDEF_MENU_KM_VIEW	"01a0d889-4744-7a45-8b56-3c4d5e6f7e44"	/* キー配列の表示 */
+#define SYSDEF_MENU_DISKFIX	"01a0d889-47e0-7a01-8b12-3c4d5e6f47e0"	/* ディスク修復 */
+#define SYSDEF_MENU_DFIX_INFO	"01a0d889-47e1-7a12-8b23-3c4d5e6f47e1"	/* ディスク修復の障害情報 */
+#define SYSDEF_MENU_TRAYV	"01a0d889-47f0-7a01-8b12-3c4d5e6f47f0"	/* トレー */
+#define SYSDEF_MENU_TRAYV_VIEW	"01a0d889-47f1-7a12-8b23-3c4d5e6f47f1"	/* トレーの表示 */
+#define SYSDEF_MENU_NOTE	"01a0d889-47f2-7a23-8b34-3c4d5e6f47f2"	/* 通知 */
+#define SYSDEF_MENU_MCARD	"01a0d889-4730-7a01-8b12-3c4d5e6f7e30"	/* マイクロカード */
+#define SYSDEF_MENU_CHARSRCH	"01a0d889-4750-7a01-8b12-3c4d5e6f7f50"	/* 文字検索 */
+#define SYSDEF_MENU_ARCHIVE	"01a0d889-4770-7a01-8b12-3c4d5e6f7f70"	/* 書庫管理 */
+#define SYSDEF_MENU_TECHO	"01a0d889-47c0-7a01-8b12-3c4d5e6f47c0"	/* 電子手帳 */
+#define SYSDEF_MENU_MC_KIND	"01a0d889-4737-7a78-8b89-3c4d5e6f7e37"	/* マイクロカードの項目の種類 */
+#define SYSDEF_MENU_MC_FACE	"01a0d889-4738-7a89-8b9a-3c4d5e6f7e38"	/* マイクロカードの項目の書体 */
+#define SYSDEF_MENU_KT_KEYBOARD	"01a0d889-46e2-7c23-8d34-5e6f7b8c9d23"	/* かな入力練習のキーボードレイアウト */
+#define SYSDEF_MENU_KT_KANA	"01a0d889-46e3-7d34-9e45-6f7b8c9dae34"	/* かな入力練習のかな入力方式 */
+#define SYSDEF_MENU_KT_TRANS	"01a0d889-46e4-7e45-8f56-7b8c9daebf45"	/* かな入力練習のキーコード変換 */
 
 /* The data boxes of the settings accessories: their panels (design 18.15) */
 #define SYSDEF_BOX_NETENV	"01a0d8c4-52c8-7d11-8e21-6f7a8b9c0d01"	/* ネットワーク設定 */
 #define SYSDEF_BOX_SYSENV	"01a0d8c4-52c9-7e22-9f32-7a8b9c0d1e12"	/* システム環境設定 */
 #define SYSDEF_BOX_USERENV	"01a0d8c4-52ca-7f33-8a43-8b9c0d1e2f23"	/* ユーザ環境設定 */
+#define SYSDEF_BOX_SNDMIX	"01a0d8c4-5442-7c53-8e74-90a1b2c35442"	/* 音量ミキサー */
 #define SYSDEF_BOX_XFCONV	"01a0d8c4-52cb-7b44-9c54-9d0e1f2a3b45"	/* ファイル変換: 尋ねるパネル */
+#define SYSDEF_BOX_CALENDAR	"01a0d8c4-52d6-7d53-9e64-7f8091a2bc34"	/* 予定表: 上の帯と年月を尋ねるパネル */
+#define SYSDEF_BOX_CALC		"01a0d8c4-52e7-7a08-8b19-2c3d4e5f6a73"	/* 基本表計算: 検索/置換、用紙設定、保存の確認 */
+#define SYSDEF_BOX_KANATYPE	"01a0d8c4-52f2-7c23-8d34-5e6f7a8b9c12"	/* かな入力練習: 結果、先読みキー数 */
+#define SYSDEF_BOX_WORDDIC	"01a0d8c4-5314-7e45-8f56-7b8c9daebf14"	/* 単語登録: 窓のパネルと尋ねるパネル */
+#define SYSDEF_BOX_CALCU	"01a0d8c4-5322-7c63-8d74-8e9fabc21022"	/* 電卓: 標準と関数電卓のパネル */
+#define SYSDEF_BOX_MCARD	"01a0d8c4-5332-7c73-8e84-9fabc4d53232"	/* マイクロカード: 表示設定、並べ替え、印刷などのパネル */
+#define SYSDEF_BOX_CHARSRCH	"01a0d8c4-5352-7c83-8f94-bc1d2e3f5252"	/* 文字検索: 窓のパネルと尋ねるパネル */
+#define SYSDEF_BOX_FQUIT	"01a0d8c4-5422-7c32-9d43-8e5f6071a422"	/* 強制終了: 窓のパネルと立ち上げ直しを尋ねるパネル */
+#define SYSDEF_BOX_TECHO	"01a0d8c4-53c2-7c33-8d44-5e6f7a8b53c2"	/* 電子手帳: 検索パネル、用紙設定、印刷と閉じるときに尋ねるパネル */
+#define SYSDEF_BOX_BROWSER	"01a0d8c4-5442-7c94-8a05-1b2c3d4e5442"	/* ブラウザ: 頁の alert・confirm・prompt と select の一覧のパネル */
 
 #endif /* __TS_SYSDEF_H__ */

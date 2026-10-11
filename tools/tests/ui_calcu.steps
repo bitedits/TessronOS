@@ -1,0 +1,141 @@
+# 電卓 (design 11.17), for tools/ui_run.py: the accessory opened from its program
+# (its window at 600,120, its work area at 607,148; a button of column i, row j of
+# the plain keys at 637+50i, 230+34j, and in the function calculator the function
+# keys there and the plain keys at 845+50i), worked with its buttons and the keys,
+# the memory, the tray, the function calculator from the menu, an error, and the
+# number put into a text.
+open 01a0d8c4-5320-7a41-8b52-6c7d8e9fa020
+expect calculator: ready
+wait 800
+win 電卓
+shot cu_open
+# 0.1 + 0.2 = with the buttons: 0.3 exactly
+click 637 366
+click 687 366
+click 637 332
+click 787 366
+click 637 366
+click 687 366
+click 687 332
+click 837 366
+expect calculator: shown 0.3 []
+wait 200
+shot cu_sum
+# 12 × 3 with the main rows' digits, the keypad's × and Enter
+key 1E
+key 1F
+key 55
+key 20
+key 28
+expect calculator: shown 36 []
+# M+, C, MR: the memory outlives 全消去
+click 787 230
+click 837 230
+expect calculator: shown 0 []
+click 687 230
+expect calculator: shown 36 []
+wait 200
+shot cu_mem
+# Ctrl+C: to the tray
+key 06 01
+expect calculator: copied 36
+# 関数電卓 from the menu (it opens with 閉じる under the pointer)
+click 700 170 1
+wait 600
+move 720 190
+wait 150
+move 720 290
+wait 150
+shot cu_menu
+click 720 290
+expect calculator: mode 関数電卓
+wait 800
+win 電卓
+# 2 x^y 10 = 1024
+click 895 332
+click 687 332
+click 845 332
+click 845 366
+click 1045 366
+expect calculator: shown 1,024 []
+# 2 × ( 3 + 4, the operations waiting shown over the number
+click 895 332
+click 995 298
+click 637 366
+click 945 332
+click 995 366
+click 845 298
+expect calculator: shown 4 [2 × ( 3 +]
+wait 200
+shot cu_brackets
+click 687 366
+click 1045 366
+expect calculator: shown 14 []
+# sin 30° = 0.5
+click 945 332
+click 845 366
+click 637 230
+expect calculator: shown 0.5 []
+wait 200
+shot cu_sin
+# in radians, cos π = -1, and back to degrees
+click 787 230
+click 787 264
+click 687 230
+expect calculator: shown -1 []
+wait 200
+shot cu_rad
+click 787 230
+# log 1000 = 3
+click 845 332
+click 845 366
+click 845 366
+click 845 366
+click 637 298
+expect calculator: shown 3 []
+# 1 ÷ 0 = is an error; CE clears it
+click 845 332
+click 995 264
+click 845 366
+click 1045 366
+expect calculator: shown E []
+wait 200
+shot cu_err
+click 1045 264
+expect calculator: shown 0 []
+# Ctrl+V: the 36 copied before
+key 19 01
+expect calculator: pasted 36
+wait 200
+shot cu_paste
+# the number put into a text: the caret placed in it, Ctrl+V
+click 300 600
+wait 300
+key 19 01
+wait 500
+shot cu_doc
+# 標準 from the menu (it opens with 関数電卓 under the pointer), and closed
+click 750 133
+wait 300
+click 700 170 1
+wait 600
+move 720 160
+wait 150
+move 720 150
+wait 150
+click 720 150
+expect calculator: mode 標準
+wait 800
+shot cu_std
+click 700 170 1
+wait 600
+move 720 150
+wait 150
+move 720 70
+wait 150
+click 720 70
+expect calculator: closed
+wait 300
+shot cu_closed
+# nothing it did was refused for want of a right
+absent !OACV!

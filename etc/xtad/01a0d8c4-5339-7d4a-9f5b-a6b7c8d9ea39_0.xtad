@@ -1,0 +1,49 @@
+<tad version="1.0" encoding="UTF-8" filename="宛名ラベル">
+<figure>
+<document background="true">
+<docView viewleft="0" viewtop="0" viewright="640" viewbottom="24"/>
+<docDraw drawleft="0" drawtop="0" drawright="640" drawbottom="24"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0"/>
+<font size="14"/>
+<font color="#000000"/>
+住所録　宛名ラベル　%y年%m月%d日
+</document>
+<document>
+<docView viewleft="10" viewtop="40" viewright="300" viewbottom="60"/>
+<docDraw drawleft="10" drawtop="40" drawright="300" drawbottom="60"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0"/>
+<font size="13"/>
+<font color="#000000"/>
+〒%(郵便番号)
+</document>
+<document>
+<docView viewleft="10" viewtop="64" viewright="330" viewbottom="104"/>
+<docDraw drawleft="10" drawtop="64" drawright="330" drawbottom="104"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0"/>
+<font size="13"/>
+<font color="#000000"/>
+%(住所)
+</document>
+<document>
+<docView viewleft="30" viewtop="110" viewright="330" viewbottom="140"/>
+<docDraw drawleft="30" drawtop="110" drawright="330" drawbottom="140"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0"/>
+<font size="18"/>
+<font color="#000000"/>
+%(氏名)　様
+</document>
+<document>
+<docView viewleft="220" viewtop="150" viewright="330" viewbottom="170"/>
+<docDraw drawleft="220" drawtop="150" drawright="330" drawbottom="170"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0"/>
+<font size="11"/>
+<font color="#000000"/>
+No.%-6C
+</document>
+</figure>
+</tad>

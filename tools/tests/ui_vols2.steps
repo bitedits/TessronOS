@@ -1,0 +1,23 @@
+# ディスク操作 after a start again (design 11.26), on the disk ui_vols.steps
+# left (ui_run.py --keep-disk, then --disk with --fresh), with the same
+# volc.img: VOLC1 was attached by the person and is remembered, so it is
+# attached again as soon as it is plugged in, without 接続. Deleting its
+# link from the first window takes it away (取り外し): detached and
+# forgotten. The first window is brought up from under the one that opens
+# at the start.
+hmp drive_add 0 if=none,id=uvc,file=$VOLS/volc.img,format=raw
+hmp device_add usb-storage,drive=uvc,id=uvcd,bus=xhci.0
+expect disk: uda0 is back
+expect disk: attached uda0 "VOLC1"
+wait 1500
+click 250 14
+wait 500
+shot vol_restart
+click 60 205
+wait 300
+key 4C
+expect disk: detached uda0
+expect disk: forget
+expect disk: removed uda0
+wait 800
+shot vol_removed

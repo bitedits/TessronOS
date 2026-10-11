@@ -1,0 +1,77 @@
+<tad version="1.0" encoding="UTF-8" filename="音量ミキサーのデータボックス">
+<document>
+<p>音量ミキサーのデータボックス</p>
+<p>音量ミキサーの窓のパネルの定義。上に全体(出力先、左と右の音量、消音、左右をそろえる)、下にいまサウンドデバイスを使っているプログラム(アイコン、名前、音量、消音)を並べる。並ぶ行の数は窓の高さに合わせて決まり、残りは窓の縦のスクロールバーとホイールで巻き取る。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,560,630" title="音量ミキサー" kind="bare">
+<text x="16" y="30">全体</text>
+<text x="16" y="62">出力先：</text>
+<box num="1" rect="120,44,548,70" off="true"/>
+<text x="16" y="98">左：</text>
+<text x="96" y="98">小</text>
+<volume num="2" rect="120,81,400,103" across="true" lo="100" hi="0" value="100"/>
+<text x="408" y="98">大</text>
+<box num="3" rect="436,79,500,105" off="true"/>
+<text x="16" y="130">右：</text>
+<text x="96" y="130">小</text>
+<volume num="4" rect="120,113,400,135" across="true" lo="100" hi="0" value="100"/>
+<text x="408" y="130">大</text>
+<box num="5" rect="436,111,500,137" off="true"/>
+<switch num="6" rect="120,146,200,172">消音</switch>
+<switch num="7" rect="216,146,360,172" value="1">左右をそろえる</switch>
+<line rect="8,186,552,186"/>
+<text x="16" y="212">アプリケーション</text>
+<icon num="100" rect="12,225,36,249"/>
+<box num="101" rect="44,224,268,250" off="true"/>
+<volume num="102" rect="276,226,410,248" across="true" lo="100" hi="0" value="100"/>
+<box num="103" rect="416,224,456,250" off="true"/>
+<switch num="104" rect="462,224,548,250">消音</switch>
+<icon num="110" rect="12,265,36,289"/>
+<box num="111" rect="44,264,268,290" off="true"/>
+<volume num="112" rect="276,266,410,288" across="true" lo="100" hi="0" value="100"/>
+<box num="113" rect="416,264,456,290" off="true"/>
+<switch num="114" rect="462,264,548,290">消音</switch>
+<icon num="120" rect="12,305,36,329"/>
+<box num="121" rect="44,304,268,330" off="true"/>
+<volume num="122" rect="276,306,410,328" across="true" lo="100" hi="0" value="100"/>
+<box num="123" rect="416,304,456,330" off="true"/>
+<switch num="124" rect="462,304,548,330">消音</switch>
+<icon num="130" rect="12,345,36,369"/>
+<box num="131" rect="44,344,268,370" off="true"/>
+<volume num="132" rect="276,346,410,368" across="true" lo="100" hi="0" value="100"/>
+<box num="133" rect="416,344,456,370" off="true"/>
+<switch num="134" rect="462,344,548,370">消音</switch>
+<icon num="140" rect="12,385,36,409"/>
+<box num="141" rect="44,384,268,410" off="true"/>
+<volume num="142" rect="276,386,410,408" across="true" lo="100" hi="0" value="100"/>
+<box num="143" rect="416,384,456,410" off="true"/>
+<switch num="144" rect="462,384,548,410">消音</switch>
+<icon num="150" rect="12,425,36,449"/>
+<box num="151" rect="44,424,268,450" off="true"/>
+<volume num="152" rect="276,426,410,448" across="true" lo="100" hi="0" value="100"/>
+<box num="153" rect="416,424,456,450" off="true"/>
+<switch num="154" rect="462,424,548,450">消音</switch>
+<icon num="160" rect="12,465,36,489"/>
+<box num="161" rect="44,464,268,490" off="true"/>
+<volume num="162" rect="276,466,410,488" across="true" lo="100" hi="0" value="100"/>
+<box num="163" rect="416,464,456,490" off="true"/>
+<switch num="164" rect="462,464,548,490">消音</switch>
+<icon num="170" rect="12,505,36,529"/>
+<box num="171" rect="44,504,268,530" off="true"/>
+<volume num="172" rect="276,506,410,528" across="true" lo="100" hi="0" value="100"/>
+<box num="173" rect="416,504,456,530" off="true"/>
+<switch num="174" rect="462,504,548,530">消音</switch>
+<icon num="180" rect="12,545,36,569"/>
+<box num="181" rect="44,544,268,570" off="true"/>
+<volume num="182" rect="276,546,410,568" across="true" lo="100" hi="0" value="100"/>
+<box num="183" rect="416,544,456,570" off="true"/>
+<switch num="184" rect="462,544,548,570">消音</switch>
+<icon num="190" rect="12,585,36,609"/>
+<box num="191" rect="44,584,268,610" off="true"/>
+<volume num="192" rect="276,586,410,608" across="true" lo="100" hi="0" value="100"/>
+<box num="193" rect="416,584,456,610" off="true"/>
+<switch num="194" rect="462,584,548,610">消音</switch>
+</panel>
+</databox>
+</tad>

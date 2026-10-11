@@ -1,0 +1,37 @@
+# ユーザ環境設定 as 利用者 (design 8.7.1, 11.6), for tools/ui_run.py: started from its
+# program as the desktop starts it. The name and the zone are the person's to set:
+# the name is kept in ユーザ情報 and the zone (the offset and the name of the place chosen) in 暦 with no question. The time server
+# is in the network's settings, the administrator's: keeping it asks the desktop for
+# the administrator's password, and the panel put away leaves it as it was while the
+# rest is kept. The window is at 180,90: 使用者 at 600,175, 時刻サーバ at 600,388,
+# タイムゾーン at 500,425 (↑ the next zone east); Ctrl+E closes, and 更新して終了 of the
+# question that comes is at 625,393.
+open 01a0d8c4-52b7-7c63-8e83-4f9a012c3d53
+expect userenv: ready
+wait 800
+click 600 175
+text 2
+click 500 425
+key 52
+expect userenv: zone Australia/Adelaide
+wait 300
+click 600 388
+text x
+wait 300
+key 08 01
+wait 800
+move 625 393
+wait 150
+click 625 393
+wait 1000
+shot ue_admin
+key 29
+expect userenv: the time server not set: no right
+expect userenv: kept
+wait 500
+shot ue_kept
+# opened again: the name and the zone as kept
+open 01a0d8c4-52b7-7c63-8e83-4f9a012c3d53
+wait 1500
+win ユーザ環境設定
+shot ue_again

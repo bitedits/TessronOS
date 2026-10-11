@@ -811,19 +811,43 @@ EXPORT T_TADNODE *tad_root( CONST T_TAD *doc )
 	return ( doc != NULL ) ? doc->root : NULL;
 }
 
-/* The element the content is in: <document>, <figure> or <realtime> */
+/*
+ * The element the content is in: <document>, <figure> or <realtime>.
+ * A figure's paper and margins (<paper>, <docmargin>) are given ahead
+ * of it and are not it; anything else first is taken as it is.
+ */
+LOCAL BOOL ahead_of_body( CONST T_TADNODE *nd )
+{
+	CONST UB	*n = nd->name;
+
+	if ( n == NULL ) {
+		return FALSE;
+	}
+	return (BOOL)( ( n[0] == 'p' && n[1] == 'a' && n[2] == 'p' && n[3] == 'e' && n[4] == 'r' && n[5] == 0 )
+		    || ( n[0] == 'd' && n[1] == 'o' && n[2] == 'c' && n[3] == 'm' && n[4] == 'a' && n[5] == 'r'
+			 && n[6] == 'g' && n[7] == 'i' && n[8] == 'n' && n[9] == 0 ) );
+}
+
 EXPORT T_TADNODE *tad_body( CONST T_TAD *doc )
 {
-	T_TADNODE	*nd;
+	T_TADNODE	*nd, *first = NULL;
 
 	if ( doc == NULL || doc->root == NULL ) {
 		return NULL;
 	}
 	for ( nd = doc->root->first; nd != NULL; nd = nd->next ) {
-		if ( nd->kind == TAD_ND_ELEM ) return nd;
+		if ( nd->kind != TAD_ND_ELEM ) {
+			continue;
+		}
+		if ( first == NULL ) {
+			first = nd;
+		}
+		if ( !ahead_of_body(nd) ) {
+			return nd;
+		}
 	}
 
-	return NULL;
+	return first;
 }
 
 /*

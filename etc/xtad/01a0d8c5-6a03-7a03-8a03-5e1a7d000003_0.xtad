@@ -1,0 +1,80 @@
+<tad version="1.0" encoding="UTF-8" filename="10.3 繰り返しとテンポ変更">
+<realtime>
+<figure>
+<figView top="0" left="0" right="1920" bottom="1080"/>
+<figDraw top="0" left="0" right="1920" bottom="1080"/>
+<figScale hunit="-72" vunit="-72"/>
+<rect lineType="0" lineWidth="0" f_pat="1" left="0" top="0" right="1920" bottom="1080" fillColor="#16213e" zIndex="0"/>
+<document>
+<docView viewleft="120" viewtop="400" viewright="1800" viewbottom="500"/>
+<docDraw drawleft="120" drawtop="400" drawright="1800" drawbottom="500"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="10"/>
+<font size="72"/>
+<font color="#FFFFFF"/>
+10.3 繰り返しとテンポ変更
+</document>
+<document>
+<docView viewleft="120" viewtop="540" viewright="1800" viewbottom="620"/>
+<docDraw drawleft="120" drawtop="540" drawright="1800" drawbottom="620"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="10"/>
+<font size="36"/>
+<font color="#A0B4D0"/>
+while による繰り返しと単位縮尺によるテンポ変更
+</document>
+</figure>
+<realData>
+<!-- ストリーム定義 -->
+<stream number="1">
+<deviceName>inst:Piano</deviceName>
+</stream>
+
+<!-- 繰り返しカウンタを初期化 -->
+<assign var="0x0001">
+<expr><const value="4"/></expr>
+</assign>
+
+<!-- 4回繰り返し -->
+<while>
+<expr>
+<var id="0x0001"/>
+<op type="gt0"/>
+</expr>
+<do>
+<realGroup type="parallel" stream="1">
+<timeDelta value="0"/>
+<note pitch="C4" velocity="100" duration="240"/>
+<timeDelta value="240"/>
+<note pitch="E4" velocity="100" duration="240"/>
+<timeDelta value="240"/>
+<note pitch="G4" velocity="100" duration="240"/>
+<timeDelta value="240"/>
+<note pitch="C5" velocity="100" duration="240"/>
+</realGroup>
+
+<!-- カウンタをデクリメント -->
+<assign var="0x0001">
+<expr>
+<var id="0x0001"/>
+<const value="1"/>
+<op type="sub"/>
+</expr>
+</assign>
+
+<!-- 2回目以降はテンポアップ -->
+<if>
+<expr>
+<var id="0x0001"/>
+<const value="2"/>
+<op type="lt"/>
+</expr>
+<then>
+<unitScale bunitId="2" texp="0" ratio="3/4"/>
+</then>
+</if>
+</do>
+</while>
+</realData>
+</realtime>
+</tad>

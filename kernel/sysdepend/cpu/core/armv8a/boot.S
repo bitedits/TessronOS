@@ -13,7 +13,10 @@
  *
  *	x0 = physical address of the DTB, x1..x3 = 0.
  *	Only the primary core (Aff0 == 0) continues; the others park in WFE
- *	until they are started through PSCI CPU_ON.
+ *	until they are started through PSCI CPU_ON. On the Raspberry Pi 4 the
+ *	others never come here: the firmware keeps them in its own spin table
+ *	until smp.c writes knl_secondary_spin_entry into their release
+ *	addresses.
  *
  *	This section runs at its physical load address with the MMU off, so
  *	it is position independent (adr only; VA symbols are taken from
@@ -92,6 +95,32 @@ primary_boot:
 	add	x4, x4, x2
 	br	x4
 4:
+#ifdef BOOT_MIDR_PART
+	/*
+	 * An image is built for one family of boards, its processor and its
+	 * addresses. Started on another (a card moved between a Raspberry Pi
+	 * 4 and 5), even the console below is in the wrong place, so the
+	 * processor's part number is looked at first, and on a mismatch a
+	 * line is written to the console the other family has, and the
+	 * processor stops.
+	 */
+	mrs	x1, midr_el1
+	ubfx	x1, x1, #4, #12			/* part number */
+	ldr	x2, =BOOT_MIDR_PART
+	cmp	x1, x2
+	b.eq	midr_ok
+	ldr	x1, =BOOT_OTHER_UART_PA
+	adr	x3, msg_wrong
+1:	ldrb	w0, [x3], #1
+	cbz	w0, 3f
+2:	ldr	w2, [x1, #PL011_FR]
+	tbnz	w2, #5, 2b
+	str	w0, [x1, #PL011_DR]
+	b	1b
+3:	wfe
+	b	3b
+midr_ok:
+#endif
 	/*
 	 * x0 carries the DTB address only when the loader follows the Linux
 	 * boot protocol. QEMU passes 0 for an ELF image but places the DTB at
@@ -273,8 +302,12 @@ el1_start:
 	dsb	ish
 	isb
 
-	/* MMU, caches, SP alignment check, WXN on */
-	ldr	x0, =(SCTLR_EL1_RES1 | SCTLR_M | SCTLR_C | SCTLR_I | SCTLR_SA | SCTLR_WXN)
+	/*
+	 * MMU, caches, SP alignment check, WXN on. EL0 may read CTR_EL0 and
+	 * clean and invalidate the caches by address: a process that writes
+	 * the code it runs makes it fetchable itself (design 9.8.1)
+	 */
+	ldr	x0, =(SCTLR_EL1_RES1 | SCTLR_M | SCTLR_C | SCTLR_I | SCTLR_SA | SCTLR_WXN | SCTLR_UCT | SCTLR_UCI)
 	msr	sctlr_el1, x0
 	isb
 
@@ -338,12 +371,27 @@ sec_el1:
 	ic	iallu
 	dsb	ish
 	isb
-	ldr	x0, =(SCTLR_EL1_RES1 | SCTLR_M | SCTLR_C | SCTLR_I | SCTLR_SA | SCTLR_WXN)
+	ldr	x0, =(SCTLR_EL1_RES1 | SCTLR_M | SCTLR_C | SCTLR_I | SCTLR_SA | SCTLR_WXN | SCTLR_UCT | SCTLR_UCI)
 	msr	sctlr_el1, x0
 	isb
 	ldr	x0, =knl_secondary_start_va
 	br	x0
 	.size	knl_secondary_entry, . - knl_secondary_entry
+
+/*
+ * knl_secondary_spin_entry
+ *	Entry of a secondary core released from the firmware's spin table
+ *	(the Raspberry Pi 4): physical address, MMU off, EL2, and nothing in
+ *	x0. Its processor slot is its affinity level 0, which smp.c checks
+ *	against the device tree before releasing it.
+ */
+	.global	knl_secondary_spin_entry
+	.type	knl_secondary_spin_entry, %function
+knl_secondary_spin_entry:
+	mrs	x0, mpidr_el1
+	and	x0, x0, #0xff
+	b	knl_secondary_entry
+	.size	knl_secondary_spin_entry, . - knl_secondary_spin_entry
 
 /*
  * boot_putc(w0 = character)
@@ -401,6 +449,10 @@ msg_banner:	.asciz	"\r\nTessronOS boot: EL"
 msg_dtb:	.asciz	"  DTB=0x"
 msg_nl:		.asciz	"\r\n"
 msg_moved:	.asciz	"TessronOS boot: moved from 0x"
+#ifdef BOOT_MIDR_PART
+msg_wrong:	.ascii	"\r\nTessronOS: this image is for the ", BOOT_IMAGE_FOR
+		.asciz	", not for the processor of this board. Write the image made for this board.\r\n"
+#endif
 	.balign	8
 	.ltorg
 
@@ -429,9 +481,10 @@ knl_pt_l2_kern_pa:	.quad	pt_l2_kern - KVA_BASE
 knl_pt_l1_dev_pa:	.quad	pt_l1_dev - KVA_BASE
 knl_pt_l0_id_pa:	.quad	pt_l0_id - KVA_BASE
 
-/* physical entry address of the secondary cores (PSCI CPU_ON) */
-	.global	knl_secondary_entry_pa
+/* physical entry address of the secondary cores (PSCI CPU_ON, and a spin table) */
+	.global	knl_secondary_entry_pa, knl_secondary_spin_pa
 knl_secondary_entry_pa:	.quad	knl_secondary_entry
+knl_secondary_spin_pa:	.quad	knl_secondary_spin_entry
 
 /* user section of the image (linker symbols, absolute) */
 	.global	knl_user_start_va, knl_user_text_end_va, knl_user_end_va, knl_user_lma
@@ -472,7 +525,8 @@ knl_start_va:
 
 	mov	x0, #CPACR_FPEN			/* FP/SIMD usable */
 	msr	cpacr_el1, x0
-	mov	x0, #CNTKCTL_EL0VCTEN		/* a process reads the time as a count, as on Linux */
+	msr	tpidr_el1, xzr			/* no per-processor data yet (spinlock.c looks) */
+	mov	x0, #CNTKCTL_INIT		/* a process reads the time as a count, as on Linux; the event stream on */
 	msr	cntkctl_el1, x0
 	isb
 	msr	daifclr, #DAIF_A		/* take SErrors; IRQ/FIQ stay masked until the kernel starts */
@@ -500,7 +554,8 @@ knl_secondary_start_va:
 	mov	sp, x2
 	mov	x0, #CPACR_FPEN
 	msr	cpacr_el1, x0
-	mov	x0, #CNTKCTL_EL0VCTEN
+	msr	tpidr_el1, xzr
+	mov	x0, #CNTKCTL_INIT
 	msr	cntkctl_el1, x0
 	isb
 	msr	daifclr, #DAIF_A

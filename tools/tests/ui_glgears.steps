@@ -1,0 +1,19 @@
+# 歯車 (docs/tessronos/13-gpu.md 13.6), for tools/ui_run.py on a build with make GL=1:
+# the program object opened, the gears drawn by softpipe in a window of their
+# own, two pictures some seconds apart (the gears turned between them), the
+# frames counted on the console; then the window made larger by its corner,
+# and the frame drawn at the new size
+open 01a0d8c4-52e0-7a41-9b52-c6d7e8f9a0b1
+expect glgears: softpipe
+wait 3000
+win 歯車
+shot glgears_1
+wait 2500
+shot glgears_2
+expect fps
+drag 457 405 640 560
+wait 3000
+win 歯車
+shot glgears_resized
+# nothing it did was refused for want of a right
+absent !OACV!

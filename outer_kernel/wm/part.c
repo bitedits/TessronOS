@@ -31,6 +31,7 @@
 #include <tk/tkernel.h>
 #include <ts/part.h>
 #include <ts/wm.h>
+#include <ts/keymap.h>
 #include <ts/dp.h>
 #include <ts/hid.h>
 #include <ts/fn.h>
@@ -39,6 +40,9 @@
 #include <ts/ob.h>
 #include <ts/look.h>
 #include <ts/kconv.h>
+#include <ts/om.h>
+#include <ts/img.h>
+#include <ts/uuid.h>
 #include "wmobj.h"
 #include "pdraw.h"
 
@@ -481,6 +485,30 @@ EXPORT INT wm_panel_wid( INT pid )
 	return ( p != NULL ) ? p->wid : E_ID;
 }
 
+/*
+ * The window of the panel in its own window (wm_panel_open_centre) that
+ * stands nearest the viewer, menus left out; 0 when none is open.
+ */
+EXPORT INT wm_panel_front( void )
+{
+	T_WMWIN	w;
+	INT	i, best = 0, bz = 0;
+
+	for ( i = 0; i < WM_PANEL_MAX; i++ ) {
+		PANEL	*p = &pn_tab[i];
+
+		if ( !p->used || p->is_menu || p->popup <= 0
+		  || wm_ref(p->popup, &w) < E_OK || !w.visible ) {
+			continue;
+		}
+		if ( best == 0 || w.z < bz ) {
+			best = p->popup;
+			bz = w.z;
+		}
+	}
+	return best;
+}
+
 EXPORT ER wm_panel_close( INT pid )
 {
 	PANEL	*p = pn_of(pid);
@@ -527,6 +555,38 @@ EXPORT ER wm_panel_close( INT pid )
 	p->used = FALSE;
 
 	return E_OK;
+}
+
+/*
+ * The panels and menus standing in windows that are going, or whose
+ * lists are those windows, closed with them: the desktop's tasks were
+ * stopped and its windows go (knl_wm_tsk_end).
+ */
+EXPORT void knl_pn_wins_gone( CONST INT *wids, INT n )
+{
+	INT	i, k;
+
+	for ( i = 0; i < WM_PANEL_MAX; i++ ) {
+		PANEL	*p = &pn_tab[i];
+
+		if ( !p->used ) {
+			continue;
+		}
+		for ( k = 0; k < n; k++ ) {
+			if ( p->wid == wids[k] || p->popup == wids[k] || p->owner_wid == wids[k] ) {
+				(void)wm_panel_close(i + 1);
+				break;
+			}
+		}
+	}
+	if ( pn_conv_pid > 0 && pn_of(pn_conv_pid) == NULL ) {
+		/* the box being converted into went with them */
+		if ( pn_conv != NULL ) {
+			pn_conv->ncl = 0;
+			pn_conv->list = FALSE;
+		}
+		pn_conv_pid = 0;
+	}
 }
 
 /* ---------------------------------------------------------------- drawing */
@@ -786,6 +846,126 @@ LOCAL BOOL group_first( CONST PANEL *p, INT i )
  * caret's blink and a conversion under way in it. A part that was given
  * looks of its own is drawn in them.
  */
+/*
+ * The icons icon parts show, decoded once and kept: an object's icon is
+ * read when a part is given the object (knl_pn_set_state, in the task
+ * of the program that sets it), never while the panel is being drawn.
+ * Drawn in the middle of the part's rectangle, made smaller to fit
+ * when it is larger, the icon's clear pixels leaving the panel as it is.
+ */
+#define ICON_KEEP	24
+
+typedef struct {
+	UB	id[40];			/* the UUID as it was given */
+	UW	*px;			/* NULL: the object has no icon */
+	INT	w, h;
+	UW	used_at;		/* for letting the oldest go */
+} ICONKEEP;
+
+LOCAL ICONKEEP	icon_keep[ICON_KEEP];
+LOCAL UW	icon_tick = 0;
+
+LOCAL BOOL icon_same( CONST UB *a, CONST UB *b )
+{
+	INT	i;
+
+	for ( i = 0; i < 39 && a[i] == b[i] && a[i] != 0; i++ ) {
+		;
+	}
+	return ( a[i] == b[i] );
+}
+
+LOCAL ICONKEEP *icon_find( CONST UB *id )
+{
+	INT	i;
+
+	for ( i = 0; i < ICON_KEEP; i++ ) {
+		if ( icon_keep[i].id[0] != 0 && icon_same(icon_keep[i].id, id) ) {
+			icon_keep[i].used_at = ++icon_tick;
+			return &icon_keep[i];
+		}
+	}
+	return NULL;
+}
+
+/* The icon of object id read and kept, unless it is kept already */
+LOCAL void icon_load( CONST UB *id )
+{
+	TS_UUID		u;
+	ICONKEEP	*k;
+	UB		*ico;
+	SZ		size = 0;
+	INT		i, w = 0, h = 0;
+	UW		*px = NULL;
+
+	if ( id[0] == 0 || icon_find(id) != NULL || ts_str_to_uuid((CONST char *)id, &u) < E_OK ) {
+		return;
+	}
+	ico = om_obj_icon(&u, &size);
+	if ( ico != NULL ) {
+		if ( img_ico_decode(ico, size, &px, &w, &h) < E_OK ) {
+			px = NULL;
+		}
+		Kfree(ico);
+	}
+	k = &icon_keep[0];
+	for ( i = 1; i < ICON_KEEP; i++ ) {
+		if ( icon_keep[i].used_at < k->used_at ) {
+			k = &icon_keep[i];
+		}
+	}
+	if ( k->px != NULL ) {
+		Kfree(k->px);
+	}
+	knl_memset(k, 0, sizeof(*k));
+	for ( i = 0; i < 39 && id[i] != 0; i++ ) {
+		k->id[i] = id[i];
+	}
+	k->px = px;
+	k->w = w;
+	k->h = h;
+	k->used_at = ++icon_tick;
+}
+
+LOCAL void icon_draw( INT gid, CONST T_DPRECT *r, CONST UB *id )
+{
+	ICONKEEP	*k = icon_find(id);
+	INT		rw = r->right - r->left, rh = r->bottom - r->top, s, w, h, x, y;
+	UW		*sm;
+
+	if ( k == NULL || k->px == NULL || rw <= 0 || rh <= 0 ) {
+		return;
+	}
+	s = k->w;
+	if ( k->h > s ) s = k->h;
+	w = k->w;
+	h = k->h;
+	if ( s > rw || s > rh ) {
+		INT	d = ( rw < rh ) ? rw : rh;
+
+		w = k->w * d / s;
+		h = k->h * d / s;
+	}
+	if ( w <= 0 || h <= 0 ) {
+		return;
+	}
+	if ( w == k->w && h == k->h ) {
+		(void)dp_put_argb(gid, r->left + ( rw - w ) / 2, r->top + ( rh - h ) / 2, k->px, k->w, w, h, IMG_CLEAR);
+		return;
+	}
+	sm = (UW *)Kmalloc((SZ)w * h * sizeof(UW));
+	if ( sm == NULL ) {
+		return;
+	}
+	for ( y = 0; y < h; y++ ) {
+		for ( x = 0; x < w; x++ ) {
+			sm[y * w + x] = k->px[( y * k->h / h ) * k->w + x * k->w / w];
+		}
+	}
+	(void)dp_put_argb(gid, r->left + ( rw - w ) / 2, r->top + ( rh - h ) / 2, sm, w, w, h, IMG_CLEAR);
+	Kfree(sm);
+}
+
 LOCAL void draw_part_at( PANEL *p, INT pid, INT gid, INT i, INT rad, INT margin )
 {
 	T_WMPART	*pt = &p->def.part[i];
@@ -803,6 +983,10 @@ LOCAL void draw_part_at( PANEL *p, INT pid, INT gid, INT i, INT rad, INT margin 
 		return;
 	}
 	switch ( kind ) {
+	case WM_PT_ICON:
+		icon_draw(gid, &r, pt->label);
+		break;
+
 	case WM_PT_SWATCH:
 		dp_fill_rect(gid, &r, pt->colour);
 		dp_frame_rect(gid, &r, wm_look(WM_LOOK_FRAME), 1);
@@ -928,49 +1112,53 @@ EXPORT ER wm_panel_draw( INT pid )
 	return E_OK;
 }
 
+/*
+ * One part drawn again, and only it put on the screen. While a knob is
+ * carried the part changes with every move of the pointer; drawing the
+ * whole panel each time paints its ground over every part first, and
+ * whoever builds the screen meanwhile shows the panel half drawn.
+ */
+LOCAL void pn_draw_part( PANEL *p, INT pid, INT i )
+{
+	T_DPRECT	r;
+	INT		gid, rad, margin;
+
+	if ( i < 0 || i >= p->def.npart || p->is_menu ) {
+		return;
+	}
+	gid = wm_gid(p->wid);
+	if ( gid < 0 ) {
+		return;
+	}
+	rad = (INT)wm_look(WM_LOOK_PART_RAD);
+	if ( rad <= 0 ) {
+		rad = 12;
+	}
+	margin = part_margin();
+	draw_part_at(p, pid, gid, i, rad, margin);
+	part_rect(p, &p->def.part[i], &r);
+	r.left -= margin + 2;   r.top -= margin + 2;
+	r.right += margin + 2;  r.bottom += margin + 2;
+	wm_damage(p->wid, &r);
+}
+
+/* A volume and the number box that follows it, drawn again */
+LOCAL void vl_draw( PANEL *p, INT pid, INT i )
+{
+	T_WMPART	*pt = &p->def.part[i], *nb;
+
+	pn_draw_part(p, pid, i);
+	if ( pt->sub != 0 && ( nb = part_of(p, pt->sub) ) != NULL ) {
+		pn_draw_part(p, pid, (INT)( nb - p->def.part ));
+	}
+}
+
 /* ---------------------------------------------------------------- events */
 
-/*
- * A key as a letter. The codes are the ones the keyboard sends, which
- * are not characters: 0x04 is 'a' whatever is written on the key, and
- * what a shift does to each is a table, not arithmetic. The table is
- * the Japanese keyboard's: 0x35 is 半角/全角 and makes no letter, 0x31
- * and 0x32 are both the ] key, 0x87 is ろ (\ _) and 0x89 is ¥ (\ |).
- */
+/* A key as a letter, in the latin layout in use (ts/keymap.h) */
 EXPORT UB wm_key_char( UINT code, UINT mods )
 {
-	LOCAL CONST char	plain[] =
-		"abcdefghijklmnopqrstuvwxyz" "1234567890" "\n\033\b\t "
-		"-^@[]];:" "\0" ",./";
-	LOCAL CONST char	shift[] =
-		"ABCDEFGHIJKLMNOPQRSTUVWXYZ" "!\"#$%&'()\0" "\n\033\b\t "
-		"=~`{}}+*" "\0" "<>?";
-	/* an English keyboard (システム環境設定): its signs are elsewhere */
-	LOCAL CONST char	us_plain[] =
-		"abcdefghijklmnopqrstuvwxyz" "1234567890" "\n\033\b\t "
-		"-=[]\\\\;'" "`" ",./";
-	LOCAL CONST char	us_shift[] =
-		"ABCDEFGHIJKLMNOPQRSTUVWXYZ" "!@#$%^&*()" "\n\033\b\t "
-		"_+{}||:\"" "~" "<>?";
-	BOOL	up = (BOOL)( (mods & (HID_MOD_LSHIFT | HID_MOD_RSHIFT)) != 0 );
-
-	if ( wm_num(LK_KBD_US, 0) != 0 ) {
-		if ( code < 0x04 || code > 0x38 ) {
-			return 0;
-		}
-		return (UB)( up ? us_shift[code - 0x04] : us_plain[code - 0x04] );
-	}
-	if ( code == 0x87 ) {
-		return (UB)( up ? '_' : '\\' );
-	}
-	if ( code == 0x89 ) {
-		return (UB)( up ? '|' : '\\' );
-	}
-	if ( code < 0x04 || code > 0x38 ) {
-		return 0;
-	}
-
-	return (UB)( up ? shift[code - 0x04] : plain[code - 0x04] );
+	return km_char(code, mods);
 }
 
 
@@ -1223,7 +1411,7 @@ LOCAL INT part_at( PANEL *p, INT x, INT y )
 	for ( i = p->def.npart - 1; i >= 0; i-- ) {
 		T_WMPART *pt = &p->def.part[i];
 
-		if ( WM_PT_KIND(pt->type) == WM_PT_LABEL || WM_PT_KIND(pt->type) == WM_PT_LINE
+		if ( WM_PT_KIND(pt->type) == WM_PT_LABEL || WM_PT_KIND(pt->type) == WM_PT_LINE || WM_PT_KIND(pt->type) == WM_PT_ICON
 		  || PART_GREY(pt) || !pn_shown(p, pt) ) {
 			continue;		/* it takes nothing */
 		}
@@ -1436,6 +1624,7 @@ LOCAL ER menu_event( INT pid, CONST T_WMEV *ev, UINT *p_answer )
 #define K_HENKAN	0x8A
 #define K_MUHENKAN	0x8B
 #define M_SHIFT		( HID_MOD_LSHIFT | HID_MOD_RSHIFT )
+#define M_CTRL		( HID_MOD_LCTRL | HID_MOD_RCTRL )
 
 LOCAL INT tlen( CONST UB *t )
 {
@@ -1773,12 +1962,46 @@ LOCAL BOOL pn_conv_key( PANEL *p, INT pid, INT i, UINT key, UINT mods )
 		(void)pn_send(p, pid, i, code, stat);
 		return TRUE;
 	}
-	tc = ( m & WM_MODE_ROMAN ) ? ( ( ch > 0x20 && ch < 0x7F ) ? ch : 0 ) : kc_kana_key(key, shift);
+	tc = ( m & WM_MODE_ROMAN ) ? ( ( ch > 0x20 && ch < 0x7F ) ? ch : 0 ) : kc_kana_key_m(key, mods);
 	if ( tc != 0 ) {
 		(void)box_cut(&p->def.part[i]);
 		return (BOOL)( pn_send(p, pid, i, tc, stat) || busy );
 	}
 	return busy;
+}
+
+EXPORT BOOL wm_panel_type( INT wid, CONST UB *s, INT n )
+{
+	INT	i, k;
+
+	if ( s == NULL || n <= 0 ) return FALSE;
+	for ( i = 0; i < WM_PANEL_MAX; i++ ) {
+		PANEL		*p = &pn_tab[i];
+		T_WMPART	*pt;
+
+		if ( !p->used || p->is_menu || p->wid != wid || p->focus < 0 || p->focus >= p->def.npart ) {
+			continue;
+		}
+		pt = &p->def.part[p->focus];
+		if ( WM_PT_KIND(pt->type) != TB_PARTS || PART_GREY(pt) || !pn_shown(p, pt) ) {
+			continue;
+		}
+		for ( k = 0; k < n; k++ ) {
+			if ( ( pt->type & ( P_ASCII | P_DIGITS ) ) != 0 && ( s[k] < 0x20 || s[k] >= 0x7F ) ) return FALSE;
+			if ( ( pt->type & P_DIGITS ) != 0 && ( s[k] < '0' || s[k] > '9' ) ) return FALSE;
+		}
+		if ( pn_conv_pid == i + 1 && pn_conv_i == p->focus ) {
+			pn_commit();
+		}
+		(void)box_cut(pt);
+		if ( !box_put(pt, s, n) ) {
+			return FALSE;
+		}
+		(void)wm_panel_draw(i + 1);
+		knl_wmobj_part(i + 1, p->focus, OB_E_CHANGE, NULL);
+		return TRUE;
+	}
+	return FALSE;
 }
 
 /* ---------------------------------------------------------------- presses and keys */
@@ -1977,15 +2200,18 @@ LOCAL void pn_move( PANEL *p, INT pid, CONST T_WMEV *ev )
 		if ( k != pt->value ) {
 			pt->value = k;
 			vl_follow(p, pt);
-			wm_panel_draw(pid);
+			vl_draw(p, pid, i);
 			knl_wmobj_part(pid, i, OB_E_CHANGE, ev);
 		}
 		return;
 	case SS_PARTS:
 		if ( p->held_knob ) {
 			k = pd_ss_top_at(pt, &r, ev->y);
-			draw = ( k != pt->top );
-			pt->top = k;
+			if ( k != pt->top ) {
+				pt->top = k;
+				pn_draw_part(p, pid, i);
+			}
+			return;
 		} else if ( p->held_at > 0 ) {
 			k = pd_ss_at(pt, &r, ev->x, ev->y);
 			if ( k > 0 && k != pt->value && !name_off(pt, k) ) {
@@ -2082,6 +2308,9 @@ LOCAL void pn_key( PANEL *p, INT pid, CONST T_WMEV *ev )
 
 	pn_lit = TRUE;
 	(void)ts_get_mono(&pn_lit_at);
+	if ( ( ev->mods & M_CTRL ) != 0 && !pn_busy(pid, i) ) {
+		return;				/* Ctrl with a key: the program's command, not a letter */
+	}
 	if ( pt != NULL && WM_PT_KIND(pt->type) == TB_PARTS && ( pt->type & P_JP )
 	  && ( pn_busy(pid, i) || ( ev->code != K_TAB && ev->code != K_ENTER && ev->code != K_KPENTER
 				  && ev->code != K_ESC ) )
@@ -2125,6 +2354,46 @@ LOCAL void pn_key( PANEL *p, INT pid, CONST T_WMEV *ev )
 	}
 }
 
+/*
+ * The wheel over a list rolls it, as its knob would, a few rows a notch
+ * (turned away from the person, up the list); the list's drawing keeps
+ * the first row within it.
+ */
+#define WHEEL_ROWS	3
+
+LOCAL void pn_wheel( PANEL *p, INT pid, CONST T_WMEV *ev )
+{
+	T_WMPART	*pt;
+	T_DPRECT	r;
+	INT		i, was;
+
+	if ( ev->dz == 0 || wm_num(LK_PD_WHEEL, 1) == 0 ) {
+		return;
+	}
+	for ( i = 0; i < p->def.npart; i++ ) {
+		pt = &p->def.part[i];
+		if ( WM_PT_KIND(pt->type) != SS_PARTS || !pn_shown(p, pt) ) {
+			continue;
+		}
+		part_rect(p, pt, &r);
+		if ( !rect_has(&r, ev->x, ev->y) ) {
+			continue;
+		}
+		was = pt->top;
+		pt->top -= ev->dz * WHEEL_ROWS;
+		if ( pt->rows > 0 && pt->top > pt->count - pt->rows + 1 ) {
+			pt->top = pt->count - pt->rows + 1;	/* the last row at the foot */
+		}
+		if ( pt->top < 1 ) {
+			pt->top = 1;
+		}
+		if ( pt->top != was ) {
+			pn_draw_part(p, pid, i);
+		}
+		return;
+	}
+}
+
 EXPORT ER wm_panel_event( INT pid, CONST T_WMEV *ev, UINT *p_answer )
 {
 	PANEL	*p = pn_of(pid);
@@ -2158,6 +2427,9 @@ EXPORT ER wm_panel_event( INT pid, CONST T_WMEV *ev, UINT *p_answer )
 		break;
 	case HID_EV_KEY_DOWN:
 		pn_key(p, pid, ev);
+		break;
+	case HID_EV_WHEEL:
+		pn_wheel(p, pid, ev);
 		break;
 	default:
 		break;
@@ -2292,12 +2564,16 @@ EXPORT ER knl_pn_set_state( INT pid, INT i, CONST UB *buf, INT len )
 		vl_follow(p, pt);
 		return E_OK;
 	}
-	if ( k == TB_PARTS || k == XB_PARTS || k == WM_PT_LABEL || k == MS_PARTS ) {
+	if ( k == TB_PARTS || k == XB_PARTS || k == WM_PT_LABEL || k == MS_PARTS || k == WM_PT_ICON ) {
 		UB	*t = ( k == TB_PARTS || k == XB_PARTS ) ? pt->text : pt->label;
 
 		n = ( len < WM_LABEL_MAX - 1 ) ? len : WM_LABEL_MAX - 1;
 		knl_memcpy(t, buf, n);
 		t[n] = 0;
+		if ( k == WM_PT_ICON ) {
+			icon_load(t);		/* read now, in the caller's task: drawing only shows it */
+			return E_OK;
+		}
 		if ( t == pt->text ) {
 			pt->caret = n;
 			pt->sb_at = -1;
@@ -2362,8 +2638,15 @@ EXPORT ER knl_pn_set_flags( INT pid, INT i, UINT f )
 
 	if ( p == NULL || i < 0 || i >= p->def.npart ) return E_ID;
 	pt = &p->def.part[i];
+	/*
+	 * Shown or not changes only when asked to be other than it reads:
+	 * a part of a sheet not shown now reads as not shown, and writing
+	 * that back with only OB_WP_OFF changed is not to hide it for good.
+	 */
+	if ( ( f ^ knl_pn_flags(pid, i) ) & OB_WP_SHOWN ) {
+		pt->type = ( f & OB_WP_SHOWN ) ? ( pt->type & ~P_GONE ) : ( pt->type | P_GONE );
+	}
 	pt->type = ( f & OB_WP_OFF ) ? ( pt->type | P_DISABLE ) : ( pt->type & ~P_DISABLE );
-	pt->type = ( f & OB_WP_SHOWN ) ? ( pt->type & ~P_GONE ) : ( pt->type | P_GONE );
 	if ( p->focus == i && !pn_takes_keys(p, pt) ) pn_focus_first(p);
 	return E_OK;
 }
@@ -3023,6 +3306,14 @@ EXPORT ER wm_menu_event( INT pid, CONST T_WMEV *ev, INT *p_cmd )
 	}
 	if ( p_cmd != NULL ) {
 		*p_cmd = 0;
+	}
+	/*
+	 * An item is chosen with the main button only. The other button
+	 * opens the menu; pressed or let go over it again, it chooses
+	 * nothing, and the menu stays as it is.
+	 */
+	if ( ( ev->type == HID_EV_BTN_DOWN || ev->type == HID_EV_BTN_UP ) && ev->code != 0 ) {
+		return E_OK;
 	}
 	/*
 	 * A chain of menus answers as one. The event goes to every menu in
