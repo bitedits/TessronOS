@@ -76,8 +76,8 @@ extern "C" {
 #define SB_PARTS	4		/* fields along a line */
 #define AS_PARTS	5		/* an alternate switch: on or off */
 #define MS_PARTS	6		/* a momentary switch: a push button */
-#define PA_PARTS	7		/* a panel's own area */
-#define PM_PARTS	8		/* a pop-up menu in a panel */
+#define PA_PARTS	7		/* a switch showing a picture */
+#define PM_PARTS	8		/* a push button showing a picture */
 #define WS_PARTS	9		/* a selector: one name of several */
 #define SS_PARTS	10		/* a selector that scrolls */
 #define VL_PARTS	11		/* a volume */
@@ -123,6 +123,14 @@ extern "C" {
 #define WM_PT_LINE	14		/* a line from the rectangle's head and left to its foot and right */
 #define WM_PT_ICON	15		/* an object's icon, as its link shows it: the object's UUID
 					   is the part's words, set as a box's are; none shows nothing */
+/*
+ * A pop-up: one name of several, shown in a raised box with a mark at
+ * its right. Pressed, the names open as a list over it, the one chosen
+ * on the part's own row; the name let go on, or chosen with the arrow
+ * keys and Enter, becomes the part's. Its names live in the pool as a
+ * selector's do, and its value is the one chosen (1 up), 0 none.
+ */
+#define WM_PT_POPUP	16
 
 /* And the names this system's own code says */
 #define WM_PT_BOX	TB_PARTS
@@ -426,6 +434,16 @@ IMPORT INT wm_panel_self_check( void );
  */
 IMPORT void knl_pn_tick( void );
 IMPORT INT  knl_pn_wait( void );
+
+/*
+ * The list of a pop-up, while it is open: every input goes to it and to
+ * nothing else until a name is chosen or the list is put away. Whatever
+ * reads the input hands each input here first (wm_read_event does), and
+ * an input taken here is not handed on: TRUE. knl_pn_list answers the
+ * list's panel (0 when none is open) and, in *p_wid, its window.
+ */
+IMPORT BOOL knl_pn_list_event( CONST T_WMEV *ev );
+IMPORT INT  knl_pn_list( INT *p_wid );
 
 /*
  * What a part of an open panel holds, as its state record carries it,

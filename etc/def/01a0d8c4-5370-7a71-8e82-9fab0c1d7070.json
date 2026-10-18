@@ -18,7 +18,7 @@
       "id": "archive-manager",
       "kind": "app",
       "name": "書庫管理",
-      "version": "R1.100",
+      "version": "R1.110",
       "menu": false,
       "builtin": false,
       "base": [

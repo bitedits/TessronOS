@@ -28,6 +28,8 @@
 #include <ts/tsfsjrnl.h>
 #include <ts/tsfsobj.h>
 #include <ts/tsfsck.h>
+#include <ts/proc.h>
+#include <ts/fs.h>
 
 #define ODEV		kt_scratch()
 #define BIG_REC		10000		/* bytes: more than two blocks */
@@ -1749,6 +1751,161 @@ LOCAL void test_scrub( void )
 	KT_ASSERT(ts_format_blk(ODEV, "TessronOS test") >= E_OK);
 }
 
+/*
+ * A program started from a record shares its image (design 5.1): while
+ * one process of it waits for a message, another started from the same
+ * record maps the waiting one's pages (a load counted as a hit), and
+ * after ten such pairs have ended, and the program started alone ten
+ * times more, every page is back. The object written again is read
+ * again, not taken from an image kept of it.
+ */
+IMPORT UD knl_pf_free_count( INT zone );
+IMPORT BOOL knl_pt_reclaim( void );
+#if TS_NETSTACK_NETBSD
+IMPORT UD knl_rump_pages( void );
+#endif
+
+LOCAL UD sh_free( void )
+{
+#if TS_NETSTACK_NETBSD
+	UD	r, f;
+
+	do {
+		r = knl_rump_pages();
+		f = knl_pf_free_count(-1);
+	} while ( knl_rump_pages() != r );
+	return f + r;
+#else
+	return knl_pf_free_count(-1);
+#endif
+}
+
+/* The program in the record started with the argument: its process, or an error */
+LOCAL ID sh_start( ID vol, CONST TS_UUID *u, UW code, UW wait )
+{
+	T_CPRC	cprc;
+	UW	arg[2];
+
+	arg[0] = code;
+	arg[1] = wait;
+	cprc.pri    = KT_PRI_HIGH;
+	cprc.prcatr = 0;
+	cprc.stksz  = 0;
+	cprc.arg    = arg;
+	cprc.argsz  = sizeof(arg);
+	return ts_cre_prc_obj(vol, u, &cprc);
+}
+
+LOCAL INT sh_wait( ID pid )
+{
+	T_PSTS	psts;
+
+	psts.exitcd = -1;
+	if ( ts_wai_prc(pid, &psts, 5000) < E_OK ) return -1;
+	return psts.exitcd;
+}
+
+LOCAL void test_shared_program( void )
+{
+	CONST char *meta =
+		"{\"name\":\"hello\",\"refCount\":0,"
+		"\"tessronos\":{\"exec\":{\"record\":0,\"arch\":\"aarch64\"}}}";
+	T_COBJ	cobj;
+	T_TSMSG	msg;
+	TS_UUID	u;
+	UB	*buf;
+	SZ	asize;
+	UW	hits0, hits1, reads0, reads1;
+	UD	before, now = 0;
+	INT	fd, n, recno = -1, total = 0, i, t;
+	ID	vol, od, a, b;
+
+	fd = fs_open("/boot/HELLO.ELF", O_RDONLY);
+	if ( fd < 0 ) KT_SKIP("no program to store");
+	vol = ts_opn_vol(ODEV, TSFS_STORE_BLK);
+	KT_ASSERT(vol > 0);
+	if ( vol <= 0 ) {
+		fs_close(fd);
+		return;
+	}
+	cobj.json = (CONST UB *)meta;
+	cobj.jsonsz = s_len(meta);
+	KT_ASSERT_ER(ts_cre_obj(vol, &cobj, &u), E_OK);
+	od = ts_opn_obj(vol, &u, TFO_READ | TFO_WRITE);
+	KT_ASSERT(od > 0);
+	buf = (UB *)Kmalloc(4096);
+	KT_ASSERT(buf != NULL);
+	if ( od > 0 && buf != NULL ) {
+		KT_ASSERT_ER(ts_apd_rec(od, TSFS_REC_BIN, &recno), E_OK);
+		while ( ( n = fs_read(fd, buf, 4096) ) > 0 ) {
+			KT_ASSERT_ER(ts_wri_rec(od, 0, total, buf, n, &asize), E_OK);
+			total += n;
+		}
+	}
+	fs_close(fd);
+	if ( buf != NULL ) Kfree(buf);
+	if ( od > 0 ) KT_ASSERT_ER(ts_cls_obj(od), E_OK);
+
+	/* once, so that what the first start makes for good is there before counting */
+	KT_ASSERT_EQ(sh_wait(sh_start(vol, &u, 5, 0)), 5);
+	tk_dly_tsk(500);
+	(void)knl_pt_reclaim();
+	before = sh_free();
+	knl_elf_counts(&hits0, &reads0);
+
+	msg.type = 0x1234;
+	msg.from = 0;
+	msg.size = 4;
+	msg.body[1] = msg.body[2] = msg.body[3] = 0;
+	for ( i = 0; i < 10; i++ ) {
+		a = sh_start(vol, &u, 0, 1);		/* waits for a message */
+		KT_ASSERT(a > 0);
+		if ( a <= 0 ) break;
+		b = sh_start(vol, &u, (UW)( 20 + i ), 0);
+		KT_ASSERT(b > 0);
+		KT_ASSERT_EQ(sh_wait(b), 20 + i);
+		tk_dly_tsk(50);
+		msg.body[0] = (UB)( 40 + i );
+		KT_ASSERT_ER(ts_snd_msg(a, &msg, 1000), E_OK);
+		KT_ASSERT_EQ(sh_wait(a), 40 + i);
+	}
+	for ( i = 0; i < 10; i++ ) {
+		KT_ASSERT_EQ(sh_wait(sh_start(vol, &u, (UW)i, 0)), i);
+	}
+	knl_elf_counts(&hits1, &reads1);
+	tm_printf((UB *)"  %d loads shared, %d read\n", (INT)( hits1 - hits0 ), (INT)( reads1 - reads0 ));
+	KT_ASSERT(hits1 - hits0 >= 10);
+
+	/* every page back, once the reaper and the page tables' reclaim have gone by */
+	for ( t = 0; t < 50; t++ ) {
+		(void)knl_pt_reclaim();
+		now = sh_free();
+		if ( now == before ) break;
+		tk_dly_tsk(100);
+	}
+	tm_printf((UB *)"  free pages %d -> %d, after %d ms\n", (INT)before, (INT)now, t * 100);
+	KT_ASSERT_EQ(now, before);
+
+	/* written again: read again, and the new bytes run */
+	a = sh_start(vol, &u, 0, 1);			/* holds the image */
+	KT_ASSERT(a > 0);
+	od = ts_opn_obj(vol, &u, TFO_READ | TFO_WRITE);
+	KT_ASSERT(od > 0);
+	if ( od > 0 ) KT_ASSERT_ER(ts_cls_obj(od), E_OK);
+	knl_elf_counts(&hits0, &reads0);
+	b = sh_start(vol, &u, 9, 0);
+	KT_ASSERT_EQ(sh_wait(b), 9);
+	knl_elf_counts(&hits1, &reads1);
+	KT_ASSERT_EQ(hits1 - hits0, 0);			/* not the image of before the write */
+	KT_ASSERT_EQ(reads1 - reads0, 1);
+	msg.body[0] = 3;
+	KT_ASSERT_ER(ts_snd_msg(a, &msg, 1000), E_OK);
+	KT_ASSERT_EQ(sh_wait(a), 3);
+
+	KT_ASSERT_ER(ts_del_obj(vol, &u), E_OK);
+	KT_ASSERT_ER(ts_cls_vol(vol), E_OK);
+}
+
 EXPORT void ktest_tsfsobj( void )
 {
 	KT_RUN(test_mount);
@@ -1771,4 +1928,5 @@ EXPORT void ktest_tsfsobj( void )
 	KT_RUN(test_perf);
 	KT_RUN(test_cut_sweep);
 	KT_RUN(test_scrub);
+	KT_RUN(test_shared_program);
 }

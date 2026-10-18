@@ -1,7 +1,7 @@
 <tad version="1.0" encoding="UTF-8" filename="ブラウザのメニュー">
 <document>
 <p>ブラウザのメニュー</p>
-<p>ブラウザの窓のメニュー。メニューの定義。</p>
+<p>ブラウザのウインドウのメニュー。メニューの定義。</p>
 </document>
 <menu>
 <include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2002-7eb8-8d49-6f7a8b9cadb5"/></include>
@@ -10,8 +10,8 @@
 <item code="reload" key="R">再読込</item>
 <line/>
 <item code="address" key="L">アドレス入力</item>
-<item code="home">最初の頁</item>
-<item code="find" key="F">頁の中を検索...</item>
+<item code="home">最初のページ</item>
+<item code="find" key="F">ページの中を検索...</item>
 <line/>
 <item code="print" key="P">印刷...</item>
 <item code="media">メディア<link id="01a0d8c4-5b28-7c31-9d42-a1b2c3d4e528_0.xtad" vobjid="01a0d8c3-2002-7fd1-9a2e-c1d2e3f40a2e"/></item>

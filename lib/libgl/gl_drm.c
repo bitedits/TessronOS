@@ -63,12 +63,23 @@
 #define F_DUPFD_CLOEXEC	14		/* newlib's, hidden by a strict standard */
 #endif
 
-#define GPUFD_BASE	0x3e00		/* between the memory objects and the sockets */
+/*
+ * The descriptors of the shim: 0x3400 to 0x357f, between the eventfds
+ * (0x3000 up, lib/libcxxrt/ts_evfd.c) and the random sources (0x3800 up,
+ * ts_urandom.c). libcxxrt asks for the memory objects (0x3c00 to 0x3fff,
+ * ts_mman.c) before it asks the shim, so a descriptor in their range
+ * never reaches it: close, fcntl and mmap of one would fail with EBADF.
+ */
+#define GPUFD_BASE	0x3400
 #define GPUFD_MAX	64
 #define PRIMEFD_BASE	( GPUFD_BASE + GPUFD_MAX )
 #define PRIMEFD_MAX	64
 #define SYNCFD_BASE	( PRIMEFD_BASE + PRIMEFD_MAX )
-#define SYNCFD_MAX	256		/* up to the sockets (0x4000) */
+#define SYNCFD_MAX	256
+#define GPUFD_END	( SYNCFD_BASE + SYNCFD_MAX )
+#if GPUFD_END > 0x3800
+#error "the GPU's descriptors reach the random sources"
+#endif
 #define SYNC_MAX	1024
 #define MMAP_SHIFT	12		/* the offset of a BO's mmap: its number in pages */
 
@@ -153,8 +164,29 @@ static int sfd_new( int signaled, D fence, int ctx )
 	return -1;
 }
 
+/*
+ * E_DISWAI from a call of the GPU: the process is ending (_exit,
+ * ts_ter_prc). The system lets none of its threads into the GPU's calls
+ * from then on, and cuts the waits they are in. A thread still running
+ * the driver then (a raster or WebGL thread while the main thread calls
+ * _exit) does not go back to it with an error, which the driver would
+ * report and abort on (v3d_bo_wait: "wait failed: -4"): it stays here
+ * until the system takes it down with the process.
+ */
+static void ending_stay( void )
+{
+	struct timespec	t = { 1, 0 };
+
+	for ( ;; ) {
+		(void)nanosleep(&t, NULL);
+	}
+}
+
 static int set_errno( ER er )
 {
+	if ( er == E_DISWAI ) {
+		ending_stay();
+	}
 	switch ( er ) {
 	case E_NOMEM:	errno = ENOMEM;	break;
 	case E_ID:	errno = ENOENT;	break;
@@ -163,7 +195,6 @@ static int set_errno( ER er )
 	case E_NOEXS:	errno = ENODEV;	break;
 	case E_LIMIT:	errno = ENOSPC;	break;
 	case E_NOSPT:	errno = ENOSYS;	break;
-	case E_DISWAI:	errno = EINTR;	break;
 	default:	errno = EINVAL;	break;
 	}
 	return -1;

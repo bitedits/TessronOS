@@ -1,7 +1,7 @@
-<tad version="1.0" encoding="UTF-8" filename="窓の末尾の共通メニュー">
+<tad version="1.0" encoding="UTF-8" filename="ウインドウの末尾の共通メニュー">
 <document>
-<p>窓の末尾の共通メニュー</p>
-<p>プロセスとして動くプログラムの窓のメニューの末尾に出る項目。メニューの定義。</p>
+<p>ウインドウの末尾の共通メニュー</p>
+<p>プロセスとして動くプログラムのウインドウのメニューの末尾に出る項目。メニューの定義。</p>
 </document>
 <menu>
 <item code="win">ウインドウ<link id="01a0d889-46ba-7c69-8f7a-b0c1d2e3f456_0.xtad" vobjid="01a0d8c3-2002-7fd1-9a01-c1d2e3f40a01"/></item>

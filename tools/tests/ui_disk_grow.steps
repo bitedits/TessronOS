@@ -1,0 +1,125 @@
+# ディスク操作の拡張と区画作成 (design 11.26, 7.7), for tools/ui_run.py --vols DIR,
+# DIR made by tools/tests/mkvoldisk.py: volh.img (64MB, GPT, a TSFS partition
+# "VOLH" of 8MB at 1MB and nothing after it) plugged into the hub as uda.
+# VOLH is attached with 接続; 拡張 on its link offers 8MB to 62MB, and 32 is
+# typed into the size (Backspace takes the last digit off the number box).
+# 区画作成 away from a link offers the 30MB left on uda; the label is typed
+# and a 30MB partition uda1 is made, a volume on it, attached, its link in the
+# first window. 拡張 on VOLH then finds no room after it. Pulled out and put
+# back, both volumes come back by themselves. The first window is made larger;
+# ディスク操作 is at 440,480 the first time the menu opens at 400,300 and under
+# the pointer after; its submenu has 接続, 切り離し, 状態表示, 区画作成, 拡張,
+# 20 pixels apart.
+hmp drive_add 0 if=none,id=uvh,file=$VOLS/volh.img,format=raw
+hmp device_add usb-storage,drive=uvh,id=uvhd,bus=xhci.0
+wait 3000
+click 250 60
+wait 300
+drag 346 222 620 420
+wait 500
+# 接続: VOLH, the only TSFS partition offered, chosen already
+click 400 300 1
+wait 300
+move 430 480
+wait 150
+move 440 480
+wait 300
+move 510 480
+wait 150
+move 530 481
+wait 300
+click 530 481
+expect disk: connect offers
+wait 800
+key 28
+expect disk: attached uda0 "VOLH"
+wait 1000
+# 拡張 on its link: from 8MB, up to the end of the disk
+click 60 205 1
+wait 300
+move 90 205
+wait 150
+move 100 206
+wait 300
+move 170 206
+wait 150
+move 190 206
+wait 300
+move 185 286
+wait 300
+shot grow_menu
+click 185 286
+expect disk: grow uda0 offers 8 MB to 62 MB
+wait 800
+shot grow_panel
+click 640 402
+key 2a
+key 2a
+text 32
+wait 300
+key 28
+expect gpt: uda0 grown from 16384 to 65536 sectors
+expect tsfs: uda0 grown from 2048 to 8192 blocks
+expect disk: grown uda0 8 MB -> 32 MB (0)
+wait 800
+shot grow_done
+# 区画作成 away from a link: the rest of uda
+click 400 300 1
+wait 300
+move 430 300
+wait 150
+move 440 301
+wait 300
+move 510 301
+wait 150
+move 530 301
+wait 300
+move 525 361
+wait 300
+click 525 361
+expect disk: create offers 1
+wait 800
+shot grow_create
+click 800 410
+key 2a
+key 2a
+key 2a
+key 2a
+text VOLNEW
+wait 300
+key 28
+expect gpt: uda1 made, 61440 sectors at 67584
+expect tsfs: uda1 made, 30 MB "VOLNEW" (0)
+expect disk: created uda1 30 MB "VOLNEW" (0)
+expect disk: attached uda1 "VOLNEW"
+wait 1500
+shot grow_created
+# 拡張 on VOLH again: the new partition is right after it
+click 60 205 1
+wait 300
+move 90 205
+wait 150
+move 100 206
+wait 300
+move 170 206
+wait 150
+move 190 206
+wait 300
+move 185 286
+wait 300
+click 185 286
+expect disk: grow uda0 offers 32 MB to 32 MB
+wait 800
+shot grow_noroom
+key 28
+wait 500
+# pulled out and put back: both volumes are remembered
+hmp device_del uvhd
+expect disk: volumes changed
+wait 1500
+hmp drive_add 0 if=none,id=uvh,file=$VOLS/volh.img,format=raw
+hmp device_add usb-storage,drive=uvh,id=uvhd,bus=xhci.0
+expect disk: uda0 is back
+expect disk: uda1 is back
+wait 1500
+shot grow_back

@@ -228,6 +228,8 @@ IMPORT DTWIN *dt_win_of( INT wid );
  */
 IMPORT BOOL   dt_carry_window( INT wid, CONST T_DPRECT *o );
 IMPORT BOOL   dt_carry_end( INT wid );
+/* Links carried shown as themselves when LK_LIVE says so: the places they are taken from */
+IMPORT void   dt_carry_looks( CONST T_DPRECT *r, INT n, INT dx, INT dy );
 
 /*
  * dttray.c: what a window copies goes to the tray (design 18.16) as an
@@ -353,6 +355,7 @@ IMPORT ER     dt_plugin_import( CONST char *dir, TS_UUID *p_prog );
 /* dtres.c: the faces and the pictures of the ground as objects (design 18.18) */
 IMPORT INT    dt_res_faces( void );
 IMPORT ER     dt_res_wall( UINT mode );
+IMPORT ER     dt_font_req( CONST T_DTREQ *rq, T_DTANS *an );	/* DT_RQ_FONT_* (dtreq.h) */
 IMPORT DTWIN *dt_showing( CONST TS_UUID *id );
 IMPORT ER     dt_save( DTWIN *d );
 IMPORT void   dt_close( DTWIN *d );
@@ -424,6 +427,9 @@ IMPORT BOOL   dt_disk_detachable( CONST T_VOBJ *v );
 IMPORT BOOL   dt_disk_top( CONST char *path, TS_UUID *p_top );
 IMPORT BOOL   dt_disk_absent( DTWIN *d, CONST T_VOBJ *v );
 IMPORT BOOL   dt_disk_on_delete( DTWIN *d, CONST T_VOBJ *v );
+IMPORT void   dt_disk_create( DTWIN *d );
+IMPORT void   dt_disk_grow( DTWIN *d, CONST T_VOBJ *v );
+IMPORT BOOL   dt_disk_growable( CONST T_VOBJ *v );
 IMPORT BOOL   dt_reachable( CONST T_VOBJ *v );
 
 /*
@@ -663,6 +669,7 @@ IMPORT BOOL   df_panel_carrying( void );
 IMPORT void   df_panel_follow( INT sx, INT sy );
 IMPORT void   df_panel_let_go( void );
 IMPORT INT    df_panel_wid( void );
+IMPORT void   df_panel_poll( void );
 IMPORT ER     df_menu_make( DTWIN *d, ID *p_mid );
 IMPORT void   df_menu_do( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj,
 			  CONST T_VOBJ *v );
@@ -790,6 +797,7 @@ IMPORT ER     dt_type_req( CONST T_DTREQ *rq, T_DTANS *an );
 
 /* The administrator's rights asked of the person for a process (dtadmin.c, DT_RQ_ADMIN) */
 IMPORT ER     dt_admin_ask( ID pid, CONST UB *what, CONST TS_UUID *win );
+IMPORT ER     dt_admin_self( CONST char *name, CONST UB *what );
 IMPORT ER     dt_admin_req( CONST T_DTREQ *rq, ID pid );
 IMPORT void   dt_win_icon( INT wid, CONST char *prog );
 IMPORT void   dt_search_open( DTWIN *from );

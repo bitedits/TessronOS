@@ -89,8 +89,9 @@ typedef struct {
 	T_DPPOINT	scroll;		/* how far the content is wound up */
 	INT		gid;		/* the environment that draws into it */
 	INT		z;		/* 0 is nearest the viewer */
-	UINT		visible;
+	UINT		visible;	/* shown as far as its program asked (wm_show) */
 	INT		parent;		/* a subordinate window's window (wm_set_parent), 0 none */
+	UINT		away;		/* a subordinate window kept out of sight while its group is not in use */
 } T_WMWIN;
 
 /* ---------------------------------------------------------------- the look */
@@ -294,6 +295,11 @@ IMPORT ER  wm_raise( INT wid );
  * raised or lowered (0: its own again). It is carried with parent when
  * parent is moved, and raising it raises parent with it. A window object
  * is made one with "sub":"<the parent window's UUID>" in its metadata.
+ * While the window in use (the one with the keys, or else the nearest
+ * with a name band) is of another group, it is out of sight (T_WMWIN's
+ * away); it comes back, in front of parent, when parent's group is in
+ * use again. A pop-up is never put out of sight. When parent closes, it
+ * is its own window again and is shown.
  */
 IMPORT ER  wm_set_parent( INT wid, INT parent );
 
@@ -658,6 +664,15 @@ IMPORT ER   wm_flush( void );
  */
 #define WM_DRAG_MAX	32
 IMPORT ER   wm_set_drag( CONST T_DPRECT *r, INT n );
+
+/*
+ * What the things about to be carried look like, taken off the screen
+ * where they lie now (screen coordinates): each is then laid in place of
+ * the outline wm_set_drag gives at the same place in the list, while that
+ * outline keeps its size. Given when a carry begins and the person chose
+ * to see windows moved as they go (LK_LIVE); let go with the outlines.
+ */
+IMPORT ER   wm_set_drag_from( CONST T_DPRECT *r, INT n );
 
 /*
  * A picture of w by h pixels (at most WM_LOUPE_MAX each way) laid with

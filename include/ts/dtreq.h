@@ -200,6 +200,50 @@ extern "C" {
 #define DT_HOW_NOTE_GONE	9
 #define DT_NOTE_MS	10000
 
+/*
+ * The faces of the 書体箱 (システム環境設定's 書体 sheet, design 10.3).
+ * A face object is one whose data record is a font file (OpenType,
+ * TrueType, or a collection of them); what each of its faces is
+ * registered as is the JSON of its resource DT_FONT_RES. recno is the
+ * face of the file (0 the first), text one face's settings as that
+ * JSON's members are written:
+ *   {"name":"詳細名","use":true,"family":"…","class":"6050","attr":"0010","base":"…"}
+ *
+ *   DT_RQ_FONT_REG	target copied into the system's volume and linked
+ *			from the 書体箱, its face recno set as text says
+ *			(nothing said: as the object's own resource says);
+ *			into names the copy. With DT_F_FONT_UPDATE a face
+ *			registered before of the same family and look
+ *			(FN_FA_LOOK) is taken out of the box and deleted.
+ *   DT_RQ_FONT_SET	face recno of target, a face of the box, set as
+ *			text says
+ *   DT_RQ_FONT_USE	face recno of target used, or not with DT_F_FONT_OFF;
+ *			E_RONLY for the system's own face
+ *   DT_RQ_FONT_DEL	target taken out of the box and deleted; E_RONLY for
+ *			the object of the system's own face
+ *   DT_RQ_FONT_SAVE	target copied, under a name and onto a disk asked
+ *			for in a panel over win, a link to it put in that
+ *			disk's top (the first window for the system's disk);
+ *			into names the copy, E_ABORT when the panel was put
+ *			away
+ *   DT_RQ_FONT_TRY	face recno of target opened to be looked at, when it
+ *			is not in use: text answers the family a document
+ *			names it by. With DT_F_FONT_DONE the face opened so
+ *			is closed again
+ * REG, SET and DEL are an administrator's: the password is asked for as
+ * for DT_RQ_INSTALL. DT_RQ_FONT_USE is the person's at the machine.
+ */
+#define DT_RQ_FONT_REG	24
+#define DT_RQ_FONT_SET	25
+#define DT_RQ_FONT_USE	26
+#define DT_RQ_FONT_DEL	27
+#define DT_RQ_FONT_SAVE	28
+#define DT_RQ_FONT_TRY	29
+#define DT_F_FONT_UPDATE 0x0040
+#define DT_F_FONT_OFF	0x0080
+#define DT_F_FONT_DONE	0x0100
+#define DT_FONT_RES	"_0_font.json"
+
 #define DT_F_HIDDEN	0x0002		/* the link is hidden (隠蔽仮身) */
 #define DT_F_KEEP	0x0004		/* the link keeps to its program (起動アプリの固定) */
 

@@ -264,13 +264,7 @@ LOCAL UD bus_addr( UD pa )
 
 LOCAL void dcache_flush( CONST void *p, UD len )
 {
-	UBINT	a = (UBINT)p & ~63ULL, end = (UBINT)p + len;
-
-	Asm("dsb sy" ::: "memory");
-	for ( ; a < end; a += 64 ) {
-		Asm("dc civac, %0" :: "r"(a) : "memory");
-	}
-	Asm("dsb sy" ::: "memory");
+	DCacheFlushRange(p, len);
 }
 
 /* ---------------------------------------------------------------- MDIO */

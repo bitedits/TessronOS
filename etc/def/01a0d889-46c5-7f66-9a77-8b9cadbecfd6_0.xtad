@@ -1,7 +1,7 @@
 <tad version="1.0" encoding="UTF-8" filename="予定表の表示">
 <document>
 <p>予定表の表示</p>
-<p>予定表の窓の表示。月の移動、全画面表示、再表示、背景色、隠蔽仮身。メニューの定義。</p>
+<p>予定表のウインドウの表示。月の移動、全画面表示、再表示、背景色、隠蔽仮身。メニューの定義。</p>
 </document>
 <menu>
 <item code="today">今日へ移動</item>

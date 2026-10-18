@@ -17,7 +17,11 @@
  *	切り離し takes a volume away again, unless an object of it is open
  *	in a window or by a program. The links to its objects stay, drawn
  *	pale (虚身), and come back as they were when it is attached again.
- *	状態表示 tells how full the disk of an object is.
+ *	状態表示 tells how full the disk of an object is. 区画作成 makes a
+ *	TSFS partition in a free stretch of a disk, a volume on it, and
+ *	attaches it; 拡張 makes the partition of a volume, and the volume,
+ *	larger into the free stretch after it (gpt.h). Either on the disk
+ *	the system volume is on asks for the administrator's password.
  *
  *	The volumes the person attached are remembered by their UUIDs in
  *	the device box (knl_obdev_vols_put) until they are taken away with
@@ -48,6 +52,7 @@
 #include <ts/tsfs.h>
 #include <ts/tad.h>
 #include <ts/uuid.h>
+#include <ts/gpt.h>
 #include "desktop.h"
 
 #define DK_DISKS	2048		/* disks and partitions looked at: as many as the device manager knows */
@@ -59,6 +64,8 @@
 
 #define PN_DISK		10		/* the panel's choices, one per partition */
 #define PN_TO		40		/* where changes of a window whose disk went are to go */
+#define PN_SIZE		70		/* 区画作成 and 拡張: the size in megabytes */
+#define PN_LABEL	71		/* 区画作成: the label of the volume made */
 
 /* A record whose disk went while it had changes, kept until the disk is back */
 typedef struct {
@@ -989,6 +996,344 @@ EXPORT void dt_disk_status( DTWIN *d, CONST T_VOBJ *v )
 	(void)dt_pn_run(d, def, &pid);
 	dt_pn_done(d, pid);
 	wm_update();
+}
+
+/* ---------------------------------------------------------------- 区画作成 */
+
+/* The disk the system volume is on ("sda" of "sda1"), or "" */
+LOCAL void sys_disk( UB *out, INT max )
+{
+	INT	n = 0;
+
+	out[0] = 0;
+#ifdef CNF_OB_SYSVOL
+	{
+		CONST char	*s = CNF_OB_SYSVOL;
+		INT		k;
+
+		while ( s[n] != '\0' && n < max - 1 ) n++;
+		for ( k = n; k > 0 && s[k - 1] >= '0' && s[k - 1] <= '9'; k-- ) ;
+		knl_memcpy(out, s, k);
+		out[k] = 0;
+	}
+#endif
+}
+
+LOCAL BOOL same_name( CONST UB *a, CONST UB *b )
+{
+	return (BOOL)( knl_strcmp((CONST char *)a, (CONST char *)b) == 0 );
+}
+
+/* The number in a number box, in megabytes; -1 when it cannot be read */
+LOCAL D box_mb( INT pid, INT num )
+{
+	INT	v = 0;
+
+	return ( wm_panel_get(pid, num, &v) >= E_OK ) ? (D)v : -1;
+}
+
+/* A box of a number, set to `v` */
+LOCAL T_WMPART *num_box( T_WMPANEL *def, INT num, INT l, INT t, INT w, UD v )
+{
+	T_WMPART	*pt = dt_pn_add(def, WM_PT_NUMBOX, num, l, t, w, 26, NULL);
+	INT		k;
+
+	if ( pt != NULL ) {
+		k = put_num(pt->text, 0, WM_LABEL_MAX, v);
+		pt->caret = k;
+		pt->value = (INT)v;
+	}
+	return pt;
+}
+
+/* A free stretch of a disk, as the panel of 区画作成 offers it */
+typedef struct {
+	UB	disk[OB_DV_NAME];
+	UD	first, last;
+	BOOL	fresh;			/* the disk has no table yet */
+	BOOL	system;			/* the disk the system volume is on */
+} DKFREE;
+
+#define DK_MIN_MB	8		/* a stretch smaller than this is not offered */
+
+/*
+ * 区画作成: the free stretches of the disks, a size and a label, and a
+ * TSFS partition made in the stretch chosen, a volume made on it and
+ * attached, and remembered as attached (as 接続 does).
+ */
+EXPORT void dt_disk_create( DTWIN *d )
+{
+	UB		*names, (*rows)[WM_LABEL_MAX], sd[OB_DV_NAME], label[OB_VOL_LABEL];
+	UB		part[OB_DV_NAME], name[OB_VOL_LABEL + 16], msg[OB_VOL_LABEL + 96];
+	DKFREE		*fr;
+	T_GPTFREE	g[8];
+	T_WMPANEL	*def;
+	T_WMPART	*pt;
+	INT		n, i, j, k, m = 0, pid, w = 560, h, top, pick = -1;
+	UINT		ans;
+	D		mb = 0;
+	ER		er;
+
+	if ( d == NULL ) {
+		d = dt_first_win();
+	}
+	if ( d == NULL ) {
+		return;
+	}
+	names = (UB *)Kmalloc((SZ)OB_DV_NAME * DK_DISKS);
+	rows = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * DK_ROWS);
+	fr = (DKFREE *)Kmalloc(sizeof(DKFREE) * DK_ROWS);
+	if ( names == NULL || rows == NULL || fr == NULL ) {
+		goto done;
+	}
+	sys_disk(sd, sizeof(sd));
+	n = knl_obdev_disks(names, DK_DISKS);
+	for ( i = 0; i < n && m < DK_ROWS; i++ ) {
+		CONST char	*dev = (CONST char *)( names + i * OB_DV_NAME );
+		UD		nsect = 0;
+		BOOL		fresh = FALSE;
+		INT		c;
+
+		k = (INT)knl_strlen(dev);
+		if ( k == 0 || ( dev[k - 1] >= '0' && dev[k - 1] <= '9' ) ) {
+			continue;		/* a partition: the disks are looked at whole */
+		}
+		c = knl_gpt_free(dev, g, 8, &nsect, &fresh);
+		for ( j = 0; j < c && m < DK_ROWS; j++ ) {
+			UD	bytes = ( g[j].last - g[j].first + 1 ) * 512;
+
+			if ( bytes < (UD)DK_MIN_MB << 20 ) continue;
+			knl_memcpy(fr[m].disk, dev, OB_DV_NAME);
+			fr[m].first = g[j].first;
+			fr[m].last = g[j].last;
+			fr[m].fresh = fresh;
+			fr[m].system = same_name((CONST UB *)dev, sd);
+			k = put(rows[m], 0, WM_LABEL_MAX, dev);
+			k = put(rows[m], k, WM_LABEL_MAX, "  空き ");
+			k = put_size(rows[m], k, WM_LABEL_MAX, bytes);
+			k = put(rows[m], k, WM_LABEL_MAX, "(");
+			k = put_size(rows[m], k, WM_LABEL_MAX, g[j].first * 512);
+			k = put(rows[m], k, WM_LABEL_MAX, "の位置から)");
+			if ( fresh ) {
+				k = put(rows[m], k, WM_LABEL_MAX, " 区画表なし");
+			}
+			if ( fr[m].system ) {
+				(void)put(rows[m], k, WM_LABEL_MAX, " システムのディスク");
+			}
+			m++;
+		}
+	}
+	tm_printf((UB *)"disk: create offers %d\n", m);
+	if ( m == 0 ) {
+		dt_tell(d, "区画を作れる空き領域がありません", NULL);
+		goto done;
+	}
+	h = 176 + 26 * m;
+	def = dt_pn_new(w, h);
+	if ( def == NULL ) {
+		goto done;
+	}
+	dt_pn_add(def, WM_PT_LABEL, 0, 14, 4, w - 28, 22, "区画を作る空き領域:");
+	for ( i = 0; i < m; i++ ) {
+		pt = dt_pn_add(def, WM_PT_CHOICE, PN_DISK + i, 24, 30 + 26 * i, w - 48, 22,
+			       (CONST char *)rows[i]);
+		if ( pt != NULL ) {
+			pt->group = PN_DISK;
+			pt->value = ( i == 0 ) ? 1 : 0;
+		}
+	}
+	top = 38 + 26 * m;
+	dt_pn_add(def, WM_PT_LABEL, 0, 14, top + 2, 90, 22, "大きさ:");
+	(void)num_box(def, PN_SIZE, 104, top, 110, 0);
+	dt_pn_add(def, WM_PT_LABEL, 0, 222, top + 2, w - 236, 22, "MB(0は空き領域の全体)");
+	top += 34;
+	dt_pn_add(def, WM_PT_LABEL, 0, 14, top + 2, 90, 22, "ラベル:");
+	pt = dt_pn_add(def, WM_PT_BOX | P_JP, PN_LABEL, 104, top, w - 118, 26, NULL);
+	if ( pt != NULL ) {
+		k = put(pt->text, 0, WM_LABEL_MAX, "ディスク");
+		pt->caret = k;
+	}
+	dt_pn_buttons(def, "作成");
+	ans = dt_pn_run(d, def, &pid);
+	label[0] = 0;
+	if ( ans == WM_ANS_OK && pid >= 0 ) {
+		for ( i = 0; i < m; i++ ) {
+			if ( dt_pn_value(pid, PN_DISK + i) != 0 ) pick = i;
+		}
+		mb = box_mb(pid, PN_SIZE);
+		if ( wm_panel_text(pid, PN_LABEL, label, sizeof(label)) < E_OK ) label[0] = 0;
+	}
+	dt_pn_done(d, pid);
+	wm_update();
+	if ( pick < 0 ) {
+		tm_printf((UB *)"disk: create cancelled\n");
+		goto done;
+	}
+	if ( mb < 0 || (UD)mb * 2048 > fr[pick].last - fr[pick].first + 1 || ( mb > 0 && mb < DK_MIN_MB ) ) {
+		tm_printf((UB *)"disk: create %s refused: %d MB\n", fr[pick].disk, (INT)mb);
+		dt_tell(d, "その大きさの区画は作れません", "空き領域に収まる、8MB以上の大きさにしてください");
+		goto done;
+	}
+	if ( label[0] == 0 ) {
+		(void)put(label, 0, sizeof(label), "ディスク");
+	}
+	if ( fr[pick].system && dt_admin_self("ディスク操作", (CONST UB *)"システムのディスクに区画を作る") < E_OK ) {
+		tm_printf((UB *)"disk: create %s refused: not the administrator\n", fr[pick].disk);
+		goto done;
+	}
+	er = knl_tsfs_part_make((CONST char *)fr[pick].disk, fr[pick].first, (UD)mb << 20,
+				(CONST char *)label, part, sizeof(part));
+	tm_printf((UB *)"disk: created %s %d MB \"%s\" (%d)\n", part,
+		  (INT)( ( mb > 0 ) ? mb : (D)( ( fr[pick].last - fr[pick].first + 1 ) / 2048 ) ),
+		  (CONST char *)label, (INT)er);
+	if ( er < E_OK ) {
+		dt_tell(d, "区画を作れませんでした", NULL);
+		goto done;
+	}
+	/* the volume made is the person's, as one 接続 attached */
+	er = attach_dev((CONST char *)part, TRUE, name, sizeof(name));
+	if ( er < E_OK ) {
+		dt_tell(d, "区画は作りましたが、接続できませんでした", NULL);
+		goto done;
+	}
+	k = put(msg, 0, sizeof(msg), "区画「");
+	k = put(msg, k, sizeof(msg), (CONST char *)name);
+	(void)put(msg, k, sizeof(msg), "」を作り、接続しました");
+	(void)wm_msg_put((CONST char *)msg);
+
+    done:
+	if ( names != NULL ) Kfree(names);
+	if ( rows != NULL ) Kfree(rows);
+	if ( fr != NULL ) Kfree(fr);
+	wm_update();
+}
+
+/* ---------------------------------------------------------------- 拡張 */
+
+/*
+ * The volume 拡張 works on: that of the link's object, the system's away
+ * from a link. FALSE when it is not a native volume.
+ */
+LOCAL BOOL grow_target( CONST T_VOBJ *v, UB *path, INT max, T_OBFVREF *ref )
+{
+	if ( ( v != NULL && knl_obfile_path_of(&v->target, path, max) < E_OK )
+	  || ( v == NULL && knl_obfile_vols(path, max, 1) != 1 ) ) {
+		return FALSE;
+	}
+	return (BOOL)( knl_obfile_vol_ref((CONST char *)path, ref) >= E_OK && ref->native );
+}
+
+/* Whether 拡張 can be chosen on a link: grey in the menu otherwise */
+EXPORT BOOL dt_disk_growable( CONST T_VOBJ *v )
+{
+	UB		path[DK_PATH];
+	T_OBFVREF	ref;
+
+	return grow_target(v, path, sizeof(path), &ref);
+}
+
+/*
+ * 拡張: the partition of the volume of the link's object (the system's
+ * away from a link) and the volume on it made larger, into the free
+ * stretch right after the partition, to the size typed (the whole
+ * stretch at first).
+ */
+EXPORT void dt_disk_grow( DTWIN *d, CONST T_VOBJ *v )
+{
+	UB		path[DK_PATH], name[OB_VOL_LABEL + 16], t[WM_LABEL_MAX], msg[OB_VOL_LABEL + 96];
+	T_OBFVREF	ref;
+	T_GPTPART	gp;
+	T_OBVOL		vol;
+	T_WMPANEL	*def;
+	UD		cur, most, from = 0, to = 0;
+	INT		k, pid, w = 480, h = 206;
+	UINT		ans;
+	D		mb = -1;
+	ER		er;
+
+	if ( d == NULL ) {
+		d = dt_first_win();
+	}
+	if ( d == NULL ) {
+		return;
+	}
+	if ( !grow_target(v, path, sizeof(path), &ref) ) {
+		dt_tell(d, "このディスクは広げられません", NULL);
+		return;
+	}
+	disk_name(ref.label, (CONST char *)path, name, sizeof(name));
+	if ( knl_gpt_part((CONST char *)path, &gp) < E_OK || !gp.tsfs ) {
+		tm_printf((UB *)"disk: grow %s: not a partition of a GPT\n", path);
+		dt_tell(d, "このディスクは広げられません", "区画表(GPT)のTSFSの区画ではありません");
+		return;
+	}
+	cur = ( gp.last - gp.first + 1 ) * 512;
+	most = ( gp.grow_last - gp.first + 1 ) * 512;
+	if ( ob_ref_vol(( v != NULL ) ? &v->target : NULL, &vol) >= E_OK && vol.blocks * vol.bsize < cur ) {
+		cur = vol.blocks * vol.bsize;	/* a partition larger than its volume: that much to take in */
+	}
+	tm_printf((UB *)"disk: grow %s offers %d MB to %d MB\n", path, (INT)( cur >> 20 ), (INT)( most >> 20 ));
+	if ( most <= cur ) {
+		dt_tell(d, "広げられる空き領域がありません", "区画のすぐ後ろに空き領域が要ります");
+		return;
+	}
+	def = dt_pn_new(w, h);
+	if ( def == NULL ) {
+		return;
+	}
+	k = put(t, 0, sizeof(t), "ディスク「");
+	k = put(t, k, sizeof(t), (CONST char *)name);
+	k = put(t, k, sizeof(t), "」(");
+	k = put(t, k, sizeof(t), (CONST char *)path);
+	(void)put(t, k, sizeof(t), ")を広げます");
+	dt_pn_add(def, WM_PT_LABEL, 0, 14, 4, w - 28, 22, (CONST char *)t);
+	dt_pn_add(def, WM_PT_LABEL, 0, 24, 32, 150, 22, "今の大きさ:");
+	k = put_num(t, 0, sizeof(t), cur >> 20);
+	(void)put(t, k, sizeof(t), "MB");
+	dt_pn_add(def, WM_PT_LABEL, 0, 180, 32, w - 194, 22, (CONST char *)t);
+	dt_pn_add(def, WM_PT_LABEL, 0, 24, 58, 150, 22, "広げられる大きさ:");
+	k = put(t, 0, sizeof(t), "最大 ");
+	k = put_num(t, k, sizeof(t), most >> 20);
+	(void)put(t, k, sizeof(t), "MB");
+	dt_pn_add(def, WM_PT_LABEL, 0, 180, 58, w - 194, 22, (CONST char *)t);
+	dt_pn_add(def, WM_PT_LABEL, 0, 24, 94, 150, 22, "新しい大きさ:");
+	(void)num_box(def, PN_SIZE, 180, 92, 120, most >> 20);
+	dt_pn_add(def, WM_PT_LABEL, 0, 308, 94, 60, 22, "MB");
+	dt_pn_buttons(def, "拡張");
+	ans = dt_pn_run(d, def, &pid);
+	if ( ans == WM_ANS_OK && pid >= 0 ) {
+		mb = box_mb(pid, PN_SIZE);
+	}
+	dt_pn_done(d, pid);
+	wm_update();
+	if ( ans != WM_ANS_OK ) {
+		tm_printf((UB *)"disk: grow cancelled\n");
+		return;
+	}
+	if ( mb < 0 || ( (UD)mb << 20 ) <= cur || ( (UD)mb << 20 ) > most ) {
+		tm_printf((UB *)"disk: grow %s refused: %d MB\n", path, (INT)mb);
+		dt_tell(d, "その大きさには広げられません", "今の大きさより大きく、最大までの大きさにしてください");
+		return;
+	}
+	if ( ref.system && dt_admin_self("ディスク操作", (CONST UB *)"システムのディスクを広げる") < E_OK ) {
+		tm_printf((UB *)"disk: grow %s refused: not the administrator\n", path);
+		return;
+	}
+	er = knl_tsfs_part_grow((CONST char *)path, (UD)mb << 20, &from, &to);
+	tm_printf((UB *)"disk: grown %s %d MB -> %d MB (%d)\n", path, (INT)( from >> 20 ), (INT)( to >> 20 ), (INT)er);
+	if ( er < E_OK ) {
+		dt_tell(d, "ディスクを広げられませんでした", NULL);
+		return;
+	}
+	k = put(msg, 0, sizeof(msg), "ディスク「");
+	k = put(msg, k, sizeof(msg), (CONST char *)name);
+	k = put(msg, k, sizeof(msg), "」を");
+	k = put_num(msg, k, sizeof(msg), from >> 20);
+	k = put(msg, k, sizeof(msg), "MBから");
+	k = put_num(msg, k, sizeof(msg), to >> 20);
+	(void)put(msg, k, sizeof(msg), "MBに広げました");
+	(void)wm_msg_put((CONST char *)msg);
+	dt_draw_all();
 }
 
 /* ---------------------------------------------------------------- the top of a volume */

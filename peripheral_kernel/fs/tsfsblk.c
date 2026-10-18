@@ -91,6 +91,7 @@
 #define SB_FSCKTIME	376
 #define SB_MKFSTIME	384
 #define SB_XREFUUID	400
+#define SB_GROWTO	416
 #define SB_CRC		4092
 
 /* the common head */
@@ -111,10 +112,12 @@
 #define AG_SPARE	108
 #define AG_MAPCRC	128
 
-/* Features: none are known yet beyond what version 4 is */
-#define KNOWN_COMPAT	0ULL
+/* Features beyond what version 4 is: a volume grown, and one being grown */
+#define KNOWN_COMPAT	TSFSBLK_COMPAT_GROWN
 #define KNOWN_ROCOMPAT	0ULL
-#define KNOWN_INCOMPAT	0ULL
+#define KNOWN_INCOMPAT	TSFSBLK_INCOMPAT_GROWING
+
+#define AG_RETIRED	8		/* tables of groups a grow replaced, kept until the volume closes */
 
 typedef struct {
 	UD	first;			/* first block of the group */
@@ -161,6 +164,10 @@ typedef struct {
 	BOOL		cut;		/* a cut is set */
 	ID		no;		/* its number, where it sits in the table */
 	BOOL		used;
+	UB		devnm[L_DEVNM + 4];	/* the device it was opened on */
+	UD		ag_n;		/* entries of ag */
+	TSFSAG		*ag_old[AG_RETIRED];	/* read without the lock (in_group_meta): freed at close */
+	INT		ag_nold;
 } TSFSBLKVOL;
 
 /*
@@ -263,6 +270,7 @@ LOCAL void sb_pack( CONST T_TSFSBLK_SB *sb, UB *buf )
 	wr64(buf + SB_FSCKTIME, sb->fsck_time);
 	wr64(buf + SB_MKFSTIME, sb->mkfs_time);
 	cpy16(buf + SB_XREFUUID, sb->xref_uuid.b);
+	wr64(buf + SB_GROWTO, sb->grow_to);
 	wr32(buf + SB_CRC, ts_crc32c(buf, SB_CRC));
 }
 
@@ -312,6 +320,7 @@ LOCAL ER sb_unpack( CONST UB *buf, T_TSFSBLK_SB *sb )
 	sb->mount_time    = rd64(buf + SB_MOUNTTIME);
 	sb->fsck_time     = rd64(buf + SB_FSCKTIME);
 	sb->mkfs_time     = rd64(buf + SB_MKFSTIME);
+	sb->grow_to       = rd64(buf + SB_GROWTO);
 
 	if ( sb->version != TSFSBLK_VERSION || sb->block_size != TSFSBLK_BLOCK_SIZE ) {
 		return E_NOSPT;
@@ -333,6 +342,7 @@ LOCAL ER sb_unpack( CONST UB *buf, T_TSFSBLK_SB *sb )
 typedef struct {
 	ID	dd;
 	UD	rd, wr, fl;
+	UD	run;		/* blocks asked for at once (TDN_IOMAX), 0 for the default */
 } DEVIO;
 
 LOCAL DEVIO	dev_io[CNF_MAX_OPNDEV + 1];	/* by descriptor: each is one open device */
@@ -344,8 +354,14 @@ LOCAL DEVIO *io_of( ID dd )
 
 LOCAL void io_open( ID dd )
 {
+	UW	max = 0;
+	SZ	asize = 0;
+
 	if ( dd > 0 && dd <= CNF_MAX_OPNDEV ) {
 		dev_io[dd].rd = dev_io[dd].wr = dev_io[dd].fl = 0;
+		/* what the device takes best at once; a device that does not say keeps the default */
+		dev_io[dd].run = ( tk_srea_dev(dd, TDN_IOMAX, &max, sizeof(max), &asize) >= E_OK
+				   && asize == (SZ)sizeof(max) ) ? (UD)max / TSFSBLK_BLOCK_SIZE : 0;
 		__atomic_store_n(&dev_io[dd].dd, dd, __ATOMIC_RELEASE);
 	}
 }
@@ -1101,6 +1117,28 @@ LOCAL ER ag_load( TSFSBLKVOL *v, UD n, UB *buf )
 }
 
 /*
+ * A new table of the groups in place of the one there was. The old one
+ * may still be read by a reader that took the pointer without the lock
+ * (in_group_meta), so it is kept until the volume closes; past
+ * AG_RETIRED of them the oldest goes.
+ */
+LOCAL void ag_retire( TSFSBLKVOL *v, TSFSAG *a, UD n )
+{
+	INT	i;
+
+	if ( v->ag != NULL ) {
+		if ( v->ag_nold == AG_RETIRED ) {
+			Kfree(v->ag_old[0]);
+			for ( i = 1; i < AG_RETIRED; i++ ) v->ag_old[i - 1] = v->ag_old[i];
+			v->ag_nold--;
+		}
+		v->ag_old[v->ag_nold++] = v->ag;
+	}
+	__atomic_store_n(&v->ag, a, __ATOMIC_RELEASE);
+	v->ag_n = n;
+}
+
+/*
  * Read what the volume is: the superblock, then every group head.
  * A group head that fails its check is an error on the volume.
  */
@@ -1122,19 +1160,26 @@ LOCAL ER vol_load( TSFSBLKVOL *v )
 	v->ag_first = v->sb.journal_start + v->sb.journal_blocks;
 	v->data_end = v->ag_first + v->sb.ag_count * v->sb.ag_blocks;
 	if ( v->data_end > v->sb.total_blocks ) v->data_end = v->sb.total_blocks;
-	if ( v->ag == NULL ) {
-		v->ag = (TSFSAG *)Kmalloc(sizeof(TSFSAG) * v->sb.ag_count);
-		if ( v->ag == NULL ) {
+	if ( v->ag == NULL || v->ag_n < v->sb.ag_count ) {
+		TSFSAG	*a = (TSFSAG *)Kmalloc(sizeof(TSFSAG) * v->sb.ag_count);
+
+		if ( a == NULL ) {
 			Kfree(buf);
 			return E_NOMEM;
 		}
+		ag_retire(v, a, v->sb.ag_count);
 	}
 	for ( n = 0; n < v->sb.ag_count; n++ ) {
-		if ( ag_load(v, n, buf) < E_OK ) {
+		BOOL	growing = (BOOL)( ( v->sb.incompat & TSFSBLK_INCOMPAT_GROWING ) != 0
+					  && n == v->sb.ag_count - 1 );
+
+		/* a grow cut short may have written the last group's head and
+		   map anew already: it is made again when the grow is finished */
+		if ( growing || ag_load(v, n, buf) < E_OK ) {
 			TSFSAG	a;
 
 			ag_shape(v->ag_first, v->sb.ag_blocks, v->data_end, n, &a);
-			note_error(v, a.first, TSFSBLK_ERR_CSUM);
+			if ( !growing ) note_error(v, a.first, TSFSBLK_ERR_CSUM);
 			v->ag[n] = a;
 			v->ag[n].free = 0;		/* nothing is taken from it */
 			continue;
@@ -1316,6 +1361,259 @@ LOCAL ER cache_flush( TSFSBLKVOL *v )
 	return er;
 }
 
+/* ---------------------------------------------------------------- growing */
+
+/*
+ * A volume grows in place (ts_grow_vol_blk). The journal and the size
+ * of a group stay as they were made: the last group is made whole, or
+ * as long as the new end allows, and groups are added after it. In
+ * order:
+ *
+ *	1. the superblock, with GROWING and where it is going (grow_to);
+ *	2. each group added: its map, then its head, all past the old end;
+ *	3. the last group: its map made longer, then its head;
+ *	4. every spare superblock, with the new size;
+ *	5. the superblock with the new size and GROWN, without GROWING,
+ *	   and again to the other copy.
+ *
+ * Until 5 reaches the medium the superblock read at opening is the one
+ * of 1, and the opening does 2 to 5 again from what the medium holds
+ * (grow_finish). The last group's map then comes from its blocks as
+ * they are, without their checksums: whether a block is the one from
+ * before or the one written, the bits of the blocks the group had are
+ * the same in both, but for the map blocks the group grows into, which
+ * were free before and are taken after.
+ */
+
+/* Groups a volume of `total` blocks has with the journal and the group size it has */
+LOCAL UD grown_count( UD ag_first, UD agb, UD total )
+{
+	UD	data = total - ag_first, n = data / agb;
+
+	if ( data % agb >= AG_MIN_TAIL ) n++;
+	return n;
+}
+
+/* Bits [from, to) of a map block set */
+LOCAL void bits_set( UB *buf, UD from, UD to )
+{
+	UD	n;
+
+	if ( to > BITS_PER_MAP ) to = BITS_PER_MAP;
+	while ( from < to && ( from & 7 ) != 0 ) {
+		buf[from >> 3] |= (UB)( 1 << ( from & 7 ) );
+		from++;
+	}
+	if ( from < to && to - from >= 8 ) {
+		n = ( to - from ) >> 3;
+		knl_memset(buf + ( from >> 3 ), 0xFF, (SZ)n);
+		from += n << 3;
+	}
+	while ( from < to ) {
+		buf[from >> 3] |= (UB)( 1 << ( from & 7 ) );
+		from++;
+	}
+}
+
+/*
+ * Map block `k` of group `a`: the blocks the group uses itself and those
+ * past its end taken, the others free, except that below `keep` (in the
+ * group) each bit is the one `old` has. Answers the free blocks it holds.
+ */
+LOCAL UD map_make( CONST TSFSAG *a, UD k, CONST UB *old, UD keep, UB *buf )
+{
+	UD	base = k * BITS_PER_MAP, meta = ag_meta(a), n, i, used = 0, lim;
+
+	knl_memset(buf, 0, TSFSBLK_BLOCK_SIZE);
+	if ( old != NULL && keep > base ) {
+		n = keep - base;
+		if ( n > BITS_PER_MAP ) n = BITS_PER_MAP;
+		knl_memcpy(buf, old, (SZ)( n >> 3 ));
+		for ( i = n & ~(UD)7; i < n; i++ ) {
+			buf[i >> 3] |= (UB)( old[i >> 3] & ( 1 << ( i & 7 ) ) );
+		}
+	}
+	if ( meta > base ) bits_set(buf, 0, meta - base);
+	bits_set(buf, ( a->len > base ) ? a->len - base : 0, BITS_PER_MAP);
+
+	lim = ( a->len > base ) ? a->len - base : 0;
+	if ( lim > BITS_PER_MAP ) lim = BITS_PER_MAP;
+	for ( i = 0; i + 8 <= lim; i += 8 ) used += (UD)__builtin_popcount(buf[i >> 3]);
+	for ( ; i < lim; i++ ) used += ( buf[i >> 3] >> ( i & 7 ) ) & 1;
+	return lim - used;
+}
+
+/*
+ * The last group's map as the medium holds it, into `old` (AG_MAX_MAP
+ * blocks). `check`: each block has to match the checksum its head keeps.
+ */
+LOCAL ER grow_old_map( TSFSBLKVOL *v, UB *old, BOOL check )
+{
+	TSFSAG	*l = &v->ag[v->sb.ag_count - 1];
+	UW	k;
+
+	for ( k = 0; k < l->map_blocks; k++ ) {
+		UB	*b = old + k * TSFSBLK_BLOCK_SIZE;
+
+		if ( meta_read(VOL_ID(v), v->dd, l->map_first + k, b) < E_OK ) {
+			return E_IO;
+		}
+		if ( check && ts_crc32c(b, TSFSBLK_BLOCK_SIZE) != l->crc[k] ) {
+			note_error(v, l->map_first + k, TSFSBLK_ERR_CSUM);
+			return E_IO;
+		}
+	}
+	return E_OK;
+}
+
+/* Whether the blocks the last group's map grows into, on its way to `total`, are free */
+LOCAL BOOL grow_room( TSFSBLKVOL *v, UD total, CONST UB *old )
+{
+	TSFSAG	was, now;
+	UD	n0 = v->sb.ag_count, end, off;
+
+	end = v->ag_first + grown_count(v->ag_first, v->sb.ag_blocks, total) * v->sb.ag_blocks;
+	if ( end > total ) end = total;
+	ag_shape(v->ag_first, v->sb.ag_blocks, v->data_end, n0 - 1, &was);
+	ag_shape(v->ag_first, v->sb.ag_blocks, end, n0 - 1, &now);
+	for ( off = ag_meta(&was); off < ag_meta(&now); off++ ) {
+		/* past the group's old end a block was in no group, and free */
+		if ( off < was.len && ( ( old[off >> 3] >> ( off & 7 ) ) & 1 ) != 0 ) {
+			return FALSE;
+		}
+	}
+	return TRUE;
+}
+
+/* Steps 2 to 5, with the volume's lock held; `old` is the last group's map before */
+LOCAL ER grow_write( TSFSBLKVOL *v, UD total, CONST UB *old )
+{
+	T_TSFSBLK_SB	ns;
+	TSFSAG		*na, was, a;
+	UB		*buf;
+	UD		agb = v->sb.ag_blocks, n0 = v->sb.ag_count, n1, end, n, k, sum = 0;
+	ER		er = E_OK;
+
+	n1 = grown_count(v->ag_first, agb, total);
+	end = v->ag_first + n1 * agb;
+	if ( end > total ) end = total;
+	ag_shape(v->ag_first, agb, v->data_end, n0 - 1, &was);
+	buf = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	na = (TSFSAG *)Kmalloc(sizeof(TSFSAG) * n1);
+	if ( buf == NULL || na == NULL ) {
+		er = E_NOMEM;
+		goto out;
+	}
+	for ( n = 0; n + 1 < n0; n++ ) {
+		na[n] = v->ag[n];
+		sum += na[n].free;
+	}
+
+	/* 2: the groups added, each whole before anything says it is there */
+	for ( n = n0; n < n1 && er >= E_OK; n++ ) {
+		ag_shape(v->ag_first, agb, end, n, &a);
+		a.free = 0;
+		for ( k = 0; k < a.map_blocks && er >= E_OK; k++ ) {
+			a.free += map_make(&a, k, NULL, 0, buf);
+			a.crc[k] = ts_crc32c(buf, TSFSBLK_BLOCK_SIZE);
+			if ( meta_write(VOL_ID(v), v->dd, a.map_first + k, buf) < E_OK ) er = E_IO;
+		}
+		a.dirty = FALSE;
+		ag_pack_as(&v->sb.vol_uuid, v->sb.journal_seq, n, &a, buf);
+		if ( er >= E_OK && meta_write(VOL_ID(v), v->dd, a.first, buf) < E_OK ) er = E_IO;
+		na[n] = a;
+		sum += a.free;
+	}
+
+	/* 3: the last group, longer; its map past what it had is free */
+	ag_shape(v->ag_first, agb, end, n0 - 1, &a);
+	a.free = 0;
+	for ( k = 0; k < a.map_blocks && er >= E_OK; k++ ) {
+		a.free += map_make(&a, k, ( k < was.map_blocks ) ? old + k * TSFSBLK_BLOCK_SIZE : NULL,
+				   was.len, buf);
+		a.crc[k] = ts_crc32c(buf, TSFSBLK_BLOCK_SIZE);
+		if ( meta_write(VOL_ID(v), v->dd, a.map_first + k, buf) < E_OK ) er = E_IO;
+	}
+	a.dirty = FALSE;
+	ag_pack_as(&v->sb.vol_uuid, v->sb.journal_seq, n0 - 1, &a, buf);
+	if ( er >= E_OK && meta_write(VOL_ID(v), v->dd, a.first, buf) < E_OK ) er = E_IO;
+	na[n0 - 1] = a;
+	sum += a.free;
+	if ( er >= E_OK ) (void)dev_flush(v->dd);
+
+	/* 4: the spares, with the new size */
+	ns = v->sb;
+	ns.total_blocks = total;
+	ns.ag_count = n1;
+	ns.free_blocks = sum;
+	ns.incompat &= ~TSFSBLK_INCOMPAT_GROWING;
+	ns.compat |= TSFSBLK_COMPAT_GROWN;
+	ns.grow_to = 0;
+	sb_pack(&ns, buf);
+	for ( n = 1; n < n1 && er >= E_OK; n++ ) {
+		if ( na[n].spare && meta_write(VOL_ID(v), v->dd, na[n].first + 1, buf) < E_OK ) er = E_IO;
+	}
+	if ( er < E_OK ) {
+		note_error(v, v->ag_first, TSFSBLK_ERR_IO);
+		goto out;
+	}
+	(void)dev_flush(v->dd);
+
+	/* 5: what memory holds, then the superblock that makes it real */
+	if ( v->cache_blk != ~(UD)0 ) {
+		v->cache_blk = ~(UD)0;		/* the last group's map block may be in it */
+		v->cache_dirty = FALSE;
+	}
+	ag_retire(v, na, n1);
+	na = NULL;
+	v->data_end = end;
+	v->sb = ns;
+	v->sb_dirty = TRUE;
+	er = sb_write(v);
+	if ( er >= E_OK ) {
+		v->sb_dirty = TRUE;
+		er = sb_write(v);		/* the copy that still said GROWING */
+	}
+
+    out:
+	if ( buf != NULL ) Kfree(buf);
+	if ( na != NULL ) Kfree(na);
+	return er;
+}
+
+/*
+ * A grow cut short, finished at opening: the superblock says GROWING
+ * and where to. A device smaller than that (its partition was not made
+ * larger after all) cannot hold it: an error, and the volume does not
+ * write.
+ */
+LOCAL ER grow_finish( TSFSBLKVOL *v )
+{
+	DiskInfo	info;
+	UB		*old;
+	SZ		asize;
+	UD		total = v->sb.grow_to;
+	ER		er;
+
+	if ( tk_srea_dev(v->dd, TDN_DISKINFO, &info, sizeof(info), &asize) < E_OK
+	  || total <= v->sb.total_blocks || total > (UD)info.blockcont / TSFSBLK_SECT_PER_BLK ) {
+		note_error(v, 0, TSFSBLK_ERR_IO);
+		return E_OBJ;
+	}
+	old = (UB *)Kcalloc(AG_MAX_MAP, TSFSBLK_BLOCK_SIZE);
+	if ( old == NULL ) {
+		return E_NOMEM;
+	}
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	er = grow_old_map(v, old, FALSE);
+	if ( er >= E_OK ) er = grow_write(v, total, old);
+	tk_unl_mtx(v->mtxid);
+	Kfree(old);
+	tm_printf((UB *)"tsfs: %s: a grow cut short finished, %d blocks (%d)\n",
+		  v->devnm, (INT)total, (INT)er);
+	return er;
+}
+
 EXPORT ID ts_opn_vol_blk( CONST char *devnm )
 {
 	T_CMTX		cmtx;
@@ -1364,6 +1662,8 @@ EXPORT ID ts_opn_vol_blk( CONST char *devnm )
 		return E_NOEXS;
 	}
 	v->dd = dd;
+	for ( i = 0; devnm[i] != '\0' && i < (INT)sizeof(v->devnm) - 1; i++ ) v->devnm[i] = (UB)devnm[i];
+	v->devnm[i] = 0;
 	io_open(dd);
 	v->cache_blk = ~(UD)0;
 	v->cache = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
@@ -1395,6 +1695,10 @@ EXPORT ID ts_opn_vol_blk( CONST char *devnm )
 	  || ( v->sb.ro_compat & ~KNOWN_ROCOMPAT ) != 0 ) {
 		v->rdonly = TRUE;		/* until it has been checked */
 	}
+	/* a grow the power cut short: done again from where the medium is */
+	if ( !v->rdonly && ( v->sb.incompat & TSFSBLK_INCOMPAT_GROWING ) != 0 ) {
+		(void)grow_finish(v);
+	}
 	v->hint = v->ag_first;
 	if ( !v->rdonly ) {
 		v->sb.mount_count++;
@@ -1410,6 +1714,7 @@ EXPORT ID ts_opn_vol_blk( CONST char *devnm )
 	if ( v->mtxid > 0 ) tk_del_mtx(v->mtxid);
 	if ( v->cache != NULL ) Kfree(v->cache);
 	if ( v->ag != NULL ) Kfree(v->ag);
+	for ( i = 0; i < v->ag_nold; i++ ) Kfree(v->ag_old[i]);
 	io_close(dd);
 	tk_cls_dev(dd, 0);
 	v->used = FALSE;
@@ -1445,6 +1750,8 @@ EXPORT ER ts_cls_vol_blk( ID vol )
 	}
 	Kfree(v->cache);
 	Kfree(v->ag);
+	for ( i = 0; i < v->ag_nold; i++ ) Kfree(v->ag_old[i]);
+	v->ag_nold = 0;
 	io_close(v->dd);
 	tk_cls_dev(v->dd, 0);
 	v->used = FALSE;
@@ -1531,6 +1838,93 @@ EXPORT ER ts_ref_vol_blk( ID vol, T_TSFSBLK_SB *pk_sb )
 	tk_unl_mtx(v->mtxid);
 
 	return E_OK;
+}
+
+EXPORT ID ts_vol_blk_of( CONST char *devnm )
+{
+	TSFSBLKVOL	*v;
+	INT		i, k;
+
+	if ( devnm == NULL ) {
+		return E_PAR;
+	}
+	for ( i = 0; i < tsfsblk_nvol; i++ ) {
+		v = vol_slot(i + 1);
+		if ( v == NULL || !v->used ) continue;
+		for ( k = 0; devnm[k] != '\0' && v->devnm[k] == (UB)devnm[k]; k++ ) ;
+		if ( devnm[k] == '\0' && v->devnm[k] == 0 ) {
+			return v->no;
+		}
+	}
+	return E_NOEXS;
+}
+
+EXPORT ER ts_grow_vol_blk( ID vol, UD blocks, UD *p_from, UD *p_to )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+	DiskInfo	info;
+	UB		*old;
+	SZ		asize;
+	UD		from;
+	ER		er;
+
+	if ( v == NULL ) {
+		return E_ID;
+	}
+	if ( tk_srea_dev(v->dd, TDN_DISKINFO, &info, sizeof(info), &asize) < E_OK ) {
+		return E_IO;
+	}
+	if ( blocks == 0 ) {
+		blocks = (UD)info.blockcont / TSFSBLK_SECT_PER_BLK;
+	}
+	if ( blocks > (UD)info.blockcont / TSFSBLK_SECT_PER_BLK ) {
+		return E_PAR;
+	}
+	old = (UB *)Kcalloc(AG_MAX_MAP, TSFSBLK_BLOCK_SIZE);
+	if ( old == NULL ) {
+		return E_NOMEM;
+	}
+	/* nothing in the log may put back a group head or a superblock from before */
+	er = knl_jrnl_freeze(vol, TRUE);
+	if ( er < E_OK ) {
+		Kfree(old);
+		return er;
+	}
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	from = v->sb.total_blocks;
+	if ( v->rdonly ) {
+		er = E_RONLY;
+	} else if ( v->jrnl_on ) {
+		er = E_BUSY;
+	} else if ( blocks <= from ) {
+		er = E_OK;			/* as large already */
+	} else {
+		er = cache_flush(v);
+		if ( er >= E_OK ) er = grow_old_map(v, old, TRUE);
+		if ( er >= E_OK && !grow_room(v, blocks, old) ) er = E_LIMIT;
+		if ( er >= E_OK ) {
+			/* 1: the superblock says where it is going */
+			v->sb.incompat |= TSFSBLK_INCOMPAT_GROWING;
+			v->sb.grow_to = blocks;
+			v->sb_dirty = TRUE;
+			er = sb_write(v);
+			if ( er < E_OK ) {
+				v->sb.incompat &= ~TSFSBLK_INCOMPAT_GROWING;
+				v->sb.grow_to = 0;
+			}
+		}
+		if ( er >= E_OK ) er = grow_write(v, blocks, old);
+	}
+	if ( p_from != NULL ) *p_from = from;
+	if ( p_to != NULL ) *p_to = v->sb.total_blocks;
+	tk_unl_mtx(v->mtxid);
+	(void)knl_jrnl_freeze(vol, FALSE);
+	Kfree(old);
+	if ( er >= E_OK && v->sb.total_blocks != from ) {
+		tm_printf((UB *)"tsfs: %s grown from %d to %d blocks\n", v->devnm, (INT)from,
+			  (INT)v->sb.total_blocks);
+	}
+	return er;
 }
 
 /* ---------------------------------------------------------------- blocks */
@@ -2268,6 +2662,15 @@ LOCAL BOOL run_has_meta( TSFSBLKVOL *v, UD blk, UD n )
 		if ( in_group_meta(v, blk + i) ) return TRUE;
 	}
 	return FALSE;
+}
+
+/* The blocks of a run read or written in one request of the volume's device: 0 when it did not say */
+EXPORT UD ts_run_blocks( ID vol )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+	DEVIO		*d = ( v != NULL ) ? io_of(v->dd) : NULL;
+
+	return ( d != NULL ) ? d->run : 0;
 }
 
 EXPORT ER ts_read_blks( ID vol, UD blk, UD n, void *buf )

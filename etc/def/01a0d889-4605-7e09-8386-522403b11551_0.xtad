@@ -1,7 +1,7 @@
 <tad version="1.0" encoding="UTF-8" filename="屑実身操作のメニュー">
 <document>
 <p>屑実身操作のメニュー</p>
-<p>屑実身操作の窓のメニュー。メニューの定義。</p>
+<p>屑実身操作のウインドウのメニュー。メニューの定義。</p>
 </document>
 <menu>
 <include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2002-772a-9ccb-5028f7b4cecc"/></include>

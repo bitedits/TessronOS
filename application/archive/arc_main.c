@@ -528,7 +528,7 @@ static void carry( INT x, INT y )
 	log_line(s);
 	if ( er == E_OBJ || er == E_ABORT ) return;
 	if ( er == E_NOEXS ) {
-		say("取り出す所は、図形・仮身一覧・文章の窓です", FALSE);
+		say("取り出す所は、図形・仮身一覧・文章のウインドウです", FALSE);
 		return;
 	}
 	if ( er < E_OK ) {

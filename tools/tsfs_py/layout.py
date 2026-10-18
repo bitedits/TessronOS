@@ -30,7 +30,15 @@ Superblock fields, little endian:
     304  first error               312  last error          320  error block
     360  mount count               368  mount time
     376  fsck time                 384  mkfs time
+    400  the object that keeps what other volumes link to here
+    416  blocks a grow cut short is going to (0: none)
    4092  CRC32C of bytes 0..4091
+
+A volume grown in place keeps the journal and the size of a group it was
+made with; the last group is made whole and groups are added after it.
+compat GROWN says so, since its groups are then not what layout() makes
+for its size; incompat GROWING is set while a grow is being written, and
+the kernel finishes the grow when it opens such a volume (design 7.7).
 """
 
 import os
@@ -68,9 +76,12 @@ ERR_IO = 2
 ERR_TREE = 3
 ERR_NAMES = {0: "none", ERR_CSUM: "checksum", ERR_IO: "i/o", ERR_TREE: "tree"}
 
-KNOWN_COMPAT = 0
+COMPAT_GROWN = 0x1
+INCOMPAT_GROWING = 0x1
+
+KNOWN_COMPAT = COMPAT_GROWN
 KNOWN_ROCOMPAT = 0
-KNOWN_INCOMPAT = 0
+KNOWN_INCOMPAT = INCOMPAT_GROWING
 
 # Geometry
 AG_MAX_BLOCKS = 1 << 18
@@ -125,6 +136,7 @@ SB_MOUNTTIME = 368
 SB_FSCKTIME = 376
 SB_MKFSTIME = 384
 SB_XREFUUID = 400  # the object that keeps what other volumes link to here
+SB_GROWTO = 416
 SB_CRC = 4092
 
 # 1970-01-01 to 1985-01-01 in seconds: the volume counts time from 1985,
@@ -227,6 +239,17 @@ def layout(nblk):
     return j, agb, n
 
 
+def grown_count(ag_first, agb, nblk):
+    """Groups a volume of nblk blocks has with the journal and the group
+    size it was made with, as a grow leaves it: a last group shorter than
+    AG_MIN_TAIL is left out."""
+    data = nblk - ag_first
+    n = data // agb
+    if data % agb >= AG_MIN_TAIL:
+        n += 1
+    return n
+
+
 class GroupShape(object):
     """Where group n lies and what it uses itself."""
 
@@ -301,6 +324,7 @@ class Superblock(object):
         self.mount_time = 0
         self.fsck_time = 0
         self.mkfs_time = 0
+        self.grow_to = 0
 
     def copy(self):
         sb = Superblock()
@@ -333,6 +357,7 @@ class Superblock(object):
         buf[SB_SYSUUID:SB_SYSUUID + 16] = self.sysbox_uuid.bytes
         buf[SB_DOMUUID:SB_DOMUUID + 16] = self.domain_uuid.bytes
         buf[SB_XREFUUID:SB_XREFUUID + 16] = self.xref_uuid.bytes
+        struct.pack_into("<Q", buf, SB_GROWTO, self.grow_to)
         struct.pack_into("<QQQ", buf, SB_COMPAT,
                          self.compat, self.ro_compat, self.incompat)
         struct.pack_into("<IIQQQ", buf, SB_STATE, self.state, self.err_kind,
@@ -373,6 +398,7 @@ class Superblock(object):
         sb.sysbox_uuid = uuid.UUID(bytes=buf[SB_SYSUUID:SB_SYSUUID + 16])
         sb.domain_uuid = uuid.UUID(bytes=buf[SB_DOMUUID:SB_DOMUUID + 16])
         sb.xref_uuid = uuid.UUID(bytes=buf[SB_XREFUUID:SB_XREFUUID + 16])
+        sb.grow_to = struct.unpack_from("<Q", buf, SB_GROWTO)[0]
         sb.compat, sb.ro_compat, sb.incompat = struct.unpack_from(
             "<QQQ", buf, SB_COMPAT)
         (sb.state, sb.err_kind, sb.err_first, sb.err_last,

@@ -111,7 +111,7 @@ IMPORT void knl_usb_kick( void );
 #define LOOK_MS		500		/* how often the output is chosen again while playing */
 #define NOUT_ALL	SND_OUT_MAX	/* outputs of all the backends, looked at */
 
-#define MB()		Asm("dmb ish" ::: "memory")
+#define MB()		SmpMemBarrier()
 
 /* why a channel stopped by itself */
 #define WHY_ENDCNT	1

@@ -1133,7 +1133,7 @@ LOCAL void test_broken_book( void )
 		ob_cls_obj(k);
 	}
 	KT_ASSERT_EQ(op(ARC_OP_LIST, &ab, NULL, 0), 6);
-	KT_ASSERT(said("書庫の見出しが壊れています"));
+	KT_ASSERT(said("書庫のヘッダが壊れています"));
 	/* deleted, it is an empty archive again */
 	KT_ASSERT_EQ(op(ARC_OP_DELETE, &ab, NULL, 0), 0);
 	KT_ASSERT_EQ(book_rec(&ab), -1);

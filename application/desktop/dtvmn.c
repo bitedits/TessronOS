@@ -183,6 +183,7 @@ EXPORT void dt_get_vmn( DTWIN *d, ID mid, BOOL on_vobj, CONST T_VOBJ *v )
 		TS_UUID	dd = sys_def(SYSDEF_MENU_DISK);
 
 		atr(mid, &dd, "disk.detach", (BOOL)( !on_vobj || !dt_disk_detachable(v) ));
+		atr(mid, &dd, "disk.grow", (BOOL)( on_vobj && !dt_disk_growable(v) ));
 	}
 
 	/* away from a virtual object, what is about one cannot be chosen */
@@ -380,6 +381,10 @@ EXPORT BOOL dt_exe_vmn( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj, CONST T_VOBJ
 		}
 	} else if ( mn_is(sel, "disk.status") ) {
 		dt_disk_status(d, on_vobj ? v : NULL);
+	} else if ( mn_is(sel, "disk.create") ) {
+		dt_disk_create(d);
+	} else if ( mn_is(sel, "disk.grow") ) {
+		dt_disk_grow(d, on_vobj ? v : NULL);
 	} else if ( mn_is(sel, "tray.level") ) {
 		(void)tr_sel_dat(sel->index + 1);
 	} else if ( mn_is(sel, "tray.clear") ) {

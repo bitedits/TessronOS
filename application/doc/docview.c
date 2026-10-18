@@ -400,10 +400,32 @@ LOCAL INT run_px( CONST T_TVRUN *r )
 	return ( px > 0 ) ? px : 1;
 }
 
+/*
+ * The face of a run, and which of the looks it asks for (FN_FA_LOOK) the
+ * face has of itself: a face registered as the bold, the italic, the
+ * outlined or the shadowed letters of its family is taken for those, and
+ * the look is not added to it again.
+ */
+LOCAL ID run_face( CONST T_TVRUN *r, UINT *p_has )
+{
+	UINT	want = 0;
+
+	*p_has = 0;
+	if ( r->face == NULL ) {
+		return fn_system();
+	}
+	if ( ( r->style & TV_ST_BOLD ) != 0 )   want |= FN_FA_BOLD;
+	if ( ( r->style & TV_ST_ITALIC ) != 0 ) want |= FN_FA_ITALIC;
+	if ( ( r->style & TV_ST_BAG ) != 0 )    want |= FN_FA_BAG;
+	if ( ( r->style & TV_ST_SHADOW ) != 0 ) want |= FN_FA_SHADOW;
+	return fn_find_style(r->face, want, p_has);
+}
+
 /* The face, size and look of a run set, when they are not set already */
 LOCAL void run_font( LAY *l, CONST T_TVRUN *r )
 {
-	ID	fid = ( r->face != NULL ) ? fn_find(r->face) : fn_system();
+	UINT	has;
+	ID	fid = run_face(r, &has);
 	INT	px = run_px(r);
 	INT	xpx = 0;
 	UINT	st = 0;
@@ -411,8 +433,8 @@ LOCAL void run_font( LAY *l, CONST T_TVRUN *r )
 	if ( r->wr_d > 0 && r->wr_n > 0 && r->wr_n != r->wr_d ) {
 		xpx = px * r->wr_n / r->wr_d;
 	}
-	if ( ( r->style & TV_ST_BOLD ) != 0 )   st |= FN_ST_BOLD;
-	if ( ( r->style & TV_ST_ITALIC ) != 0 ) st |= FN_ST_ITALIC;
+	if ( ( r->style & TV_ST_BOLD ) != 0 && ( has & FN_FA_BOLD ) == 0 )     st |= FN_ST_BOLD;
+	if ( ( r->style & TV_ST_ITALIC ) != 0 && ( has & FN_FA_ITALIC ) == 0 ) st |= FN_ST_ITALIC;
 	/*
 	 * Down the line the letters take their vertical forms, but not
 	 * those turned (回転), which are the letters across turned, nor
@@ -523,7 +545,32 @@ LOCAL INT text_w( LAY *l, CONST T_TVRUN *r, CONST UB *s, INT n )
 	}
 	b[n] = 0;
 	turn_on(l, r);
-	w = l->vert ? fn_vwidth(l->fid, b) : fn_width(l->fid, b);
+	if ( l->vert ) {
+		w = fn_vwidth(l->fid, b);
+	} else if ( run_space(r) != 0 ) {
+		/*
+		 * Spaced letters are put down one at a time (text_put), each
+		 * at a whole pixel: measured the same way, letter by letter,
+		 * or the fractions of a pixel a whole string keeps would make
+		 * it measure other than it draws.
+		 */
+		INT	k, wk;
+
+		w = 0;
+		for ( i = 0; i < n; i += k ) {
+			UB	c[8];
+
+			for ( k = 1; i + k < n && k < (INT)sizeof(c) - 1 && ( b[i + k] & 0xC0U ) == 0x80U; k++ ) {
+				;
+			}
+			knl_memcpy(c, b + i, (SZ)k);
+			c[k] = 0;
+			wk = fn_width(l->fid, c);
+			w += ( wk > 0 ) ? wk : 0;
+		}
+	} else {
+		w = fn_width(l->fid, b);
+	}
 	turn_off(l, r);
 	if ( b != buf ) {
 		Kfree(b);
@@ -1176,6 +1223,7 @@ LOCAL void draw_text_item( LAY *l, CONST T_TVRUN *r, CONST ITEM *t, INT x,
 {
 	CONST UB	*s = r->text + t->off;
 	UW		col = r->colour;
+	UINT		has = 0;
 	INT		px = run_px(r), b = base + t->shift;
 	INT		up = l->vert ? px - px / 2 : px;	/* the letters' box over */
 	INT		dn = l->vert ? px / 2 : px / 4;		/* and under the base line */
@@ -1202,10 +1250,13 @@ LOCAL void draw_text_item( LAY *l, CONST T_TVRUN *r, CONST ITEM *t, INT x,
 		lg_fill(l, &rc, col);
 		col = ( col == 0x00FFFFFFU ) ? 0x00000000U : 0x00FFFFFFU;
 	}
-	if ( ( r->style & TV_ST_SHADOW ) != 0 ) {
+	if ( ( r->style & ( TV_ST_SHADOW | TV_ST_BAG ) ) != 0 ) {
+		(void)run_face(r, &has);	/* a face drawn so already is not drawn so again */
+	}
+	if ( ( r->style & TV_ST_SHADOW ) != 0 && ( has & FN_FA_SHADOW ) == 0 ) {
 		text_put(l, r, s, t->len, x + 2, b + 2, 0x00909090U);
 	}
-	if ( ( r->style & TV_ST_BAG ) != 0 ) {
+	if ( ( r->style & TV_ST_BAG ) != 0 && ( has & FN_FA_BAG ) == 0 ) {
 		/* 袋文字: the letters' outline, and their inside in white */
 		INT	dx, dy;
 

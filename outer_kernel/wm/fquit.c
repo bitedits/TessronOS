@@ -105,11 +105,11 @@
 #define P_MSG		25	/* what came of something */
 #define P_RESTART	31	/* 〈デスクトップを立ち上げ直す〉 */
 #define P_END		32	/* 〈強制終了〉 */
-#define P_CANCEL	33	/* 〈取消し〉, the one Enter presses */
+#define P_CANCEL	33	/* 〈取消〉, the one Enter presses */
 #define Q_LINE1		1
 #define Q_LINE2		2
 #define Q_LINE3		3
-#define Q_CANCEL	102	/* 〈取消し〉, the one Enter presses */
+#define Q_CANCEL	102	/* 〈取消〉, the one Enter presses */
 #define Q_RESTART	103	/* 〈立ち上げ直す〉 */
 #define FW_PARTS	48
 #define FW_NAMES_MAX	4096
@@ -834,7 +834,7 @@ LOCAL void fq_task( INT stacd, void *exinf )
  * made from its definition in the data box SYSDEF_BOX_FQUIT and placed
  * on the window, and the window manager draws and works every part --
  * the list, the boxes that show what is chosen, the push buttons with
- * the one that answers Enter (〈取消し〉) framed heavier. What happens
+ * the one that answers Enter (〈取消〉) framed heavier. What happens
  * comes on a channel as notices; here the parts are only read and
  * written, by the numbers the definition gives them.
  */
@@ -1345,7 +1345,7 @@ LOCAL void fw_close( void )
 
 /*
  * 〈デスクトップを立ち上げ直す〉: a panel that warns asks first, saying
- * what will be lost; its 〈立ち上げ直す〉 does it, and 〈取消し〉, the one
+ * what will be lost; its 〈立ち上げ直す〉 does it, and 〈取消〉, the one
  * Enter presses, does not.
  */
 LOCAL void fw_ask_open( void )

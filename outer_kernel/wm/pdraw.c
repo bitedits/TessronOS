@@ -19,8 +19,9 @@
  *	sixteenth of a letter apart, fields along a line each as wide as its
  *	letters with the field being worked marked by two triangles under
  *	it, a volume a bar with a knob, a scrolling selector a sunken box
- *	with its own bar in the right twenty pixels. The colours and the
- *	patterns are the numbered look table's.
+ *	with its own bar in the right twenty pixels, a pop-up a switch's
+ *	box holding the name chosen with a mark pointing down at its right.
+ *	The colours and the patterns are the numbered look table's.
  *
  *	A panel of tags is drawn as the application library's is: a frame
  *	round the sheet, the tags above it on the frame's ground, each tag a
@@ -1771,6 +1772,61 @@ LOCAL void draw_switch( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
 }
 
 /*
+ * A pop-up: the body of a switch -- a raised box, or only its ground
+ * when it has no frame, with the ring inside it when it answers -- and
+ * in it the name chosen, after the margin as a selector's names stand
+ * but with no lamp, what follows a tab in the name set against the
+ * room left of the mark. The mark stands in a column at the right the
+ * margin and eight wide: a triangle pointing down, three quarters of
+ * the margin across and three eighths of it high, in the pattern of the
+ * triangles a volume's knob and a field being worked carry. While the
+ * part's list is open its frame is turned over, as a push button's is
+ * while it is held.
+ */
+#define POP_MARK	( MARGIN + 8 )
+
+LOCAL void draw_popup( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
+{
+	INT		gid = c->gid, cx, cy, w = 3 * MARGIN / 4, h = 3 * MARGIN / 8;
+	BOOL		off = ( pt->type & ( P_DISABLE | P_INACT ) ) != 0;
+	CONST UB	*nm = NULL;
+	T_DPRECT	clip, cell, e;
+	T_DPPAT		pat;
+
+	if ( pt->value >= 1 && pt->value <= pt->count ) {
+		nm = pd_pool_name(c->pool, pt->pool, pt->value - 1);
+	}
+	if ( pt->type & P_NOFRAME ) {
+		wm_look_pat(LK_INACTPARTS, &pat);
+		dp_fill_round(gid, r, RAD, RAD, &pat);
+	} else {
+		rrc_raised(gid, r, LK_INACTPARTS);
+	}
+	if ( pt->type & P_EMPHAS ) {
+		rc(&e, r->left + 2, r->top + 2, r->right - 2, r->bottom - 2);
+		wm_look_pat(LK_PEMPHAS, &pat);
+		dp_frame_round(gid, &e, 6, 6, 2, &pat);
+	}
+	clip = *r;
+	clip.right = r->right - POP_MARK;
+	cell = *r;
+	cell.right = clip.right + MARGIN;
+	if ( nm != NULL && clip.right > clip.left ) {
+		name_in(gid, &clip, &cell, nm, -1, off, FALSE, 0, FALSE, LK_INACTPARTS);
+	}
+	cx = r->right - POP_MARK / 2 - 2;
+	cy = ( r->top + r->bottom ) / 2;
+	tri(gid, LK_PEMPHAS, cx - w / 2, cy - h / 2, cx + w / 2, cy - h / 2, cx, cy + h / 2);
+	if ( c->held != 0 ) {
+		if ( pt->type & P_NOFRAME ) {
+			xor_rect(gid, r);
+		} else {
+			xor_round(gid, r);
+		}
+	}
+}
+
+/*
  * Words on the panel: from the left of the rectangle on its foot as
  * the base line (P_BASE), or in the middle of it; in the colour of a
  * part's words.
@@ -1822,6 +1878,10 @@ EXPORT void pd_part( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
 		break;
 	case SS_PARTS:
 		draw_scroll(pt, r, c);
+		veil = TRUE;
+		break;
+	case WM_PT_POPUP:
+		draw_popup(pt, r, c);
 		veil = TRUE;
 		break;
 	case VL_PARTS:

@@ -217,6 +217,7 @@ IMPORT void ktest_xfu( void );
 IMPORT void ktest_xfc( void );
 IMPORT void ktest_btcd( void );
 IMPORT void ktest_vols( void );
+IMPORT void ktest_grow( void );
 IMPORT void ktest_drop( void );
 IMPORT void ktest_dtwin( void );
 IMPORT void ktest_fault( void );

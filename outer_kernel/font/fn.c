@@ -66,6 +66,12 @@ typedef struct {
 	UW		gsub_len;
 	INT		nvsub;
 	UW		vsub[VSUB_MAX];
+
+	/* the object and the face of it this was opened from (fn_open_obj) */
+	BOOL		from_obj;
+	TS_UUID		obj;
+	INT		index;
+	T_FNREG		reg;			/* what it is registered as */
 } FONT;
 
 LOCAL FT_Library	fn_lib = NULL;
@@ -131,13 +137,8 @@ EXPORT ER fn_state_get( ID fid, T_FNSTATE *st )
 	return E_OK;
 }
 
-EXPORT ER fn_state_set( ID fid, CONST T_FNSTATE *st )
+LOCAL ER state_put( FONT *f, CONST T_FNSTATE *st )
 {
-	FONT	*f = ( fid >= 1 && fid <= FN_MAX_FONT && fn_tab[fid - 1].used ) ? &fn_tab[fid - 1] : NULL;
-
-	if ( f == NULL || st == NULL ) {
-		return E_PAR;
-	}
 	if ( st->px > 0 && ( st->px != f->px || st->xpx != f->xpx ) ) {
 		if ( FT_Set_Pixel_Sizes(f->face, (FT_UInt)st->xpx, (FT_UInt)st->px) != 0 ) {
 			return E_OBJ;
@@ -148,6 +149,16 @@ EXPORT ER fn_state_set( ID fid, CONST T_FNSTATE *st )
 	f->xpx = st->xpx;
 	f->angle = st->angle;
 	return E_OK;
+}
+
+EXPORT ER fn_state_set( ID fid, CONST T_FNSTATE *st )
+{
+	FONT	*f = ( fid >= 1 && fid <= FN_MAX_FONT && fn_tab[fid - 1].used ) ? &fn_tab[fid - 1] : NULL;
+
+	if ( f == NULL || st == NULL ) {
+		return E_PAR;
+	}
+	return state_put(f, st);
 }
 
 EXPORT void fn_release( void )
@@ -228,24 +239,41 @@ EXPORT INT knl_fn_init( void )
 #define GC_PROBE	16		/* places one letter may sit in */
 #define GC_CAP		( 4 * 1024 * 1024 )	/* pixels held at once */
 
+/*
+ * Where a letter starts is kept to a quarter of a pixel. The pen moves
+ * by the face's own advances, in 64ths of a pixel, and each letter is
+ * made for the quarter its start falls on: a letter starting a quarter
+ * of a pixel along is made from its outline moved a quarter of a pixel,
+ * not from the same pixels put down a whole pixel early or late. Text
+ * then keeps the spacing the face was drawn with, instead of every
+ * letter's gap being rounded to a whole pixel on its own.
+ */
+#define FN_PHASES	4		/* places in a pixel a letter may start at */
+#define FN_PHASE_SH	4		/* 64ths of a pixel in a quarter, as a shift */
+
+/* A letter's pixels, made for one of the places in a pixel it may start at */
+typedef struct {
+	INT	left, top;		/* where the pixels sit against the pen */
+	INT	w, h, pitch;
+	BOOL	gray;			/* a byte a pixel, how much it covers; else a bit */
+	INT	nbytes;			/* this and the pixels, as taken from the heap */
+	UB	bm[];			/* the pixels */
+} GPIX;
+
 typedef struct {
 	BOOL	used;
 	ID	fid;
 	INT	px;
 	UINT	look;			/* the style and the width it was made in */
 	UW	cp;
-	INT	adv;			/* how far the pen moves */
+	INT	adv;			/* how far the pen moves, in 64ths of a pixel */
 	INT	up, down;		/* how far its box reaches above and below
 					   the baseline */
-	INT	left, top;		/* where the pixels sit against the pen */
-	INT	w, h, pitch;
-	BOOL	drawn;			/* whether the pixels were made */
-	BOOL	nopix;			/* and whether they could not be kept */
 	BOOL	has_adv;		/* the advance is settled */
+	UINT	nopix;			/* a bit for each place whose pixels could
+					   not be kept */
 	UD	when;			/* the last time it was asked for */
-	UB	*bm;			/* the pixels, or NULL */
-	BOOL	gray;			/* a byte a pixel, how much it covers; else a bit */
-	INT	nbytes;			/* how many they came to */
+	GPIX	*pix[FN_PHASES];	/* the pixels for each place, or NULL */
 } GLYPH;
 
 LOCAL GLYPH	fn_cache[GC_MAX];
@@ -281,24 +309,55 @@ LOCAL UD fn_now( void )
 
 EXPORT void fn_report( void )
 {
+	INT	i, k, nlet = 0, npix = 0;
+
+	for ( i = 0; i < GC_MAX; i++ ) {
+		if ( !fn_cache[i].used ) {
+			continue;
+		}
+		nlet++;
+		for ( k = 0; k < FN_PHASES; k++ ) {
+			if ( fn_cache[i].pix[k] != NULL ) {
+				npix++;
+			}
+		}
+	}
 	tm_printf((UB *)"  fn: ask %d hit %d made %d put %d\n",
 		  (INT)fn_count.ask, (INT)fn_count.hit,
 		  (INT)fn_count.made, (INT)fn_count.put);
 	tm_printf((UB *)"  fn: make %d ms, put %d ms\n",
 		  (INT)fn_count.ms_make, (INT)fn_count.ms_put);
+	tm_printf((UB *)"  fn: kept %d letters, %d pixel sets, %d KB of %d KB\n",
+		  nlet, npix, (INT)( fn_held / 1024 ), (INT)( GC_CAP / 1024 ));
+}
+
+/* Whether a letter holds pixels for any place */
+LOCAL BOOL has_pix( CONST GLYPH *g )
+{
+	INT	k;
+
+	for ( k = 0; k < FN_PHASES; k++ ) {
+		if ( g->pix[k] != NULL ) {
+			return TRUE;
+		}
+	}
+	return FALSE;
 }
 
 /* Let a letter go, pixels and all */
 LOCAL void glyph_drop( GLYPH *g )
 {
-	if ( g->bm != NULL ) {
-		fn_held -= (SZ)g->nbytes;
-		Kfree(g->bm);
-		g->bm = NULL;
-		g->nbytes = 0;
+	INT	k;
+
+	for ( k = 0; k < FN_PHASES; k++ ) {
+		if ( g->pix[k] != NULL ) {
+			fn_held -= (SZ)g->pix[k]->nbytes;
+			Kfree(g->pix[k]);
+			g->pix[k] = NULL;
+		}
 	}
 	g->used = FALSE;
-	g->drawn = FALSE;
+	g->nopix = 0;
 }
 
 /*
@@ -306,9 +365,9 @@ LOCAL void glyph_drop( GLYPH *g )
  * dropped until what is held is within what may be held; the letter
  * being made is not among them, because it has not been asked for yet.
  */
-LOCAL UB *glyph_room( GLYPH *keep, INT n )
+LOCAL void *glyph_room( GLYPH *keep, INT n )
 {
-	UB	*mem;
+	void	*mem;
 
 	while ( fn_held + (SZ)n > GC_CAP ) {
 		GLYPH	*old = NULL;
@@ -317,7 +376,7 @@ LOCAL UB *glyph_room( GLYPH *keep, INT n )
 		for ( i = 0; i < GC_MAX; i++ ) {
 			GLYPH	*g = &fn_cache[i];
 
-			if ( !g->used || g == keep || g->bm == NULL ) {
+			if ( !g->used || g == keep || !has_pix(g) ) {
 				continue;
 			}
 			if ( old == NULL || g->when < old->when ) {
@@ -329,7 +388,7 @@ LOCAL UB *glyph_room( GLYPH *keep, INT n )
 		}
 		glyph_drop(old);
 	}
-	mem = (UB *)Kmalloc((SZ)n);
+	mem = Kmalloc((SZ)n);
 	if ( mem != NULL ) {
 		fn_held += (SZ)n;
 	}
@@ -403,13 +462,8 @@ LOCAL GLYPH *cache_room( ID fid, INT px, UINT look, UW cp )
 	take->adv     = 0;
 	take->up      = 0;
 	take->down    = 0;
-	take->left    = 0;
-	take->top     = 0;
-	take->w       = 0;
-	take->h       = 0;
-	take->pitch   = 0;
 	take->has_adv = FALSE;
-	take->nopix   = FALSE;
+	take->nopix   = 0;
 	take->when    = ++fn_clock;
 
 	return take;
@@ -450,8 +504,8 @@ LOCAL FT_Pos turn_box( CONST FONT *f, FT_Pos adv, FT_Pos *p_cy, FT_Pos *p_h )
 
 /*
  * How far the pen moves for a letter whose upright advance is 'adv'
- * (64ths), thickened and turned as the face is set; and how far its box
- * reaches above and below the baseline.
+ * (64ths), thickened and turned as the face is set, in 64ths of a pixel;
+ * and how far its box reaches above and below the baseline.
  */
 LOCAL INT advance_of( CONST FONT *f, FT_Pos adv, INT *p_up, INT *p_down )
 {
@@ -462,34 +516,124 @@ LOCAL INT advance_of( CONST FONT *f, FT_Pos adv, INT *p_up, INT *p_down )
 	if ( f->angle == 0 ) {
 		*p_up = (INT)( m->ascender >> 6 );
 		*p_down = (INT)( -( m->descender >> 6 ) );
-		return (INT)( adv >> 6 );
+		return (INT)adv;
 	}
 	w = turn_box(f, adv, &cy, &h);
 	*p_up = (INT)( ( cy + h / 2 + 63 ) >> 6 );
 	*p_down = (INT)( ( h / 2 - cy + 63 ) >> 6 );
 
-	return (INT)( ( w + 32 ) >> 6 );
+	return (INT)w;
 }
 
 /*
- * A letter loaded in the look the face is set to. A plain letter is
- * loaded as it always was. One that is thickened, leaned or turned is
- * loaded as an outline, the outline changed -- pushed out on every side
- * for bold, sheared a fifth of its height for italic, turned in its box
- * (turn_box) -- and then made into pixels.
+ * A letter's advance as the face is set, in 64ths of a pixel, and its
+ * box above and below the baseline; FALSE when the face cannot say.
+ *
+ * The advance comes from the face's own table of advances, read without
+ * touching the outline, and it is the one number used for the letter
+ * whether it is being measured or drawn. Where a line breaks is worked
+ * out before the letters are made; if the measuring and the drawing
+ * took the advance from two places that could differ, the two would
+ * drift apart along the line and the line would run past the edge it
+ * was broken to fit inside.
  */
-LOCAL FT_Error load_styled( FONT *f, FT_UInt gi, FT_Int32 flags )
+LOCAL BOOL advance_read( FONT *f, FT_UInt gi, INT *p_adv, INT *p_up, INT *p_down )
+{
+	FT_Fixed	fx = 0;
+	UD		t = fn_now();
+	FT_Error	err;
+
+	/*
+	 * Asked for this way the library answers from the table or says
+	 * it cannot; loading the outline to find a width costs as much as
+	 * drawing the letter, and breaking a page into lines asks for the
+	 * width of every letter on it.
+	 */
+	err = FT_Get_Advance(f->face, gi, FT_LOAD_NO_HINTING | FT_ADVANCE_FLAG_FAST_ONLY, &fx);
+	if ( err != 0 ) {
+		err = FT_Get_Advance(f->face, gi, FT_LOAD_NO_HINTING, &fx);
+	}
+	fn_count.ms_make += fn_now() - t;
+	if ( err != 0 ) {
+		return FALSE;
+	}
+	*p_adv = advance_of(f, (FT_Pos)( ( fx + 0x200 ) >> 10 ), p_up, p_down);
+
+	return TRUE;
+}
+
+/*
+ * How much a letter's strokes are thickened, in 64ths of a pixel across
+ * and down (the whole of the widening; each side moves out by half).
+ *
+ * Letters mixed into what is under them as light (dp_put_gray) keep
+ * every edge as light as the share of the pixel they cover, and at the
+ * sizes of a menu or of running text, where a stroke is one or two
+ * pixels and most of its pixels are edge, the letters come out thin and
+ * grey. Moving each edge of the outline out a little before the pixels
+ * are made puts back the weight the eye expects: 0.0121 of the size in
+ * pixels each side across, a quarter more down -- a fifth of a pixel
+ * either side at 16 pixels -- growing with the size until it is 0.3 of
+ * a pixel, and none above 72 pixels, where a stroke is many pixels wide
+ * and its edges no longer matter.
+ *
+ * The thickening is the same for outlines of every kind, the PostScript
+ * outlines of an OpenType face and the quadratic ones of a TrueType face
+ * alike, and it leaves the advance alone: only how dark the letters are
+ * changes, not where they stand.
+ */
+#define DARK_MAX_PX	72		/* no thickening above this size */
+#define DARK_X_PERMIL	1549		/* 2 x 0.0121 x 64, in thousandths */
+#define DARK_Y_PERMIL	1936		/* the same, a quarter more */
+#define DARK_LIMIT	38		/* 2 x 0.3 pixel, in 64ths */
+
+LOCAL void darken( CONST FONT *f, FT_Outline *o )
+{
+	INT	ppx = ( f->xpx > 0 ) ? f->xpx : f->px;	/* the size across */
+	FT_Pos	sx, sy;
+
+	if ( f->px > DARK_MAX_PX ) {
+		return;
+	}
+	sx = (FT_Pos)( ( ppx * DARK_X_PERMIL + 500 ) / 1000 );
+	sy = (FT_Pos)( ( f->px * DARK_Y_PERMIL + 500 ) / 1000 );
+	if ( sx > DARK_LIMIT ) sx = DARK_LIMIT;
+	if ( sy > DARK_LIMIT ) sy = DARK_LIMIT;
+	(void)FT_Outline_EmboldenXY(o, sx, sy);
+}
+
+/*
+ * A letter made into pixels in the glyph slot, in the look the face is
+ * set to and moved 'phase' quarters of a pixel to the right.
+ *
+ * The outline is loaded as it is, without fitting it to the pixel grid,
+ * and changed: sheared a fifth of its height for italic, pushed out on
+ * every side for bold, thickened a little for its size (darken), turned
+ * in its box (turn_box), moved to the quarter it starts on. Then it is
+ * made into 256 levels of how much of each pixel it covers.
+ *
+ * A face that carries ready-made pixels for the size gives those
+ * instead, unless a look is asked for that only an outline can take.
+ * Those pixels are put down as they are, at whatever quarter.
+ */
+LOCAL FT_Error render_letter( FONT *f, FT_UInt gi, INT phase )
 {
 	FT_Face		face = f->face;
 	FT_Error	err;
+	FT_Int32	flags = FT_LOAD_NO_HINTING;
 
-	if ( ( f->style & ( FN_ST_BOLD | FN_ST_ITALIC ) ) == 0 && f->angle == 0 ) {
-		return FT_Load_Glyph(face, gi, flags);
+	if ( ( f->style & ( FN_ST_BOLD | FN_ST_ITALIC ) ) != 0 || f->angle != 0 ) {
+		flags |= FT_LOAD_NO_BITMAP;
 	}
-	err = FT_Load_Glyph(face, gi, ( flags & ~FT_LOAD_RENDER )
-				      | FT_LOAD_NO_BITMAP);
-	if ( err != 0 || face->glyph->format != FT_GLYPH_FORMAT_OUTLINE ) {
-		return ( err != 0 ) ? err : FT_Load_Glyph(face, gi, flags);
+	err = FT_Load_Glyph(face, gi, flags);
+	if ( err != 0 ) {
+		return err;
+	}
+	if ( face->glyph->format == FT_GLYPH_FORMAT_BITMAP ) {
+		return 0;
+	}
+	if ( face->glyph->format != FT_GLYPH_FORMAT_OUTLINE ) {
+		return FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL);
 	}
 	if ( ( f->style & FN_ST_ITALIC ) != 0 ) {
 		FT_Matrix	m;
@@ -505,9 +649,11 @@ LOCAL FT_Error load_styled( FONT *f, FT_UInt gi, FT_Int32 flags )
 
 		FT_Outline_EmboldenXY(&face->glyph->outline, strength, strength / 2);
 	}
+	darken(f, &face->glyph->outline);
 	if ( f->angle != 0 ) {
 		FT_Angle	a = (FT_Angle)f->angle << 16;
-		FT_Pos		adv = face->glyph->advance.x + (FT_Pos)bold_extra(f) * 64;
+		FT_Pos		adv = ( ( face->glyph->linearHoriAdvance + 0x200 ) >> 10 )
+				      + (FT_Pos)bold_extra(f) * 64;
 		FT_Pos		cy, h, w = turn_box(f, adv, &cy, &h);
 		FT_Matrix	m;
 
@@ -520,11 +666,11 @@ LOCAL FT_Error load_styled( FONT *f, FT_UInt gi, FT_Int32 flags )
 		FT_Outline_Transform(&face->glyph->outline, &m);
 		FT_Outline_Translate(&face->glyph->outline, w / 2, cy);
 	}
-	if ( ( flags & FT_LOAD_RENDER ) != 0 ) {
-		err = FT_Render_Glyph(face->glyph, FT_RENDER_MODE_MONO);
+	if ( phase != 0 ) {
+		FT_Outline_Translate(&face->glyph->outline, (FT_Pos)phase << FN_PHASE_SH, 0);
 	}
 
-	return err;
+	return FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL);
 }
 
 /* ---------------------------------------------------------------- vertical forms */
@@ -693,168 +839,107 @@ LOCAL FT_UInt glyph_index( FONT *f, UW cp )
 	return gi;
 }
 
-/* The letter, made if it is not kept. NULL when it cannot be made. */
-LOCAL CONST GLYPH *glyph_of( FONT *f, ID fid, UW cp, BOOL want_pixels )
+/*
+ * The letter, with its pixels for the place in a pixel it starts at
+ * ('phase' quarters) when they are wanted; made if it is not kept. NULL
+ * when the face cannot say how wide it is.
+ *
+ * When the pixels were made but could not be kept, the letter comes back
+ * without them and *p_loose says so: they are in the face's glyph slot,
+ * to be put down from there before anything else is made.
+ */
+LOCAL CONST GLYPH *glyph_of( FONT *f, ID fid, UW cp, BOOL want_pixels, INT phase,
+			     BOOL *p_loose )
 {
 	GLYPH		*g;
 	FT_Face		face = f->face;
 	FT_UInt		gi;
-	FT_Int32	flags;
 	CONST FT_Bitmap	*bm;
+	GPIX		*px;
 	INT		row, n;
+	UINT		bit = 1U << phase;
 
+	if ( p_loose != NULL ) {
+		*p_loose = FALSE;
+	}
 	fn_count.ask++;
 	g = cache_find(fid, f->px, look_of(f), cp);
-	if ( g != NULL && ( !want_pixels || g->drawn || g->nopix ) ) {
+	if ( g != NULL && g->has_adv
+	  && ( !want_pixels || g->pix[phase] != NULL || ( g->nopix & bit ) != 0 ) ) {
 		fn_count.hit++;
 		return g;
 	}
-	fn_count.made++;
 	gi = glyph_index(f, cp);
-	if ( !want_pixels ) {
-		/*
-		 * Only the width is wanted. Loading the outline without
-		 * turning it into pixels is most of the cost saved, and
-		 * breaking the lines of a page asks for the width of every
-		 * letter on it whether the letter is on the screen or not.
-		 */
-		{
-			/*
-			 * The advance out of the font's own table of
-			 * advances, which every face carries and which every
-			 * proportional face needs: one number, read without
-			 * touching the outline. Reading outlines to work out
-			 * where a line breaks is what made a page take a
-			 * minute to open.
-			 */
-			FT_Fixed	fx = 0;
+	if ( g == NULL || !g->has_adv ) {
+		INT	adv, up, down;
 
-			{
-				UD	 t = fn_now();
-				FT_Error err;
-
-				/*
-				 * The width out of the face's own table of
-				 * widths, without touching the outline. Asked
-				 * for this way the library answers from the
-				 * table or says it cannot; loading the outline
-				 * to find a width costs as much as drawing the
-				 * letter, and breaking a page into lines asks
-				 * for the width of every letter on it.
-				 */
-				err = FT_Get_Advance(face, gi,
-						     FT_LOAD_NO_HINTING
-						     | FT_ADVANCE_FLAG_FAST_ONLY,
-						     &fx);
-				if ( err != 0 ) {
-					err = FT_Get_Advance(face, gi,
-							     FT_LOAD_NO_HINTING,
-							     &fx);
-				}
-				fn_count.ms_make += fn_now() - t;
-				if ( err != 0 ) {
-					return NULL;
-				}
-			}
-			if ( g == NULL ) {
-				g = cache_room(fid, f->px, look_of(f), cp);
-				g->used = TRUE;
-			}
-			if ( !g->has_adv ) {
-				if ( f->angle == 0 ) {
-					g->adv = (INT)( (fx + 0x8000) >> 16 ) + bold_extra(f);
-					(void)advance_of(f, 0, &g->up, &g->down);
-				} else {
-					g->adv = advance_of(f, (FT_Pos)( ( fx + 0x200 ) >> 10 ),
-							    &g->up, &g->down);
-				}
-				g->has_adv = TRUE;
-			}
-			g->when = ++fn_clock;
-
-			return g;
+		if ( !advance_read(f, gi, &adv, &up, &down) ) {
+			return NULL;
 		}
+		if ( g == NULL ) {
+			g = cache_room(fid, f->px, look_of(f), cp);
+			g->used = TRUE;
+		}
+		g->adv = adv;
+		g->up = up;
+		g->down = down;
+		g->has_adv = TRUE;
+	}
+	g->when = ++fn_clock;
+	if ( !want_pixels ) {
+		return g;
 	}
 	/*
 	 * No hinting. Fitting an outline to the pixel grid is by far the
 	 * most expensive thing the font library does -- on a face with
 	 * PostScript outlines it is most of the work of making a letter --
-	 * and what it buys is a stem a pixel straighter at small sizes.
-	 * Measured here at a sixth of a second per letter, which is the
-	 * difference between a page that appears and a page that does not.
+	 * and it moves stems by up to half a pixel, which puts back the
+	 * very rounding that placing letters by quarters of a pixel takes
+	 * away. Unhinted, a letter is the same shape at every quarter.
 	 */
-	/*
-	 * In 256 levels of how much of each pixel the letter covers: its
-	 * edges are mixed into what is under them where it is put down
-	 * (dp_put_gray), which is what makes a proportional face read as
-	 * it was drawn rather than as stairs.
-	 */
-	flags = FT_LOAD_RENDER | FT_LOAD_NO_HINTING;
+	fn_count.made++;
 	{
-		UD	t = fn_now();
-		FT_Error err = load_styled(f, gi, flags);
+		UD	 t = fn_now();
+		FT_Error err = render_letter(f, gi, phase);
 
 		fn_count.ms_make += fn_now() - t;
 		if ( err != 0 ) {
-			return NULL;
+			g->nopix |= bit;	/* the advance stands; nothing to draw */
+			return g;
 		}
 	}
 	bm = &face->glyph->bitmap;
-	if ( g == NULL ) {
-		g = cache_room(fid, f->px, look_of(f), cp);
-	}
-	g->used = TRUE;
-	/*
-	 * The advance is settled the first time it is asked for and never
-	 * changes afterwards.
-	 *
-	 * Where a line breaks is worked out before the letters are made,
-	 * and the letters are made when they are drawn. If the number the
-	 * breaking used and the number the drawing used could differ -- the
-	 * font's own advance against the one the grid rounded it to -- the
-	 * two would drift apart along the line, and the line would run past
-	 * the edge it was broken to fit inside.
-	 */
-	if ( !g->has_adv ) {
-		g->adv = advance_of(f, face->glyph->advance.x, &g->up, &g->down);
-		g->has_adv = TRUE;
-	}
-	g->left  = face->glyph->bitmap_left;
-	g->top   = face->glyph->bitmap_top;
-	g->w     = (INT)bm->width;
-	g->h     = (INT)bm->rows;
-	g->pitch = (INT)bm->pitch;
-	g->when  = ++fn_clock;
-	g->drawn = TRUE;
-	g->nopix = FALSE;
-	n = g->pitch * g->h;
-	if ( g->bm != NULL ) {
-		fn_held -= (SZ)g->nbytes;	/* the size it was before */
-		Kfree(g->bm);
-		g->bm = NULL;
-		g->nbytes = 0;
-	}
-	if ( bm->buffer != NULL && n > 0
-	  && ( bm->pixel_mode == FT_PIXEL_MODE_MONO || bm->pixel_mode == FT_PIXEL_MODE_GRAY ) ) {
-		g->bm = glyph_room(g, n);
-		g->gray = ( bm->pixel_mode == FT_PIXEL_MODE_GRAY );
-	}
-	if ( g->bm == NULL ) {
-		/* not the form this store holds, or no room to hold it: the
-		   measurements are still worth keeping, the pixels are not */
-		g->w = 0;
-		g->h = 0;
-		g->drawn = FALSE;
-		g->nopix = TRUE;
-		if ( want_pixels && bm->buffer != NULL ) {
-			return NULL;	/* the caller draws it the long way */
+	n = (INT)bm->pitch * (INT)bm->rows;
+	if ( bm->buffer == NULL || n <= 0 || bm->pitch < 0
+	  || ( bm->pixel_mode != FT_PIXEL_MODE_MONO && bm->pixel_mode != FT_PIXEL_MODE_GRAY ) ) {
+		/* nothing to draw (a space), or not the form this store
+		   holds: the slot has it, for the long way */
+		g->nopix |= bit;
+		if ( p_loose != NULL && bm->buffer != NULL && n != 0 ) {
+			*p_loose = TRUE;
+			g->nopix &= ~bit;
 		}
 		return g;
 	}
-	g->nbytes = n;
-	for ( row = 0; row < n; row++ ) {
-		g->bm[row] = bm->buffer[row];
+	px = (GPIX *)glyph_room(g, (INT)sizeof(GPIX) + n);
+	if ( px == NULL ) {
+		/* no room to keep it: put down from the slot this once */
+		if ( p_loose != NULL ) {
+			*p_loose = TRUE;
+		}
+		return g;
 	}
+	px->left   = face->glyph->bitmap_left;
+	px->top    = face->glyph->bitmap_top;
+	px->w      = (INT)bm->width;
+	px->h      = (INT)bm->rows;
+	px->pitch  = (INT)bm->pitch;
+	px->gray   = (BOOL)( bm->pixel_mode == FT_PIXEL_MODE_GRAY );
+	px->nbytes = (INT)sizeof(GPIX) + n;
+	for ( row = 0; row < n; row++ ) {
+		px->bm[row] = bm->buffer[row];
+	}
+	g->pix[phase] = px;
 
 	return g;
 }
@@ -937,6 +1022,9 @@ EXPORT ER fn_open_mem( CONST UB *data, SZ size, INT index, ID *p_fid )
 	f->gsub = NULL;
 	f->gsub_len = 0;
 	f->nvsub = 0;
+	f->from_obj = FALSE;
+	f->index = (INT)index;
+	knl_memset(&f->reg, 0, sizeof(f->reg));
 	f->used  = TRUE;
 	leave();
 
@@ -1103,6 +1191,8 @@ EXPORT ER fn_open_obj( CONST TS_UUID *uuid, INT recno, INT index, ID *p_fid )
 		if ( g != NULL ) {
 			g->bytes = mem;			/* ours to give back */
 			g->pages = pages;
+			g->from_obj = TRUE;
+			g->obj = *uuid;
 		}
 		return E_OK;
 	}
@@ -1190,6 +1280,9 @@ EXPORT ER fn_open_file( CONST char *path, INT index, ID *p_fid )
 	f->gsub = NULL;
 	f->gsub_len = 0;
 	f->nvsub = 0;
+	f->from_obj = FALSE;
+	f->index = index;
+	knl_memset(&f->reg, 0, sizeof(f->reg));
 	f->used = TRUE;
 	leave();
 
@@ -1449,13 +1542,13 @@ LOCAL void blit( INT gid, CONST FT_Bitmap *bm, INT x, INT y, UW colour )
  * A letter drawn into an environment that records (dp_open_rec): handed
  * on as the glyph of the face it is, placed by a matrix, rather than as
  * pixels. The matrix does to the glyph's outline -- in pixels at the
- * face's size, y going up -- what load_styled does before the outline
+ * face's size, y going up -- what render_letter does before the outline
  * is made into pixels, and then puts it where the pixels would have
  * gone: across by the width asked for (xpx), leaned for italic, turned
  * in its box when the face is turned. 'x' is where the pixels' origin
- * is put on the line and 'base' the baseline.
+ * is put on the line, in 65536ths of a pixel, and 'base' the baseline.
  */
-LOCAL void rec_letter( INT gid, FONT *f, UW cp, INT x, INT base, UW colour )
+LOCAL void rec_letter( INT gid, FONT *f, UW cp, FT_Fixed x, INT base, UW colour )
 {
 	T_DPRECGLY	r;
 	FT_UInt		gi = glyph_index(f, cp);
@@ -1474,7 +1567,7 @@ LOCAL void rec_letter( INT gid, FONT *f, UW cp, INT x, INT base, UW colour )
 		r.m[1] = 0;
 		r.m[2] = (W)lean;
 		r.m[3] = -0x10000;
-		r.m[4] = (W)( (FT_Fixed)x << 16 );
+		r.m[4] = (W)x;
 		r.m[5] = (W)( (FT_Fixed)base << 16 );
 	} else {
 		FT_Angle	a = (FT_Angle)f->angle << 16;
@@ -1489,7 +1582,7 @@ LOCAL void rec_letter( INT gid, FONT *f, UW cp, INT x, INT base, UW colour )
 		r.m[1] = (W)FT_MulFix(sn, sx);
 		r.m[2] = (W)( FT_MulFix(c, lean) + sn );
 		r.m[3] = (W)( FT_MulFix(sn, lean) - c );
-		r.m[4] = (W)( ( (FT_Fixed)x << 16 ) + ( w << 10 ) / 2
+		r.m[4] = (W)( x + ( w << 10 ) / 2
 			      - FT_MulFix(c, ( adv << 10 ) / 2) - FT_MulFix(sn, cy << 10) );
 		r.m[5] = (W)( ( (FT_Fixed)base << 16 ) - ( cy << 10 )
 			      + FT_MulFix(c, cy << 10) - FT_MulFix(sn, ( adv << 10 ) / 2) );
@@ -1497,14 +1590,77 @@ LOCAL void rec_letter( INT gid, FONT *f, UW cp, INT x, INT base, UW colour )
 	(void)dp_rec_glyph(gid, &r);
 }
 
+/* ---------------------------------------------------------------- the base face */
+
+/*
+ * A letter the face has none of is drawn from the face of its base
+ * family (T_FNREG.base) when that face has it. For the length of one
+ * walk the base face is set as the face is -- its size, look and turn
+ * -- and what it was set to is put back when the walk is done
+ * (base_end): the base is usually a face the system draws with too.
+ */
+typedef struct {
+	FONT		*b;		/* the base face, once set as the face */
+	T_FNSTATE	was;		/* what it was set to before */
+} BASEW;
+
+LOCAL FONT *face_named( CONST UB *name, CONST FONT *not );
+
+LOCAL FONT *letter_face( FONT *f, UW cp, BASEW *w )
+{
+	FONT		*b;
+	T_FNSTATE	st;
+
+	if ( f->reg.base[0] == 0 || FT_Get_Char_Index(f->face, (FT_ULong)cp) != 0 ) {
+		return f;
+	}
+	b = ( w->b != NULL ) ? w->b : face_named(f->reg.base, f);
+	if ( b == NULL || FT_Get_Char_Index(b->face, (FT_ULong)cp) == 0 ) {
+		return f;
+	}
+	if ( w->b == NULL ) {
+		w->was.px = b->px;
+		w->was.style = b->style;
+		w->was.xpx = b->xpx;
+		w->was.angle = b->angle;
+		st.px = f->px;
+		st.style = f->style;
+		st.xpx = f->xpx;
+		st.angle = f->angle;
+		if ( state_put(b, &st) < E_OK ) {
+			return f;
+		}
+		w->b = b;
+	}
+	b->angle = f->angle;
+	return b;
+}
+
+LOCAL void base_end( BASEW *w )
+{
+	if ( w->b != NULL ) {
+		(void)state_put(w->b, &w->was);
+		w->b = NULL;
+	}
+}
+
 /*
  * The one walk. `gid` below zero means do not draw; `limit` at or above
  * zero means stop when the pen would pass it and say how many bytes fit.
+ *
+ * The pen is kept in 64ths of a pixel and moves by each letter's own
+ * advance, unrounded; each letter is put down at the quarter of a pixel
+ * nearest where the pen is. What is said back -- the width, and where
+ * the text stops fitting -- is the pen rounded to the nearest pixel, so
+ * that a string measures what it draws to within half a pixel, and the
+ * width of the first k letters of a string is where its k-th letter
+ * begins: a caret put after them stands against the letter.
  */
-LOCAL INT walk( INT gid, FONT *f, INT x, INT y, CONST UB *s, UW colour,
+LOCAL INT walk( INT gid, FONT *f0, INT x, INT y, CONST UB *s, UW colour,
 		INT limit, INT *p_fit )
 {
-	FT_Face	face = f->face;
+	FONT	*f = f0;
+	BASEW	bw;
 	INT	pen = 0, i = 0;
 	/*
 	 * A walk that is only measuring does not need the pixels. Making
@@ -1512,83 +1668,72 @@ LOCAL INT walk( INT gid, FONT *f, INT x, INT y, CONST UB *s, UW colour,
 	 * is measured at least as often as it is drawn -- once to break
 	 * its lines and once to know how tall it came to.
 	 */
-	FT_Int32 flags = ( gid >= 0 )
-			 ? (FT_LOAD_RENDER
-			    | FT_LOAD_NO_HINTING)
-			 : (FT_LOAD_DEFAULT | FT_LOAD_NO_HINTING);
+	BOOL	draw = (BOOL)( gid >= 0 );
 	/* a page being recorded takes the glyphs themselves, not their pixels */
-	BOOL	rec = (BOOL)( gid >= 0 && dp_is_rec(gid) );
+	BOOL	rec = (BOOL)( draw && dp_is_rec(gid) );
 
+	bw.b = NULL;
 	while ( s[i] != '\0' ) {
 		UW		cp;
-		INT		n = 1, adv;
+		INT		n = 1, q, phase;
+		BOOL		loose = FALSE;
 		CONST GLYPH	*g;
 
 		cp = utf8_next(s + i, &n);
-		g = glyph_of(f, fn_id_of(f), cp, (BOOL)( gid >= 0 && !rec ));
+		f = letter_face(f0, cp, &bw);
+		q = ( pen + ( 1 << ( FN_PHASE_SH - 1 ) ) ) >> FN_PHASE_SH;
+		phase = ( draw && !rec ) ? ( q & ( FN_PHASES - 1 ) ) : 0;
+		g = glyph_of(f, fn_id_of(f), cp, (BOOL)( draw && !rec ), phase, &loose);
 		if ( rec ) {
-			adv = ( g != NULL ) ? g->adv : f->px;
-			if ( limit >= 0 && pen + adv > limit ) {
+			INT	adv = ( g != NULL ) ? g->adv : f->px * 64;
+
+			if ( limit >= 0 && ( ( pen + adv + 32 ) >> 6 ) > limit ) {
 				break;
 			}
-			rec_letter(gid, f, cp, x + pen, y, colour);
+			rec_letter(gid, f, cp, ( (FT_Fixed)x << 16 ) + ( (FT_Fixed)pen << 10 ),
+				   y, colour);
 			pen += adv;
 			i += n;
 			continue;
 		}
-		if ( g != NULL ) {
-			adv = g->adv;
-			if ( limit >= 0 && pen + adv > limit ) {
-				break;
-			}
-			if ( gid >= 0 && g->w > 0 && g->h > 0 ) {
-				UD	t = fn_now();
+		if ( g == NULL ) {
+			i += n;			/* the face cannot say: nothing, no room */
+			continue;
+		}
+		if ( limit >= 0 && ( ( pen + g->adv + 32 ) >> 6 ) > limit ) {
+			break;
+		}
+		if ( draw ) {
+			INT		at = x + ( q >> ( 6 - FN_PHASE_SH ) );
+			CONST GPIX	*px = g->pix[phase];
+			UD		t = fn_now();
 
-				if ( g->gray ) {
-					dp_put_gray(gid, x + pen + g->left, y - g->top,
-						    g->bm, g->pitch, g->w, g->h, colour);
+			if ( loose ) {
+				/* made, but not kept: from the slot, this once */
+				blit(gid, &f->face->glyph->bitmap, at + f->face->glyph->bitmap_left,
+				     y - f->face->glyph->bitmap_top, colour);
+				fn_count.put++;
+			} else if ( px != NULL && px->w > 0 && px->h > 0 ) {
+				if ( px->gray ) {
+					dp_put_gray(gid, at + px->left, y - px->top,
+						    px->bm, px->pitch, px->w, px->h, colour);
 				} else {
-					dp_put_mono(gid, x + pen + g->left, y - g->top,
-						    g->bm, g->pitch, g->w, g->h, colour);
+					dp_put_mono(gid, at + px->left, y - px->top,
+						    px->bm, px->pitch, px->w, px->h, colour);
 				}
-				fn_count.ms_put += fn_now() - t;
 				fn_count.put++;
 			}
-			pen += adv;
-			i += n;
-			continue;
+			fn_count.ms_put += fn_now() - t;
 		}
-		{
-			FT_UInt	gi = glyph_index(f, cp);
-
-			/* not in the store and not the form it holds: make
-			   it and put it down without keeping it */
-			if ( load_styled(f, gi, flags) != 0 ) {
-				i += n;
-				continue;
-			}
-			{
-				INT	up, down;
-
-				adv = advance_of(f, face->glyph->advance.x, &up, &down);
-			}
-			if ( limit >= 0 && pen + adv > limit ) {
-				break;
-			}
-			if ( gid >= 0 ) {
-				blit(gid, &face->glyph->bitmap,
-				     x + pen + face->glyph->bitmap_left,
-				     y - face->glyph->bitmap_top, colour);
-			}
-			pen += adv;
-			i += n;
-		}
+		pen += g->adv;
+		i += n;
 	}
+	base_end(&bw);
 	if ( p_fit != NULL ) {
 		*p_fit = i;
 	}
 
-	return pen;
+	return ( pen + 32 ) >> 6;
 }
 
 LOCAL INT fn_draw_nl( INT gid, ID fid, INT x, INT y, CONST UB *utf8, UW colour )
@@ -1706,19 +1851,24 @@ LOCAL BOOL has_vert_nl( FONT *f, UW cp )
  * The walk down a line: each letter in a box the size's height tall (a
  * turned one as tall as its turned box), across the box centred on cx.
  */
-LOCAL INT vwalk( INT gid, FONT *f, INT cx, INT y, CONST UB *s, UW colour )
+LOCAL INT vwalk( INT gid, FONT *f0, INT cx, INT y, CONST UB *s, UW colour )
 {
+	FONT	*f = f0;
 	INT	pen = 0, i = 0, em = f->px, top = em_top(f);
 	INT	keep = f->angle;
-	ID	fid = fn_id_of(f);
+	ID	fid;
 	BOOL	rec = (BOOL)( gid >= 0 && dp_is_rec(gid) );
+	BASEW	bw;
 
+	bw.b = NULL;
 	while ( s[i] != '\0' ) {
-		INT		n = 1, dx = 0, dy = 0, x, base, adv;
+		INT		n = 1, dx = 0, dy = 0, base, adv, q = 0, phase = 0;
 		UW		cp = utf8_next(s + i, &n);
-		BOOL		turned = (BOOL)( keep != 0 );
+		BOOL		turned = (BOOL)( keep != 0 ), loose = FALSE;
 		CONST GLYPH	*g;
 
+		f = letter_face(f0, cp, &bw);
+		fid = fn_id_of(f);
 		if ( keep == 0 && ( f->style & FN_ST_VERT ) != 0 ) {
 			INT	k = vert_kind(cp);
 
@@ -1735,7 +1885,21 @@ LOCAL INT vwalk( INT gid, FONT *f, INT cx, INT y, CONST UB *s, UW colour )
 				}
 			}
 		}
-		g = glyph_of(f, fid, cp, (BOOL)( gid >= 0 && !rec ));
+		/*
+		 * The letter's box centred on the line: its left edge half its
+		 * advance left of the middle, to the quarter of a pixel.
+		 */
+		if ( gid >= 0 && !rec ) {
+			g = glyph_of(f, fid, cp, FALSE, 0, NULL);
+			if ( g != NULL ) {
+				q = ( ( ( cx + dx ) << 6 ) - g->adv / 2 + ( 1 << ( FN_PHASE_SH - 1 ) ) )
+				    >> FN_PHASE_SH;
+				phase = q & ( FN_PHASES - 1 );
+				g = glyph_of(f, fid, cp, TRUE, phase, &loose);
+			}
+		} else {
+			g = glyph_of(f, fid, cp, FALSE, 0, NULL);
+		}
 		if ( g == NULL ) {
 			f->angle = keep;
 			pen += em;
@@ -1744,32 +1908,40 @@ LOCAL INT vwalk( INT gid, FONT *f, INT cx, INT y, CONST UB *s, UW colour )
 		}
 		if ( turned ) {
 			adv = g->up + g->down;
-			x = cx - g->adv / 2;
 			base = y + pen + g->up;
 		} else {
 			adv = em;
-			x = cx - g->adv / 2 + dx;
 			base = y + pen + top + dy;
 		}
 		if ( rec ) {
-			rec_letter(gid, f, cp, x, base, colour);
-		} else if ( gid >= 0 && g->w > 0 && g->h > 0 && g->bm != NULL ) {
-			UD	t = fn_now();
+			rec_letter(gid, f, cp, ( (FT_Fixed)( cx + dx ) << 16 ) - ( (FT_Fixed)g->adv << 9 ),
+				   base, colour);
+		} else if ( gid >= 0 ) {
+			INT		x = q >> ( 6 - FN_PHASE_SH );
+			CONST GPIX	*px = g->pix[phase];
+			UD		t = fn_now();
 
-			if ( g->gray ) {
-				dp_put_gray(gid, x + g->left, base - g->top,
-					    g->bm, g->pitch, g->w, g->h, colour);
-			} else {
-				dp_put_mono(gid, x + g->left, base - g->top,
-					    g->bm, g->pitch, g->w, g->h, colour);
+			if ( loose ) {
+				blit(gid, &f->face->glyph->bitmap, x + f->face->glyph->bitmap_left,
+				     base - f->face->glyph->bitmap_top, colour);
+				fn_count.put++;
+			} else if ( px != NULL && px->w > 0 && px->h > 0 ) {
+				if ( px->gray ) {
+					dp_put_gray(gid, x + px->left, base - px->top,
+						    px->bm, px->pitch, px->w, px->h, colour);
+				} else {
+					dp_put_mono(gid, x + px->left, base - px->top,
+						    px->bm, px->pitch, px->w, px->h, colour);
+				}
+				fn_count.put++;
 			}
 			fn_count.ms_put += fn_now() - t;
-			fn_count.put++;
 		}
 		f->angle = keep;
 		pen += adv;
 		i += n;
 	}
+	base_end(&bw);
 
 	return pen;
 }
@@ -1859,7 +2031,7 @@ LOCAL ER fn_extent_nl( ID fid, CONST UB *utf8, INT *p_above, INT *p_below )
 		while ( utf8[i] != '\0' ) {
 			INT		n = 1;
 			UW		cp = utf8_next(utf8 + i, &n);
-			CONST GLYPH	*g = glyph_of(f, fn_id_of(f), cp, FALSE);
+			CONST GLYPH	*g = glyph_of(f, fn_id_of(f), cp, FALSE, 0, NULL);
 
 			if ( g != NULL ) {
 				if ( g->up > up ) up = g->up;
@@ -1912,12 +2084,27 @@ EXPORT INT fn_fit( ID fid, CONST UB *utf8, INT width )
 
 /* ---------------------------------------------------------------- which face */
 
+/* Whether a face is one to be found by kind and listed */
+LOCAL BOOL in_use( CONST FONT *f )
+{
+	return (BOOL)( f->used && f->reg.use == FN_USE_ON );
+}
+
+/* The family a face goes by: the one it is registered as, else its own */
+LOCAL CONST char *fam_of( CONST FONT *f )
+{
+	if ( f->reg.family[0] != 0 ) {
+		return (CONST char *)f->reg.family;
+	}
+	return ( f->face != NULL && f->face->family_name != NULL ) ? f->face->family_name : "";
+}
+
 EXPORT INT fn_nface( void )
 {
 	INT	i, n = 0;
 
 	for ( i = 0; i < FN_MAX_FONT; i++ ) {
-		if ( fn_tab[i].used ) {
+		if ( in_use(&fn_tab[i]) ) {
 			n++;
 		}
 	}
@@ -1930,7 +2117,7 @@ EXPORT ID fn_face_at( INT k )
 	INT	i;
 
 	for ( i = 0; i < FN_MAX_FONT; i++ ) {
-		if ( fn_tab[i].used && k-- == 0 ) {
+		if ( in_use(&fn_tab[i]) && k-- == 0 ) {
 			return (ID)( i + 1 );
 		}
 	}
@@ -1947,7 +2134,7 @@ EXPORT INT fn_family( ID fid, UB *buf, INT max )
 	if ( f == NULL || buf == NULL || max <= 0 ) {
 		return E_PAR;
 	}
-	nm = ( f->face->family_name != NULL ) ? f->face->family_name : "";
+	nm = fam_of(f);
 	while ( nm[n] != 0 && n < max - 1 ) {
 		buf[n] = (UB)nm[n];
 		n++;
@@ -1993,18 +2180,46 @@ LOCAL BOOL has_word( CONST char *in, CONST char *w )
 	return FALSE;
 }
 
-/* The first face whose family has one of the words in it, or 0 */
-LOCAL ID face_with( CONST char *w1, CONST char *w2 )
+/* A face in use whose family is 'name', other than 'not'; NULL none */
+LOCAL FONT *face_named( CONST UB *name, CONST FONT *not )
+{
+	INT	i, n = (INT)tstrlen_u(name);
+
+	for ( i = 0; i < FN_MAX_FONT; i++ ) {
+		if ( in_use(&fn_tab[i]) && &fn_tab[i] != not && same_name(name, n, fam_of(&fn_tab[i])) ) {
+			return &fn_tab[i];
+		}
+	}
+
+	return NULL;
+}
+
+/*
+ * The first face in use of a kind: one registered with a class is of
+ * the kind its class says (the ends of its strokes ornamented, CLS_SERIF,
+ * or not) when serif is 0 or 1; any other by a word of its family. serif
+ * below zero: by the words alone.
+ */
+#define CLS_SERIF	0x6000U
+
+LOCAL ID face_with( CONST char *w1, CONST char *w2, INT serif )
 {
 	INT	i;
 
 	for ( i = 0; i < FN_MAX_FONT; i++ ) {
+		CONST FONT	*f = &fn_tab[i];
 		CONST char	*nm;
 
-		if ( !fn_tab[i].used || fn_tab[i].face->family_name == NULL ) {
+		if ( !in_use(f) ) {
 			continue;
 		}
-		nm = fn_tab[i].face->family_name;
+		if ( serif >= 0 && f->reg.cls != 0 ) {
+			if ( ( ( f->reg.cls & CLS_SERIF ) != 0 ) == ( serif != 0 ) ) {
+				return (ID)( i + 1 );
+			}
+			continue;
+		}
+		nm = fam_of(f);
 		if ( has_word(nm, w1) || ( w2 != NULL && has_word(nm, w2) ) ) {
 			return (ID)( i + 1 );
 		}
@@ -2013,14 +2228,55 @@ LOCAL ID face_with( CONST char *w1, CONST char *w2 )
 	return 0;
 }
 
-EXPORT ID fn_find( CONST UB *names )
+/*
+ * How near a face's look is to the one wanted: each of the looks it has
+ * counts for it when wanted and against it, more, when not -- a face of
+ * bold letters is a poor answer to plain ones.
+ */
+LOCAL INT look_score( UINT has, UINT want )
+{
+	INT	s = 0, b;
+
+	for ( b = 0; b < 4; b++ ) {
+		UINT	m = 1U << b;
+
+		if ( ( has & m ) != 0 ) {
+			s += ( ( want & m ) != 0 ) ? 2 : -3;
+		}
+	}
+
+	return s;
+}
+
+/* The face of the family a (n bytes) in the use asked for, most nearly the look; 0 none */
+LOCAL ID family_face( CONST UB *a, INT n, UINT want, UINT use )
+{
+	INT	i, best = -1, bs = -100, s;
+
+	for ( i = 0; i < FN_MAX_FONT; i++ ) {
+		CONST FONT	*f = &fn_tab[i];
+
+		if ( !f->used || f->reg.use != use || !same_name(a, n, fam_of(f)) ) {
+			continue;
+		}
+		s = look_score(f->reg.attr & FN_FA_LOOK, want);
+		if ( s > bs ) {
+			bs = s;
+			best = i;
+		}
+	}
+
+	return ( best >= 0 ) ? (ID)( best + 1 ) : 0;
+}
+
+EXPORT ID fn_find_style( CONST UB *names, UINT want, UINT *p_has )
 {
 	CONST UB	*p = names;
+	ID		fid = 0;
 
-	while ( p != NULL && *p != 0 ) {
+	while ( fid == 0 && p != NULL && *p != 0 ) {
 		CONST UB	*a, *e;
-		INT		i, n;
-		ID		fid = 0;
+		INT		n;
 
 		while ( *p == ' ' || *p == ',' ) {
 			p++;
@@ -2037,28 +2293,99 @@ EXPORT ID fn_find( CONST UB *names )
 		if ( n <= 0 ) {
 			continue;
 		}
-		for ( i = 0; i < FN_MAX_FONT; i++ ) {
-			if ( fn_tab[i].used && fn_tab[i].face->family_name != NULL
-			  && same_name(a, n, fn_tab[i].face->family_name) ) {
-				return (ID)( i + 1 );
-			}
+		fid = family_face(a, n, want, FN_USE_ON);
+		if ( fid == 0 ) {
+			fid = family_face(a, n, want, FN_USE_TRIAL);
+		}
+		if ( fid > 0 ) {
+			break;
 		}
 		/* the general names: the first face of that kind */
 		if ( same_name(a, n, "serif") || same_name(a, n, "明朝")
 		  || same_name(a, n, "mincho") ) {
-			fid = face_with("Serif", "Mincho");
+			fid = face_with("Serif", "Mincho", 1);
 		} else if ( same_name(a, n, "sans-serif") || same_name(a, n, "ゴシック")
 			 || same_name(a, n, "gothic") ) {
-			fid = face_with("Sans", "Gothic");
+			fid = face_with("Sans", "Gothic", 0);
 		} else if ( same_name(a, n, "monospace") ) {
-			fid = face_with("Mono", NULL);
+			fid = face_with("Mono", NULL, -1);
 		}
-		if ( fid > 0 ) {
-			return fid;
+	}
+	if ( fid == 0 ) {
+		fid = fn_sys;
+	}
+	if ( p_has != NULL ) {
+		*p_has = ( fid > 0 && fid <= FN_MAX_FONT ) ? ( fn_tab[fid - 1].reg.attr & FN_FA_LOOK & want ) : 0;
+	}
+
+	return fid;
+}
+
+EXPORT ID fn_find( CONST UB *names )
+{
+	return fn_find_style(names, 0, NULL);
+}
+
+/* ---------------------------------------------------------------- what a face is registered as */
+
+EXPORT ER fn_set_reg( ID fid, CONST T_FNREG *reg )
+{
+	FONT	*f;
+
+	if ( reg == NULL ) {
+		return E_PAR;
+	}
+	enter();
+	f = fn_of(fid);
+	if ( f == NULL ) {
+		leave();
+		return E_ID;
+	}
+	f->reg = *reg;
+	f->reg.family[FN_NAME_MAX - 1] = 0;
+	f->reg.base[FN_NAME_MAX - 1] = 0;
+	leave();
+
+	return E_OK;
+}
+
+EXPORT ER fn_get_reg( ID fid, T_FNREG *reg )
+{
+	FONT	*f;
+
+	if ( reg == NULL ) {
+		return E_PAR;
+	}
+	enter();
+	f = fn_of(fid);
+	if ( f != NULL ) {
+		*reg = f->reg;
+	}
+	leave();
+
+	return ( f != NULL ) ? E_OK : E_ID;
+}
+
+EXPORT ID fn_of_obj( CONST TS_UUID *uuid, INT index )
+{
+	INT	i, k;
+
+	if ( uuid == NULL ) {
+		return 0;
+	}
+	for ( i = 0; i < FN_MAX_FONT; i++ ) {
+		CONST FONT	*f = &fn_tab[i];
+
+		if ( !f->used || !f->from_obj || f->index != index || f->reg.use == FN_USE_TRIAL ) {
+			continue;
+		}
+		for ( k = 0; k < 16 && f->obj.b[k] == uuid->b[k]; k++ ) ;
+		if ( k == 16 ) {
+			return (ID)( i + 1 );
 		}
 	}
 
-	return fn_sys;
+	return 0;
 }
 
 /* Whether a file name ends as a font file does */

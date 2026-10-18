@@ -2947,4 +2947,96 @@ EXPORT void v3d_compose_start( void )
 	}
 }
 
+/* ---------------------------------------------------------------- the check of compute dispatch */
+
+#define CSD_WORDS	( CP_CSD_NWG * CP_CSD_WG_SIZE )
+#define CSD_PATTERN	0xDEADBEEFU		/* what the buffer holds before the dispatch */
+
+/*
+ * One dispatch of the check's compute shader (cp_code_csd) through the
+ * job queue, as a process's would go: CP_CSD_NWG workgroups of
+ * CP_CSD_WG_SIZE invocations, invocation n writing 3 * n + 1 at word n
+ * of the buffer. One workgroup a supergroup and one batch of 16 a
+ * workgroup, so the dispatch is CP_CSD_NWG batches; from revision 6 on
+ * the count is written as it is, before it one less. Compute dispatch
+ * is offered for the time of the check alone; TRUE when every word came
+ * back right, and the console tells which did not.
+ */
+EXPORT BOOL v3d_csd_check( void )
+{
+	T_GPUBO		*bo[3] = { NULL, NULL, NULL };	/* code, uniforms, the buffer */
+	T_GPUINFO	gi;
+	T_GPUJOB	job;
+	UW		unif[sizeof(cp_unif_csd) / 8], fill[CSD_WORDS], *res;
+	UW		buf;
+	UINT		i, nunif = sizeof(cp_unif_csd) / 8, bad = 0;
+	UD		t0;
+	D		fence;
+	ER		er = E_OK;
+	BOOL		ok = FALSE;
+
+	if ( knl_gpu_ref(&gi) < E_OK || gi.ver != CP_V3D_VER ) {
+		return FALSE;
+	}
+	for ( i = 0; i < 3 && er >= E_OK; i++ ) {
+		bo[i] = knl_gpu_bo_create(PAGE_SIZE, 0, &er);
+	}
+	if ( er < E_OK ) {
+		tm_printf((UB *)"v3d: compute dispatch: no BO for the check (%d)\n", er);
+		goto out;
+	}
+	buf = bo_gpu(bo[2]);
+	for ( i = 0; i < nunif; i++ ) {
+		unif[i] = ( cp_unif_csd[i][0] == CP_U_SSBO ) ? buf : cp_unif_csd[i][1];
+	}
+	for ( i = 0; i < CSD_WORDS; i++ ) {
+		fill[i] = CSD_PATTERN;
+	}
+	bo_put(bo[0], 0, cp_code_csd, sizeof(cp_code_csd));
+	bo_put(bo[1], 0, unif, nunif * 4);
+	bo_put(bo[2], 0, fill, sizeof(fill));
+
+	knl_memset(&job, 0, sizeof(job));
+	job.kind = GPU_JOB_CSD;
+	job.u.csd.cfg[0] = (UW)CP_CSD_NWG << 16;		/* workgroups in x, from 0 */
+	job.u.csd.cfg[1] = 1U << 16;
+	job.u.csd.cfg[2] = 1U << 16;
+	job.u.csd.cfg[3] = ( 1U << 8 ) | ( 0U << 12 ) | CP_CSD_WG_SIZE;	/* a workgroup a supergroup, one batch */
+	job.u.csd.cfg[4] = ( gi.rev >= 6 ) ? CP_CSD_NWG : CP_CSD_NWG - 1;
+	job.u.csd.cfg[5] = bo_gpu(bo[0]) | ( CP_CSD_SINGLE_SEG ? 0x2U : 0 )
+					 | ( CP_CSD_THREADS == 4 ? 0x1U : 0 );
+	job.u.csd.cfg[6] = bo_gpu(bo[1]);
+
+	v3d_csd_offer(TRUE);
+	t0 = ticks();
+	fence = knl_gpu_submit(&job, bo, 3);
+	er = ( fence > 0 ) ? knl_gpu_wait(fence, 1000 * 1000) : (ER)fence;
+	if ( er < E_OK ) {
+		tm_printf((UB *)"v3d: compute dispatch: the check's job failed (%d)\n", er);
+		goto out;
+	}
+	res = (UW *)PA2VA(knl_gpu_bo_page(bo[2], 0));
+	knl_gpu_dcache_clean_inval((UBINT)res, sizeof(fill));
+	for ( i = 0; i < CSD_WORDS; i++ ) {
+		if ( res[i] != 3 * i + 1 ) {
+			if ( bad < 4 ) {
+				tm_printf((UB *)"v3d: compute dispatch: word %u is %08x, not %08x\n", i, res[i], 3 * i + 1);
+			}
+			bad++;
+		}
+	}
+	ok = ( bad == 0 );
+	tm_printf((UB *)"v3d: compute dispatch: %u of %u words right in %lu us; %s\n",
+		  CSD_WORDS - bad, CSD_WORDS, ticks_us(ticks() - t0),
+		  ok ? "offered (OpenGL ES 3.1)" : "not offered");
+out:
+	if ( !ok ) {
+		v3d_csd_offer(FALSE);
+	}
+	for ( i = 0; i < 3; i++ ) {
+		if ( bo[i] != NULL ) knl_gpu_bo_put(bo[i]);
+	}
+	return ok;
+}
+
 #endif /* RPI5 */

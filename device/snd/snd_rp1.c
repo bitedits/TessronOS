@@ -252,7 +252,7 @@ LOCAL UW rd( UBINT a )
 LOCAL void wr( UBINT a, UW v )
 {
 	*(volatile UW *)a = v;
-	Asm("dsb sy" ::: "memory");
+	DeviceBarrier();
 }
 
 LOCAL UB *blk_addr( INT i )

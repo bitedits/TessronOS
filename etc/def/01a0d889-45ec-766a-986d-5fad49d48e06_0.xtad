@@ -1,7 +1,7 @@
 <tad version="1.0" encoding="UTF-8" filename="実身の共通メニュー">
 <document>
 <p>実身の共通メニュー</p>
-<p>どの窓のメニューにも末尾に出る項目。メニューの定義。</p>
+<p>どのウインドウのメニューにも末尾に出る項目。メニューの定義。</p>
 </document>
 <menu>
 <item code="vobj">仮身操作<link id="01a0d889-45e8-730d-9735-a0a4cd451326_0.xtad" vobjid="01a0d8c3-2002-7b97-adc3-b7a4e0f2d6ee"/></item>

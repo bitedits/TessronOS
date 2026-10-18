@@ -1,0 +1,10 @@
+<tad version="1.0" encoding="UTF-8" filename="フォント設定の表示メニュー">
+<document>
+<p>フォント設定の表示メニュー</p>
+<p>書体の見本と注釈を別のウインドウに表示する。表示しているときは印が付く。メニューの定義。</p>
+</document>
+<menu>
+<item code="sample">見本表示</item>
+<item code="note">注釈表示</item>
+</menu>
+</tad>

@@ -588,6 +588,7 @@ LOCAL void kt_main_task( INT stacd, void *exinf )
 	RUN_SUITE(ob);
 	RUN_SUITE(psx);
 	RUN_SUITE_QEMU(vols, "no QEMU monitor to plug disks in through");
+	RUN_SUITE_QEMU(grow, "no QEMU monitor to plug a disk in through");
 #ifdef KT_ONE
 	RUN_SUITE_SCRATCH(tsfscut);	/* without end: only when it is named */
 #endif

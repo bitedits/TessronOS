@@ -1,0 +1,72 @@
+# The pop-ups of フォント設定 (design 10.6, 11.6), for tools/ui_run.py. The
+# window of システム環境設定 is at 160,80: the tab 書体 at 278,125, Noto Serif JP
+# on the list's third line at 300,194, 詳細情報 at 700,516. フォント設定 is at
+# 200,110, its panel's parts 206 right and 138 down of where the panel puts
+# them: 個別定義 at 500,163, ファミリ at 400,433. A list opens with the row of
+# the name chosen over the part, a row 20 high; the families are the face's
+# own first (Noto Serif JP), then those of the box's faces as the list
+# shows them.
+open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
+expect sysenv: ready
+expect sysenv: fonts 3
+wait 800
+win システム環境設定
+click 278 125
+wait 500
+click 300 194
+wait 300
+click 700 516
+expect sysenv: fontset open Noto Serif JP faces 1 registered
+wait 800
+shot pop_body
+# ファミリ: pressed, carried down a row and let go there
+hold 400 433
+wait 300
+move 400 445
+wait 150
+move 400 453
+wait 300
+shot pop_list
+up
+expect sysenv: fontset family Noto Sans
+wait 500
+shot pop_chosen
+# a click leaves the list standing; the row above the part, pressed, is chosen
+click 400 433
+wait 500
+shot pop_click
+click 400 413
+expect sysenv: fontset family Noto Serif JP
+wait 500
+# the keys: Down and Enter
+click 400 433
+wait 500
+key 51
+wait 300
+shot pop_key
+key 28
+expect sysenv: fontset family Noto Sans
+wait 500
+# Escape, and a press off the list, put it away as it was
+click 400 433
+wait 500
+key 29
+wait 300
+click 400 433
+wait 500
+click 100 650
+wait 500
+shot pop_away
+# 個別定義: one face, its list of one
+click 500 163
+wait 500
+shot pop_faces
+key 29
+wait 300
+# closed without a change of the face's settings saved
+key 08 01
+wait 800
+shot pop_end
+click 300 370
+expect sysenv: fontset closed
+absent !OACV!

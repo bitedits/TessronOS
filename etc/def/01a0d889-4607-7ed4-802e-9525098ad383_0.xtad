@@ -1,7 +1,7 @@
 <tad version="1.0" encoding="UTF-8" filename="実身/仮身検索のメニュー">
 <document>
 <p>実身/仮身検索のメニュー</p>
-<p>実身/仮身検索の窓のメニュー。メニューの定義。</p>
+<p>実身/仮身検索のウインドウのメニュー。メニューの定義。</p>
 </document>
 <menu>
 <include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2002-71b7-b062-bd4df16994b1"/></include>

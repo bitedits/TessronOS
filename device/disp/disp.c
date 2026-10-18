@@ -289,7 +289,7 @@ LOCAL void send_list( CONST RECTS *l, UINT page )
 			send_rows(fb, r.top, r.bottom, r.left, r.right);
 		}
 	}
-	Asm("dsb sy" ::: "memory");
+	DeviceBarrier();
 	(void)ts_get_mono(&t1);
 	disp_stat.send_us += ( t1 - t0 ) / 1000;
 }

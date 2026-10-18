@@ -172,6 +172,8 @@
 #define SYSDEF_MENU_SNDMIX	"01a0d889-46c0-7d64-8f85-a1b2c3d4e5f6"	/* 音量ミキサー */
 #define SYSDEF_MENU_BROWSER	"01a0d889-46bc-7e8b-8a9c-d2e3f4a5b678"	/* ブラウザ */
 #define SYSDEF_MENU_SYSENV_OP	"01a0d889-46bb-7d7a-9f8b-c1d2e3f4a567"	/* システム環境設定の操作 */
+#define SYSDEF_MENU_FONTSET	"01a0d889-4780-7a01-8b12-3c4d5e6f4780"	/* フォント設定 */
+#define SYSDEF_MENU_FONTSET_VIEW "01a0d889-4781-7a12-8b23-3c4d5e6f4781"	/* フォント設定の表示 */
 #define SYSDEF_MENU_USERENV	"01a0d889-46b7-7f36-9c47-8d9eaf0b1c23"	/* ユーザ環境設定 */
 #define SYSDEF_MENU_INFO	"01a0d889-46b8-7a47-8d58-9eaf0b1c2d34"	/* 管理情報 */
 #define SYSDEF_MENU_WINLIST	"01a0d889-46ba-7c69-8f7a-b0c1d2e3f456"	/* ウインドウ */

@@ -75,7 +75,7 @@ EXPORT void knl_rng_init( void )
 	if ( rng_ready ) {
 		return;
 	}
-	Asm("mrs %0, cntpct_el0" : "=r"(seed));
+	seed = ReadSysCounter();
 	seed ^= (UD)knl_dtb_addr * 0x2545F4914F6CDD1DULL;
 	seed ^= (UD)knl_dtb_size << 32;
 

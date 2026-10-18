@@ -26,6 +26,7 @@
  *	  <button num rect answer emph>name</button>	pushed
  *	  <select num rect value across nosel double><name/>...</select>
  *	  <list num rect value><name/>...</list>
+ *	  <popup num rect value emph><name/>...</popup>	one name, chosen from a list
  *	  <volume num rect lo hi value across emph box/>	box: its number box's num
  *	  <line rect/>
  *
@@ -298,6 +299,12 @@ LOCAL BOOL part( T_WMPANEL *def, CONST T_TADNODE *nd )
 		if ( is(nd, "select") && pt->count == 0 ) {
 			return FALSE;		/* a selector with no names is nothing */
 		}
+	} else if ( is(nd, "popup") ) {
+		/* its names may also be set only once the panel is open */
+		pt->type |= WM_PT_POPUP;
+		pt->count = names(def, nd, &at, "name");
+		pt->pool = at;
+		pt->value = num(nd, "value", ( pt->count > 0 ) ? 1 : 0);
 	} else if ( is(nd, "volume") ) {
 		pt->type |= VL_PARTS;
 		pt->lo = num(nd, "lo", 0);

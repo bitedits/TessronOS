@@ -8,7 +8,10 @@ Layout (512 byte sectors, GPT):
   2048   partition 1, basic data (FAT32): what the boot loader reads
          (config.txt, the device tree, tessronos.img) and /boot's files
   ...    partition 2, TessronOS (TSFS) type GUID: the system volume as
-         tools/mktsfs made it, attached at start as sda1 (CNF_OB_SYSVOL)
+         tools/mktsfs made it, attached at start as sda1 (CNF_OB_SYSVOL).
+         When it is the last partition, the first start grows it and its
+         volume into the rest of the card, up to CNF_SYSVOL_GROW_MB, and
+         moves the backup table to the card's end (design 7.7)
   ...    partition 3, only with --scratch-mb: the scratch type GUID, empty.
          The in-kernel tests (make KTEST=1) format it and write its
          sectors; they find it by that type and touch nothing else of
@@ -43,8 +46,7 @@ def main():
     scratch_mb = 0
     while args and args[0].startswith("--"):
         if args[0] == "--sys":
-            with open(args[1], "rb") as f:
-                sysvol = f.read()
+            sysvol = args[1]
             args = args[2:]
         elif args[0] == "--boot-mb":
             boot_mb = int(args[1])
@@ -62,7 +64,8 @@ def main():
     first_usable = 2 + entry_sectors
     p1_start, p1_sectors = 2048, boot_mb * 2048
     p2_start = p1_start + p1_sectors
-    p2_sectors = -(-len(sysvol) // SECTOR // 2048) * 2048
+    sysvol_len = os.path.getsize(sysvol)
+    p2_sectors = -(-sysvol_len // SECTOR // 2048) * 2048
     p3_start, p3_sectors = p2_start + p2_sectors, scratch_mb * 2048
     # the image ends one MB past the last partition, room for the backup table
     nsect = p3_start + p3_sectors + 2048
@@ -84,7 +87,11 @@ def main():
     entries_crc = crc32(bytes(entries))
     disk_guid = uuid.uuid4()
 
-    img = bytearray(nsect * SECTOR)
+    # what is built in memory: the tables and the boot partition; the system
+    # volume, gigabytes of it, is copied into the file a piece at a time
+    img = bytearray(p2_start * SECTOR)
+    tail_lba = nsect - 1 - entry_sectors
+    tail = bytearray((nsect - tail_lba) * SECTOR)
 
     mbr = bytearray(SECTOR)
     struct.pack_into("<B3sB3sII", mbr, 446,
@@ -95,16 +102,24 @@ def main():
     img[SECTOR:2 * SECTOR] = gpt_header(1, nsect - 1, first_usable, last_usable,
                                         2, entries_crc, disk_guid)
     img[2 * SECTOR:2 * SECTOR + len(entries)] = entries
-    backup_entry_lba = nsect - 1 - entry_sectors
-    img[backup_entry_lba * SECTOR:backup_entry_lba * SECTOR + len(entries)] = entries
-    img[(nsect - 1) * SECTOR:nsect * SECTOR] = gpt_header(
+    backup_entry_lba = tail_lba
+    tail[0:len(entries)] = entries
+    tail[(nsect - 1 - tail_lba) * SECTOR:] = gpt_header(
         nsect - 1, 1, first_usable, last_usable, backup_entry_lba, entries_crc, disk_guid)
 
     fat32_format(img, p1_start, p1_sectors, files)
-    img[p2_start * SECTOR:p2_start * SECTOR + len(sysvol)] = sysvol
-
+    piece = 64 * 1024 * 1024
     with open(out, "wb") as f:
+        f.truncate(nsect * SECTOR)
         f.write(img)
+        with open(sysvol, "rb") as v:
+            while True:
+                b = v.read(piece)
+                if not b:
+                    break
+                f.write(b)
+        f.seek(tail_lba * SECTOR)
+        f.write(tail)
     print("%s: %d MB, boot FAT32 %d MB, system volume %d MB%s"
           % (out, nsect * SECTOR // (1024 * 1024), boot_mb, p2_sectors // 2048,
              ", scratch %d MB" % scratch_mb if scratch_mb > 0 else ""))

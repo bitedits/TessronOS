@@ -110,6 +110,25 @@ typedef struct {
 LOCAL PANEL	pn_tab[WM_PANEL_MAX];
 
 /*
+ * The list of a pop-up, open: one at a time on the whole screen, since
+ * while it is open every input is its own. Its panel, the panel and the
+ * part it was opened from, which name its first row is (0 up), when the
+ * press that opened it was, and whether a press has been made in it
+ * since -- before one, a release just after the opening press leaves
+ * the list standing, which is how a click opens it.
+ */
+LOCAL INT	ls_pid = 0;
+LOCAL INT	ls_owner = 0;
+LOCAL INT	ls_part = -1;
+LOCAL INT	ls_first = 0;
+LOCAL UD	ls_when = 0;
+LOCAL BOOL	ls_pressed = FALSE;
+LOCAL INT	ls_hot0 = -1;		/* the row lit as it opened */
+
+LOCAL void pop_open( INT pid, INT i, UD when );
+LOCAL void pop_close( BOOL draw );
+
+/*
  * The caret of the box with the keys blinks, and one conversion at a
  * time is under way in one box of one panel: the converter's session is
  * kept here for the panels' boxes, as the text windows keep theirs.
@@ -124,9 +143,6 @@ LOCAL INT	pn_conv_i = -1;
 LOCAL INT	pn_first = 0;		/* the number of the first candidate listed */
 LOCAL INT	pn_roman = -1;		/* how the session is typed into, as last set */
 
-LOCAL void part_label_col( INT gid, CONST T_WMPART *pt, CONST T_DPRECT *r,
-			   INT indent, UW colour );
-LOCAL void part_label( INT gid, CONST T_WMPART *pt, CONST T_DPRECT *r, INT indent );
 LOCAL INT  list_rowh( void );
 LOCAL INT  list_rows( CONST T_DPRECT *r );
 LOCAL void list_press( PANEL *p, T_WMPART *pt, INT x, INT y );
@@ -292,6 +308,9 @@ EXPORT ER knl_pn_del( INT pid, INT i )
 	}
 	if ( i < 0 || i >= p->def.npart ) {
 		return E_PAR;
+	}
+	if ( ls_owner == pid && ls_part >= i ) {
+		pop_close(FALSE);		/* its part goes, or moves up one */
 	}
 	for ( k = i; k + 1 < p->def.npart; k++ ) {
 		p->def.part[k] = p->def.part[k + 1];
@@ -516,6 +535,14 @@ EXPORT ER wm_panel_close( INT pid )
 	if ( p == NULL ) {
 		return E_ID;
 	}
+	/* a pop-up's list goes with the panel it was opened from */
+	if ( pid == ls_pid ) {
+		ls_pid = 0;
+		ls_owner = 0;
+		ls_part = -1;
+	} else if ( pid == ls_owner ) {
+		pop_close(FALSE);
+	}
 	knl_wmobj_panel_close(pid);
 	/*
 	 * A menu that opened another takes it with it. The child is closed
@@ -591,71 +618,8 @@ EXPORT void knl_pn_wins_gone( CONST INT *wids, INT n )
 
 /* ---------------------------------------------------------------- drawing */
 
-/*
- * Everything in a panel is one of two shapes, and both are the same
- * three strokes.
- *
- * A raised thing is filled, outlined once in the shaded colour, and
- * outlined again in the lit colour with the far corner kept out of the
- * way -- a third of the corner short of the right and the foot -- so
- * that the light falls on the near side only. A sunken thing is the
- * same with the two colours the other way about, which is why pressing
- * a button needs no second drawing of anything.
- *
- * The corners are round. A part's corner comes from the look table, so
- * squaring off every part in the system is one number.
- */
-LOCAL void raised( INT gid, CONST T_DPRECT *r, INT rad, UW face, BOOL sunken )
-{
-	T_DPPAT		pat;
-	T_DPENV		env;
-	T_DPRECT	cut;
-	UW		light = wm_look(sunken ? WM_LOOK_SHADOW : WM_LOOK_LIGHT);
-	UW		dark  = wm_look(sunken ? WM_LOOK_LIGHT : WM_LOOK_SHADOW);
-
-	if ( r->right - r->left < 2 || r->bottom - r->top < 2 ) {
-		return;
-	}
-	dp_pat_colour(&pat, face);
-	dp_fill_round(gid, r, rad, rad, &pat);
-	dp_pat_colour(&pat, dark);
-	dp_frame_round(gid, r, rad, rad, 1, &pat);
-
-	if ( dp_ref(gid, &env) < E_OK ) {
-		return;
-	}
-	cut = env.visible;
-	if ( cut.right > r->right - rad / 3 )   cut.right = r->right - rad / 3;
-	if ( cut.bottom > r->bottom - rad / 3 ) cut.bottom = r->bottom - rad / 3;
-	if ( cut.right > cut.left && cut.bottom > cut.top ) {
-		dp_set_visible(gid, &cut);
-		dp_pat_colour(&pat, light);
-		dp_frame_round(gid, r, rad, rad, 1, &pat);
-	}
-	dp_set_visible(gid, &env.visible);
-}
-
 /* The room a list keeps on its right for its own bar */
 #define LIST_BAR_W	20
-
-/* The name at an index (1 up) in a panel's pool, or NULL */
-LOCAL CONST UB *pool_name( CONST PANEL *p, CONST T_WMPART *pt, INT idx )
-{
-	INT	at = pt->pool, n = 1;
-
-	if ( idx < 1 || idx > pt->count || at < 0 || at >= WM_POOL_BYTES ) {
-		return NULL;
-	}
-	while ( n < idx && at < WM_POOL_BYTES ) {
-		while ( at < WM_POOL_BYTES && p->def.pool[at] != 0 ) {
-			at++;
-		}
-		at++;				/* past the nought */
-		n++;
-	}
-
-	return ( at < WM_POOL_BYTES ) ? &p->def.pool[at] : NULL;
-}
 
 /* How tall one row of a list is, and how many fit in it */
 LOCAL INT list_rowh( void )
@@ -692,40 +656,6 @@ LOCAL INT part_margin( void )
 	}
 
 	return 8;
-}
-
-/* A part's words, cut where they stop fitting, on the middle line, in
- * the colour given */
-LOCAL void part_label_col( INT gid, CONST T_WMPART *pt, CONST T_DPRECT *r,
-			   INT indent, UW colour )
-{
-	ID	fid = pn_font();
-	T_FNMET	met;
-	INT	room, n, k;
-	UB	cut[WM_LABEL_MAX];
-
-	if ( pt->label[0] == 0 || fid <= 0 || fn_metrics(fid, &met) < E_OK ) {
-		return;
-	}
-	room = r->right - r->left - indent - PN_GAP;
-	n = ( room > 0 ) ? fn_fit(fid, pt->label, room) : 0;
-	if ( n <= 0 ) {
-		return;
-	}
-	for ( k = 0; k < n && k < WM_LABEL_MAX - 1; k++ ) {
-		cut[k] = pt->label[k];
-	}
-	cut[( n < WM_LABEL_MAX - 1 ) ? n : WM_LABEL_MAX - 1] = 0;
-	fn_draw(gid, fid, r->left + indent,
-		r->top + (r->bottom - r->top + met.ascent - met.descent) / 2,
-		cut, colour);
-}
-
-LOCAL void part_label( INT gid, CONST T_WMPART *pt, CONST T_DPRECT *r, INT indent )
-{
-	part_label_col(gid, pt, r, indent,
-		       wm_look(PART_GREY(pt) ? WM_LOOK_PART_TEXT_OFF
-					: WM_LOOK_PART_TEXT));
 }
 
 /*
@@ -1002,40 +932,6 @@ LOCAL void draw_part_at( PANEL *p, INT pid, INT gid, INT i, INT rad, INT margin 
 		}
 		break;
 
-	case PM_PARTS: {
-		/*
-		 * A pop-up: a raised box showing the name chosen, with
-		 * a mark at its right saying that pressing it brings
-		 * the rest. What the mark is drawn with is the same
-		 * triangle a volume's knob carries.
-		 */
-		CONST UB	*nm = pool_name(p, pt, pt->value);
-		T_WMPART	tmp = *pt;
-		INT		j;
-		T_DPPOINT	tri[3];
-		T_DPPAT		tpat;
-
-		raised(gid, &r, rad, face, FALSE);
-		for ( j = 0; j < WM_LABEL_MAX - 1 && nm != NULL
-			  && nm[j] != 0; j++ ) {
-			tmp.label[j] = nm[j];
-		}
-		tmp.label[( nm != NULL ) ? j : 0] = 0;
-		part_label(gid, &tmp, &r, margin);
-
-		tri[0].x = r.right - margin - 8;
-		tri[0].y = (r.top + r.bottom) / 2 - 3;
-		tri[1].x = r.right - margin;
-		tri[1].y = tri[0].y;
-		tri[2].x = (tri[0].x + tri[1].x) / 2;
-		tri[2].y = tri[0].y + 6;
-		dp_pat_colour(&tpat, wm_look(PART_GREY(pt)
-					     ? WM_LOOK_PART_TEXT_OFF
-					     : WM_LOOK_PART_TEXT));
-		dp_fill_poly(gid, tri, 3, DP_POLY_ODD, &tpat);
-		break;
-	}
-
 	default: {
 		T_PDCTX	c;
 
@@ -1049,6 +945,9 @@ LOCAL void draw_part_at( PANEL *p, INT pid, INT gid, INT i, INT rad, INT margin 
 		if ( kind == WM_PT_CHOICE && pt->count == 0 ) {
 			c.first = group_first(p, i);
 			group_rect(p, pt->group, &c.group);
+		}
+		if ( kind == WM_PT_POPUP ) {
+			c.held = ( ls_pid > 0 && ls_owner == pid && ls_part == i ) ? 1 : 0;
 		}
 		if ( pn_conv != NULL && pn_conv_pid == pid && pn_conv_i == i ) {
 			c.conv = pn_conv;
@@ -1537,12 +1436,6 @@ LOCAL ER menu_event( INT pid, CONST T_WMEV *ev, UINT *p_answer )
 			    || WM_PT_KIND(pt->type) == SB_PARTS )
 			  && !PART_GREY(pt) ) {
 				p->focus = i;		/* letters go here now */
-			} else if ( WM_PT_KIND(pt->type) == PM_PARTS
-				 && !PART_GREY(pt) ) {
-				/* a pop-up steps to the next of its names */
-				if ( pt->count > 0 ) {
-					pt->value = ( pt->value % pt->count ) + 1;
-				}
 			} else if ( WM_PT_KIND(pt->type) == WM_PT_LIST && !PART_GREY(pt) ) {
 				list_press(p, pt, ev->x, ev->y);
 			}
@@ -2167,9 +2060,17 @@ LOCAL void pn_press( PANEL *p, INT pid, CONST T_WMEV *ev )
 			p->pressed = -1;
 		}
 		break;
-	case PM_PARTS:
-		if ( pt->count > 0 ) pt->value = ( pt->value % pt->count ) + 1;
-		break;
+	case WM_PT_POPUP:
+		/*
+		 * The list opens and takes every input from here on, the
+		 * release of this press as well: the part itself holds
+		 * nothing.
+		 */
+		p->pressed = -1;
+		wm_panel_draw(pid);
+		knl_wmobj_part(pid, i, OB_E_PRESS, ev);
+		pop_open(pid, i, ev->when);
+		return;
 	case WM_PT_SWATCH:
 		take_press(p, i);
 		break;
@@ -2648,6 +2549,9 @@ EXPORT ER knl_pn_set_flags( INT pid, INT i, UINT f )
 	}
 	pt->type = ( f & OB_WP_OFF ) ? ( pt->type | P_DISABLE ) : ( pt->type & ~P_DISABLE );
 	if ( p->focus == i && !pn_takes_keys(p, pt) ) pn_focus_first(p);
+	if ( ls_owner == pid && ls_part == i && ( PART_GREY(pt) || !pn_shown(p, pt) ) ) {
+		pop_close(TRUE);
+	}
 	return E_OK;
 }
 
@@ -2681,6 +2585,9 @@ EXPORT ER knl_pn_set_names( INT pid, INT i, CONST UB *names, INT len )
 	INT	used = 0, k, f, count = 0, at;
 
 	if ( p == NULL || i < 0 || i >= p->def.npart ) return E_ID;
+	if ( ls_owner == pid && ls_part == i ) {
+		pop_close(TRUE);		/* the list shows names no longer the part's */
+	}
 	for ( k = 0; k < len; k++ ) {
 		if ( names[k] == 0 ) count++;
 	}
@@ -2699,7 +2606,7 @@ EXPORT ER knl_pn_set_names( INT pid, INT i, CONST UB *names, INT len )
 			used += len;
 			continue;
 		}
-		if ( ( ( kind == WS_PARTS || kind == SS_PARTS || kind == PM_PARTS || kind == TG_PARTS )
+		if ( ( ( kind == WS_PARTS || kind == SS_PARTS || kind == WM_PT_POPUP || kind == TG_PARTS )
 		       && pt->count > 0 ) ) {
 			CONST UB *e = pd_pool_name(p->def.pool, pt->pool, pt->count);
 
@@ -3362,6 +3269,344 @@ EXPORT ER wm_menu_event( INT pid, CONST T_WMEV *ev, INT *p_cmd )
 	}
 
 	return E_OK;
+}
+
+/* ---------------------------------------------------------------- a pop-up's list */
+
+/*
+ * A name of a pop-up as a row of its list: the words before a tab as
+ * the row's name, and those after it as the row's keys, which a list
+ * sets against its right end as a pop-up's body sets them against its
+ * mark.
+ */
+LOCAL void pop_row_words( CONST UB *s, UB *label, UB *key )
+{
+	INT	i = 0, k = 0;
+
+	while ( s[i] != 0 && s[i] != 0x09 && i < WM_LABEL_MAX - 1 ) {
+		label[i] = s[i];
+		i++;
+	}
+	label[i] = 0;
+	if ( s[i] == 0x09 ) {
+		i++;
+		while ( s[i] != 0 && k < WM_KEY_MAX - 1 ) {
+			key[k++] = s[i++];
+		}
+	}
+	key[k] = 0;
+}
+
+/*
+ * The list of pop-up i of panel pid opened. It is a menu's list -- a
+ * popup window of its own in front of every window, framed, with its
+ * shadow, the row under the pointer turned over -- whose rows are the
+ * part's names, the one chosen marked. It stands so that the row of
+ * the name chosen lies over the part, its names starting where the
+ * part's name starts, and it is at least as wide as the part; then it
+ * is moved onto the screen as a menu is. A list longer than the screen
+ * shows the rows round the name chosen.
+ */
+LOCAL void pop_open( INT pid, INT i, UD when )
+{
+	PANEL		*p = pn_of(pid), *l;
+	T_WMPART	*pt;
+	T_WMPANEL	*pn;
+	T_WMWIN		w;
+	T_DPRECT	ps, body, o;
+	MNMET		m;
+	ID		fid;
+	INT		n, fit, first, cur, k, wide = 0, sw, sh, gx, gy, pop, lp;
+
+	if ( p == NULL || ls_pid > 0 || i < 0 || i >= p->def.npart ) {
+		return;
+	}
+	pt = &p->def.part[i];
+	n = pt->count;
+	if ( n <= 0 || PART_GREY(pt) || wm_ref(p->wid, &w) < E_OK ) {
+		return;
+	}
+	pn = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	if ( pn == NULL ) {
+		return;
+	}
+	knl_memset(pn, 0, sizeof(*pn));
+	mn_metrics(&m);
+	mn_screen(&sw, &sh);
+	gx = MN_FRAME + m.hpad;
+	gy = MN_FRAME + m.vpad;
+	fit = ( sh - 2 * gy - MN_SHADOW ) / m.row;
+	if ( fit > WM_PART_MAX ) fit = WM_PART_MAX;
+	if ( fit < 1 ) fit = 1;
+	cur = ( pt->value >= 1 && pt->value <= n ) ? pt->value - 1 : 0;
+	first = 0;
+	if ( n > fit ) {
+		first = cur - fit / 2;
+		if ( first > n - fit ) first = n - fit;
+		if ( first < 0 ) first = 0;
+		n = fit;
+	}
+
+	/* the rows, and how wide the widest of them is */
+	fid = mn_font();
+	for ( k = 0; k < n; k++ ) {
+		T_WMPART	*r = &pn->part[k];
+		CONST UB	*nm = pd_pool_name(p->def.pool, pt->pool, first + k);
+		INT		ww;
+
+		if ( nm == NULL ) {
+			break;
+		}
+		pop_row_words(nm, r->label, r->key);
+		r->type = WM_PT_BUTTON;
+		if ( first + k < 32 && ( pt->inact & ( 1U << ( first + k ) ) ) != 0 ) {
+			r->type |= P_DISABLE;
+		}
+		r->num = first + k + 1;
+		r->answer = WM_ANS_OK;
+		r->group = 1;			/* the list keeps room for the mark */
+		r->value = ( pt->value == first + k + 1 ) ? 1 : 0;
+		ww = ( fid > 0 ) ? fn_width(fid, r->label) : 8 * m.cw;
+		if ( r->key[0] != 0 ) {
+			ww += m.cw + ( ( fid > 0 ) ? fn_width(fid, r->key) : 2 * m.cw );
+		}
+		if ( ww > wide ) wide = ww;
+	}
+	n = k;
+	if ( n <= 0 ) {
+		Kfree(pn);
+		return;
+	}
+	wide += m.indent;
+
+	/* the part on the screen, and the list's body over it */
+	part_rect(p, pt, &ps);
+	ps.left += w.work.left;   ps.right += w.work.left;
+	ps.top += w.work.top;     ps.bottom += w.work.top;
+	body.left = ps.left + PD_FH - m.indent;
+	body.right = body.left + wide;
+	if ( body.right < ps.right - gx ) {
+		body.right = ps.right - gx;
+	}
+	body.top = ( ps.top + ps.bottom ) / 2 - m.row / 2 - ( cur - first ) * m.row;
+	body.bottom = body.top + n * m.row;
+	mn_keep_on(&body, &m);
+
+	o.left = body.left - gx;
+	o.top = body.top - gy;
+	o.right = body.right + gx + MN_SHADOW;
+	o.bottom = body.bottom + gy + MN_SHADOW;
+	pop = wm_open(&o, WM_ATTR_POPUP, NULL);
+	if ( pop < 0 ) {
+		Kfree(pn);
+		return;
+	}
+	pn->num = p->def.num;
+	pn->owner = p->def.owner;
+	pn->kind = WM_PNL_PLAIN;
+	pn->r.right = ( o.right - o.left ) - MN_SHADOW;
+	pn->r.bottom = ( o.bottom - o.top ) - MN_SHADOW;
+	for ( k = 0; k < n; k++ ) {
+		T_WMPART	*r = &pn->part[k];
+
+		r->r.left = MN_FRAME;
+		r->r.top = gy + k * m.row;
+		r->r.right = pn->r.right - MN_FRAME;
+		r->r.bottom = r->r.top + m.row;
+	}
+	pn->npart = n;
+	lp = wm_panel_open(pop, pn);
+	Kfree(pn);
+	if ( lp < 0 ) {
+		wm_close(pop);
+		return;
+	}
+	l = pn_of(lp);
+	l->is_menu = TRUE;
+	l->popup = pop;
+	l->owner_wid = p->wid;
+	l->hot = ( cur - first >= 0 && cur - first < n && !PART_GREY(&l->def.part[cur - first]) )
+		 ? cur - first : -1;
+	ls_pid = lp;
+	ls_owner = pid;
+	ls_part = i;
+	ls_first = first;
+	ls_when = when;
+	ls_pressed = FALSE;
+	ls_hot0 = l->hot;
+	wm_panel_draw(lp);
+	pn_draw_part(p, pid, i);
+	wm_update();
+}
+
+/* The list put away, and the part it was opened from drawn as it is now */
+LOCAL void pop_close( BOOL draw )
+{
+	INT	l = ls_pid, o = ls_owner, i = ls_part;
+	PANEL	*p;
+
+	if ( l <= 0 ) {
+		return;
+	}
+	ls_pid = 0;
+	ls_owner = 0;
+	ls_part = -1;
+	(void)wm_panel_close(l);
+	p = pn_of(o);
+	if ( draw && p != NULL && i >= 0 && i < p->def.npart ) {
+		pn_draw_part(p, o, i);
+	}
+	if ( draw ) {
+		wm_update();
+	}
+}
+
+/* Row k of the list chosen: its name becomes the part's, and the list goes */
+LOCAL void pop_choose( INT k, CONST T_WMEV *ev )
+{
+	PANEL		*l = pn_of(ls_pid), *p = pn_of(ls_owner);
+	INT		pid = ls_owner, i = ls_part, was;
+	T_WMPART	*pt;
+
+	if ( l == NULL || p == NULL || k < 0 || k >= l->def.npart || i < 0 || i >= p->def.npart
+	  || PART_GREY(&l->def.part[k]) ) {
+		pop_close(TRUE);
+		return;
+	}
+	pt = &p->def.part[i];
+	was = pt->value;
+	pt->value = l->def.part[k].num;
+	pop_close(TRUE);
+	knl_wmobj_part(pid, i, OB_E_RELEASE, ev);
+	if ( pt->value != was ) {
+		knl_wmobj_part(pid, i, OB_E_CHANGE, ev);
+	}
+}
+
+/* The row lit moved by d over the rows that can be chosen; it stays at either end */
+LOCAL void pop_step( PANEL *l, INT d )
+{
+	INT	k = l->hot;
+
+	if ( k < 0 ) {
+		k = ( d > 0 ) ? -1 : l->def.npart;
+	}
+	for ( k += d; k >= 0 && k < l->def.npart; k += d ) {
+		if ( !PART_GREY(&l->def.part[k]) ) {
+			l->hot = k;
+			menu_paint(l);
+			wm_update();
+			return;
+		}
+	}
+}
+
+EXPORT INT knl_pn_list( INT *p_wid )
+{
+	PANEL	*l = pn_of(ls_pid);
+
+	if ( l == NULL ) {
+		return 0;
+	}
+	if ( p_wid != NULL ) {
+		*p_wid = l->wid;
+	}
+	return ls_pid;
+}
+
+/*
+ * An input while a list is open. The pointer over the list lights the
+ * row under it; a release on a row chooses it, and a release anywhere
+ * else puts the list away unchanged -- except the release that ends the
+ * opening press while it is still a click (within the double click's
+ * time, on the row lit as the list opened), after which the list stands until a row is pressed and let go
+ * on, or a press is made off it. The second button does nothing. Up and
+ * Down move the lit row, Enter chooses it, Escape puts the list away.
+ */
+EXPORT BOOL knl_pn_list_event( CONST T_WMEV *ev )
+{
+	PANEL	*l, *p;
+	INT	row = -1;
+	UD	gap;
+
+	if ( ls_pid <= 0 || ev == NULL ) {
+		return FALSE;
+	}
+	l = pn_of(ls_pid);
+	p = pn_of(ls_owner);
+	if ( l == NULL || p == NULL || ls_part < 0 || ls_part >= p->def.npart ) {
+		pop_close(FALSE);
+		return FALSE;
+	}
+	if ( ( ev->type == HID_EV_MOVE || ev->type == HID_EV_BTN_DOWN || ev->type == HID_EV_BTN_UP )
+	  && ev->wid == l->wid ) {
+		row = part_at(l, ev->x, ev->y);
+	}
+	switch ( ev->type ) {
+	case HID_EV_MOVE:
+		if ( row != l->hot ) {
+			l->hot = row;
+			menu_paint(l);
+			wm_update();
+		}
+		break;
+	case HID_EV_BTN_DOWN:
+		if ( ev->code != 0 ) {
+			break;
+		}
+		if ( ev->wid != l->wid ) {
+			pop_close(TRUE);		/* pressed off the list */
+			break;
+		}
+		ls_pressed = TRUE;
+		if ( row != l->hot ) {
+			l->hot = row;
+			menu_paint(l);
+			wm_update();
+		}
+		break;
+	case HID_EV_BTN_UP:
+		if ( ev->code != 0 ) {
+			break;
+		}
+		gap = (UD)wm_num(WM_LOOK_DBLTIME, 400) * 1000000U;
+		if ( !ls_pressed && ev->when - ls_when < gap && row == ls_hot0 ) {
+			ls_pressed = TRUE;		/* a click: the list stays */
+			break;
+		}
+		if ( row >= 0 ) {
+			pop_choose(row, ev);
+		} else {
+			pop_close(TRUE);
+		}
+		break;
+	case HID_EV_KEY_DOWN:
+		switch ( ev->code ) {
+		case K_ESC:
+			pop_close(TRUE);
+			break;
+		case K_UP:
+			pop_step(l, -1);
+			break;
+		case K_DOWN:
+			pop_step(l, 1);
+			break;
+		case K_ENTER:
+		case K_KPENTER:
+			if ( l->hot >= 0 ) {
+				pop_choose(l->hot, ev);
+			} else {
+				pop_close(TRUE);
+			}
+			break;
+		default:
+			break;
+		}
+		break;
+	default:
+		break;
+	}
+	return TRUE;
 }
 
 /*

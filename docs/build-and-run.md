@@ -269,7 +269,7 @@ eMMC付きのCM5には、rpibootでeMMCをUSBの大容量記憶装置として�
 
 1. CM5IOのジャンパJ2の`nRPI_BOOT`(Disable eMMC Boot)にジャンパを付ける。
 2. CM5IOのUSB-C端子(USB 2.0。書込みとUSBデバイス用)をパソコンにつなぎ、CM5IOに電源を入れる。
-3. Windowsではrpibootのインストーラ(<https://github.com/raspberrypi/usbboot/releases>)を入れ、スタートメニューの「rpiboot - Mass Storage Gadget」を実行する。Linuxでは`sudo rpiboot`(Ubuntu 24.04までのパッケージの版は動かないことがあるので、そのときはソースからビルドする)。数秒でeMMCがディスクとして見える。
+3. Windowsではrpibootのインストーラ(<https://github.com/raspberrypi/usbboot/releases>)を入れ、スタートメニューの「rpiboot - Mass Storage Gadget」を実行する。Linuxでは`sudo rpiboot`(Ubuntu 24.04までのパッケージのバージョンは動かないことがあるので、そのときはソースからビルドする)。数秒でeMMCがディスクとして見える。
 4. Raspberry Pi Imagerで4.1と同じく「カスタムイメージを使う」を選び、`sd.img`をそのディスクに書き込む。「Raspberry Piデバイス」は「Raspberry Pi 5」のままでよい。
 5. 書込みが終わったら電源を切り、J2のジャンパを外し、USB-C端子のケーブルを外して電源を入れ直す。eMMCから起動する。
 
@@ -301,7 +301,7 @@ Raspberry Pi 5とCM5のイメージは、実身の層ができて4秒後に、QE
 
 ### 4.7 Raspberry Pi 4、400、CM4で起動する
 
-イメージ(3.8)は4.1と同じくRaspberry Pi Imagerの「カスタムイメージを使う」でmicroSDカードに書き込む。「Raspberry Piデバイス」は「Raspberry Pi 4」を選ぶ。パーティションテーブルはGPTなので、EEPROMのブートローダは2020年9月以降の版にしておく(Raspberry Pi OSの`rpi-eeprom-update`か、Raspberry Pi Imagerの「Misc utility images」の「Bootloader」で更新する)。CM4はeMMC付きならCM5と同じくrpibootで(4.4)、LiteならIOボードのmicroSDスロットに書き込む。
+イメージ(3.8)は4.1と同じくRaspberry Pi Imagerの「カスタムイメージを使う」でmicroSDカードに書き込む。「Raspberry Piデバイス」は「Raspberry Pi 4」を選ぶ。パーティションテーブルはGPTなので、EEPROMのブートローダは2020年9月以降のバージョンにしておく(Raspberry Pi OSの`rpi-eeprom-update`か、Raspberry Pi Imagerの「Misc utility images」の「Bootloader」で更新する)。CM4はeMMC付きならCM5と同じくrpibootで(4.4)、LiteならIOボードのmicroSDスロットに書き込む。
 
 | 端子 | つなぐもの |
 | --- | --- |
@@ -319,7 +319,7 @@ WSLのxPackのQEMUは画面を表示できず、ユーザモードのネット�
 
 ### 5.1 QEMU for Windows
 
-2.3で入れたものを使う。`"C:\Program Files\qemu\qemu-system-aarch64.exe" --version`で版を確かめる。
+2.3で入れたものを使う。`"C:\Program Files\qemu\qemu-system-aarch64.exe" --version`でバージョンを確かめる。
 
 ### 5.2 デスクトップを動かす
 
@@ -393,5 +393,5 @@ python.exe ../tools/ui_run.py --elf tessronosdesk.elf --net user --out shots fir
 | `make BROWSER=1`が`no .../browser.mk`で止まる | `tessron-chromium`が隣にない。`CHROMIUM=<場所>`を指定する |
 | `NET=user`の試験がQEMUを起動できない | WindowsのQEMUが`C:\Program Files\qemu`にない、またはWSLから`python.exe`が呼べない |
 | 変数を変えたのに反映されない | `BUILD_ID`を分けていない。組合せごとに別の`BUILD_ID`にする |
-| 最初のビルドが`tools/netbsd/build.sh`の`fetch`で止まる | NetBSDの配布物を取得できない。インターネットにつながるか、`curl`があるかを確かめる。スクリプトは通常の配布サーバ、保存用のサーバ、ftp.netbsd.orgの順に試し(新しい版が出るとNetBSD 11.0は通常の配布サーバから外される)、どこからも取れなければTessronOSのリリースに添付した`netbsd-11.0-rumpsrc.tgz`を使う。それも取れないときは、その添付を手で`tools/netbsd/`に置くか、`NB_SUB_URL`で置き場を指定する。SHA512が合わないときは、取得した`~/netbsd/syssrc-11.0.tgz`を消してやり直す |
+| 最初のビルドが`tools/netbsd/build.sh`の`fetch`で止まる | NetBSDの配布物を取得できない。インターネットにつながるか、`curl`があるかを確かめる。スクリプトは通常の配布サーバ、保存用のサーバ、ftp.netbsd.orgの順に試し(新しいバージョンが出るとNetBSD 11.0は通常の配布サーバから外される)、どこからも取れなければTessronOSのリリースに添付した`netbsd-11.0-rumpsrc.tgz`を使う。それも取れないときは、その添付を手で`tools/netbsd/`に置くか、`NB_SUB_URL`で置き場を指定する。SHA512が合わないときは、取得した`~/netbsd/syssrc-11.0.tgz`を消してやり直す |
 | ネットワークの処理が止まったように見える | `RUTRACE=1`を付けてビルドすると、NetBSDのスタックの中でロックを5秒以上待っているタスクがコンソールに出る |

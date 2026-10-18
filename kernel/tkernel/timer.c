@@ -49,7 +49,7 @@ LOCAL void knl_timer_program( void )
 	/* The Generic Timer is per processor: the comparator of PRC 1 serves
 	   the queue. Another processor asks PRC 1 to reprogram it. */
 	if ( knl_pcpu()->prcid != 1 ) {
-		knl_send_ipi(1U << 0, SGI_TIMER);
+		knl_timer_ipi_request();
 		return;
 	}
 #endif
@@ -269,5 +269,5 @@ EXPORT void knl_timer_ipi_handler( UINT intno, UW iar )
 	knl_timer_program();
 	END_CRITICAL_SECTION;
 
-	out_w(GICC_EOIR, iar);
+	knl_end_of_timer_ipi(iar);
 }

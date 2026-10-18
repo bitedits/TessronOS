@@ -162,6 +162,7 @@ EXPORT ER knl_start_device( void )
 #if USE_SHUTDOWN
 EXPORT ER knl_finish_device( void )
 {
+	knl_sd_finish();	/* a card at 1.8V powered off, so that the firmware finds it at 3.3V */
 	return E_OK;
 }
 #endif /* USE_SHUTDOWN */

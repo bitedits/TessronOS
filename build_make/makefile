@@ -11,6 +11,7 @@
 #   make TARGET=_RPI5_ sd SD=/mnt/e    SD の FAT 区画へ配置
 #   make TARGET=_RPI4_                 Raspberry Pi 4、400、Compute Module 4 の tessronos.img(ARMv8.0-A)
 #   make TARGET=_RPI4_ qemu-rpi4       QEMU の raspi4b で起動(Ctrl-A X で終了)
+#   make TARGET=_X64_                  x64 の tessronos.elf と UEFI のローダ BOOTX64.EFI(build_make/x64.mk)
 #   make clean
 #
 
@@ -22,6 +23,19 @@ TARGET   ?= _QEMU_VIRT_
 BUILD_ID ?=
 EXE_FILE := tessronos$(BUILD_ID)
 
+# アーキテクチャは TARGET から決まる。ARCH はツールチェーンと命令セットの基準を、
+# ARCH_CORE はコア依存のソースとヘッダの置き場(kernel/sysdepend/cpu/core/<ARCH_CORE>/ など)を選ぶ
+# (docs/tessronos/04-kernel.md 4.8)
+ifneq ($(filter _QEMU_VIRT_ _RPI5_ _RPI4_,$(TARGET)),)
+  ARCH := aarch64
+else ifeq ($(TARGET),_X64_)
+  ARCH := x86_64
+else
+  $(error unknown TARGET "$(TARGET)" (use _QEMU_VIRT_, _RPI5_, _RPI4_ or _X64_))
+endif
+ARCH_CORE_aarch64 := armv8a
+ARCH_CORE_x86_64  := x86_64
+ARCH_CORE := $(ARCH_CORE_$(ARCH))
 
 include toolchain.mk
 include common.mk
@@ -33,8 +47,10 @@ else ifeq ($(TARGET),_RPI5_)
   include rpi5.mk
 else ifeq ($(TARGET),_RPI4_)
   include rpi4.mk
+else ifeq ($(TARGET),_X64_)
+  include x64.mk
 else
-  $(error unknown TARGET "$(TARGET)" (use _QEMU_VIRT_, _RPI5_ or _RPI4_))
+  $(error unknown TARGET "$(TARGET)" (use _QEMU_VIRT_, _RPI5_, _RPI4_ or _X64_))
 endif
 
 CFLAGS  := $(CFLAGS_COMMON) $(CFLAGS_TARGET) -D$(TARGET) -DLOAD_PA_VALUE=$(LOAD_PA)
@@ -70,7 +86,7 @@ all: $(EXE_FILE).elf $(IMAGE_TARGETS) $(EXE_FILE).lst
 
 # 構造体オフセット(アセンブラ用)。offset.c を -S で処理して "@@name value" 行を抜き出す
 OFFSET_H := $(OBJDIR)/offset.h
-$(OFFSET_H): $(TOP)/kernel/sysdepend/cpu/core/armv8a/offset.c
+$(OFFSET_H): $(TOP)/kernel/sysdepend/cpu/core/$(ARCH_CORE)/offset.c
 	@mkdir -p $(dir $@)
 	@echo 'GEN $@'
 	@$(CC) $(filter-out -MMD -MP,$(CFLAGS)) $(INCPATH) -S -o - $< | \
@@ -119,6 +135,11 @@ TEST_EXPECT := -t $(TEST_TMO) -e "KTEST SUMMARY" -f "FAIL" -q $(TOP)/tools/qemu_
 # 区画表(GPT)を持つ試験用ディスク。ブロックデバイスの試験が使う
 TEST_DISK  := $(OBJDIR)/test_disk.img
 TEST_DISK_MB ?= 256
+# TEST_DISK_ROOM=N: the test disk is written as a card written with a smaller image has it, N MB
+# past its tables, the system volume's partition last, so that the start grows it (design 7.7)
+TEST_DISK_ROOM ?= 0
+TEST_DISK_STAMP := $(OBJDIR)/testdisk.stamp
+$(shell mkdir -p $(OBJDIR); [ -f $(TEST_DISK_STAMP) ] && [ "$$(cat $(TEST_DISK_STAMP))" = "$(TEST_DISK_ROOM)" ] || echo "$(TEST_DISK_ROOM)" > $(TEST_DISK_STAMP))
 # USB の大容量記憶の試験が使う。usb_disk.img は MBR と FAT32 の区画を持ち
 # SuperSpeed の口に(usbss。ktest_svcio が最後に抜く)、usb_disk2.img は空で High-Speed だけの二台目の制御器に、
 # usb_disk3.img は空でハブの先(Full-Speed)に挿す(usbfs。ktest_usb と ktest_svcio が抜いて差し直すので、
@@ -200,6 +221,11 @@ $(OBJDIR)/tests/ktest/ktest_v8.o: CFLAGS += -DKT_SITE='"$(KT_SITE)"'
 ifneq ($(KT_SITE_WAIT),)
 $(OBJDIR)/tests/ktest/ktest_v8.o: CFLAGS += -DKT_SITE_WAIT=$(KT_SITE_WAIT)
 endif
+# KT_SITE_CLICK=<x>,<y>[,<x>,<y>...]: after the first screen, the left button pressed and let go at
+# those points of the screen (one each 4 s), and the screen taken after each (SITEC1.PPM...)
+ifneq ($(KT_SITE_CLICK),)
+$(OBJDIR)/tests/ktest/ktest_v8.o: CFLAGS += -DKT_SITE_CLICK=$(KT_SITE_CLICK)
+endif
 endif
 else
 ifneq ($(filter %.exe,$(QEMU)),)
@@ -218,9 +244,9 @@ endif
 ifeq ($(KT_BR_GPU),1)
 $(OBJDIR)/tests/ktest/ktest_v8.o: CFLAGS += -DKT_BR_GPU=1
 endif
-# NET と FTP_PORT(と KT_SITE・KT_SITE_WAIT・KT_V8)が変われば、それを見る試験(ktest_svcio・ktest_xfc・ktest_ms・ktest_v8)を作り直す
+# NET と FTP_PORT(と KT_SITE・KT_SITE_WAIT・KT_SITE_CLICK・KT_V8)が変われば、それを見る試験(ktest_svcio・ktest_xfc・ktest_ms・ktest_v8)を作り直す
 NET_STAMP := $(OBJDIR)/net.stamp
-$(shell mkdir -p $(OBJDIR); [ "$$(cat $(NET_STAMP) 2>/dev/null)" = "$(NET):$(FTP_PORT):$(FTP_ACT_PORT):$(KT_SITE):$(KT_SITE_WAIT):$(KT_V8):$(KT_BR_GPU)" ] || echo "$(NET):$(FTP_PORT):$(FTP_ACT_PORT):$(KT_SITE):$(KT_SITE_WAIT):$(KT_V8):$(KT_BR_GPU)" > $(NET_STAMP))
+$(shell mkdir -p $(OBJDIR); [ "$$(cat $(NET_STAMP) 2>/dev/null)" = "$(NET):$(FTP_PORT):$(FTP_ACT_PORT):$(KT_SITE):$(KT_SITE_WAIT):$(KT_SITE_CLICK):$(KT_V8):$(KT_BR_GPU)" ] || echo "$(NET):$(FTP_PORT):$(FTP_ACT_PORT):$(KT_SITE):$(KT_SITE_WAIT):$(KT_SITE_CLICK):$(KT_V8):$(KT_BR_GPU)" > $(NET_STAMP))
 $(OBJDIR)/tests/ktest/ktest_svcio.o $(OBJDIR)/tests/ktest/ktest_xfc.o $(OBJDIR)/tests/ktest/ktest_ms.o $(OBJDIR)/tests/ktest/ktest_v8.o $(OBJDIR)/tests/ktest/ktest_so.o: $(NET_STAMP)
 # force-legacy=false: virtio-mmio を現行仕様(version 2)にする
 # 二つ目のシリアルポート(serb)は何にも繋がず、試験が UART の折り返しで使う
@@ -250,6 +276,7 @@ VOL_DIR    := $(OBJDIR)/vols
 VOL_STAMP  := $(VOL_DIR)/vola.img
 TEST_DEPS  += $(VOL_STAMP)
 $(OBJDIR)/tests/ktest/ktest_vols.o: CFLAGS += -DKT_VOL_DIR='"$(abspath $(VOL_DIR))"'
+$(OBJDIR)/tests/ktest/ktest_grow.o: CFLAGS += -DKT_VOL_DIR='"$(abspath $(VOL_DIR))"'
 ifeq ($(TARGET),_QEMU_VIRT_)
 $(OBJDIR)/tests/ktest/ktest_sd.o: CFLAGS += -DKT_SD_SECTORS=$(SD_CARD_SECTORS) -DKT_SD_EMMC=$(if $(filter 1,$(SD_EMMC)),1,0)
 # SD_EMMC が変われば、それを見る ktest_sd を作り直す
@@ -806,6 +833,11 @@ include posix.mk
 # ブラウザ(Chromium の移植)は別のリポジトリ tessron-chromium にあり、make BROWSER=1 の
 # ときだけそこの browser.mk を読んで、イメージに取り込む。置き場は CHROMIUM で変えられる
 CHROMIUM ?= $(abspath $(TOP)/../tessron-chromium)
+# Raspberry Pi のカードの像のシステムのボリュームは 2GB にする。使う人の実身の置き場でもあり、
+# 中身ぎりぎりの大きさでは原紙からの実身も作れなくなる。browser.mk の大きさより先に決める
+ifneq ($(filter _RPI5_ _RPI4_,$(TARGET)),)
+SYS_VOL_SIZE ?= 2G
+endif
 ifeq ($(BROWSER),1)
 ifeq ($(wildcard $(CHROMIUM)/build_make/browser.mk),)
 $(error BROWSER=1: no $(CHROMIUM)/build_make/browser.mk (CHROMIUM=<tessron-chromium>))
@@ -926,15 +958,18 @@ $(DICT_REC): $(MOZC_DATA)
 SYS_VOL    := $(OBJDIR)/sysvol.img
 # 大きさは、明示されなければ載せる中身の合計に余裕を足して決める(mktsfs --size auto)。
 # 明示されて足りなければ mktsfs がそう言って止まる。SYS_VOL_EXCLUDE は、共有の obj/rec に
-# あっても、このビルドで有効でないプログラムのレコードとして載せないファイルの名前
+# あっても、このビルドで有効でないプログラムのレコードとして載せないファイルの名前。
+# Raspberry Pi のカードの像の大きさは、browser.mk より前で決めてある
 SYS_VOL_SIZE ?= auto
 SYS_VOL_EXCLUDE ?=
+SYS_VOL_STAMP := $(OBJDIR)/sysvol_size.stamp
+$(shell mkdir -p $(OBJDIR); [ -f $(SYS_VOL_STAMP) ] && [ "$$(cat $(SYS_VOL_STAMP))" = "$(SYS_VOL_SIZE)" ] || echo "$(SYS_VOL_SIZE)" > $(SYS_VOL_STAMP))
 TSFS_TOOLS  := $(TOP)/tools/mktsfs $(wildcard $(TOP)/tools/tsfs_py/*.py)
 
 # 版(R1.000 の形: R、桁数の決まらない整数、点、3桁)。プログラムの版はプログラム実身の
 # メタデータ tessronos.program.version に書く(etc/def)。TS_VERSION はシステムの版で、
 # システムの実身の OB_SYS_INFO に VERSION として出る
-TS_VERSION   ?= R1.100
+TS_VERSION   ?= R1.110
 VER_STAMP    := obj/version.stamp
 $(shell mkdir -p obj; [ -f $(VER_STAMP) ] && [ "$$(cat $(VER_STAMP))" = "$(TS_VERSION)" ] || echo "$(TS_VERSION)" > $(VER_STAMP))
 $(OBJDIR)/peripheral_kernel/obj/obsys.o: $(VER_STAMP)
@@ -975,7 +1010,7 @@ PKG_HOLD  :=
 PKG_DONE  :=
 endif
 
-$(SYS_VOL): $(TSFS_TOOLS) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) $(UNP_REC) $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) $(SYS_RECS) $(KTEST_XTAD) $(KTEST_DEF) $(PKG_DONE) $(PKG_STAMP)
+$(SYS_VOL): $(TSFS_TOOLS) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) $(UNP_REC) $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) $(SYS_RECS) $(KTEST_XTAD) $(KTEST_DEF) $(PKG_DONE) $(PKG_STAMP) $(SYS_VOL_STAMP)
 	@mkdir -p $(dir $@)
 	@rm -f $@
 	@python3 $(TOP)/tools/mktsfs -q -L "TessronOS system" --size $(SYS_VOL_SIZE) \
@@ -1016,10 +1051,10 @@ $(SD_CARD): $(TOP)/tools/mksd.py $(TOP)/tools/mkfat.py $(SYS_VOL) $(USER_ELF)
 	@python3 $(TOP)/tools/mksd.py --sys $(SYS_VOL) --boot-mb 64 --scratch-mb 16 $@ $(USER_ELF)
 	@truncate -s $$(( $(SD_CARD_SECTORS) * 512 )) $@
 
-$(TEST_DISK): $(TOP)/tools/mkdisk.py $(TOP)/tools/mkfat.py $(SYS_VOL) $(USER_ELF) $(SVCPROG_ELF) $(EXTRA_BOOT_FILES) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) $(UNP_REC) $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) $(SYS_RECS) $(KTEST_XTAD) $(KTEST_DEF)
+$(TEST_DISK): $(TOP)/tools/mkdisk.py $(TOP)/tools/mkfat.py $(SYS_VOL) $(USER_ELF) $(SVCPROG_ELF) $(EXTRA_BOOT_FILES) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) $(UNP_REC) $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) $(SYS_RECS) $(KTEST_XTAD) $(KTEST_DEF) $(TEST_DISK_STAMP)
 	@mkdir -p $(dir $@)
 	@cp $(USER_ELF) $(UOBJ)/init.elf
-	@python3 $(TOP)/tools/mkdisk.py --sys $(SYS_VOL) $@ $(TEST_DISK_MB) $(USER_ELF) $(UOBJ)/init.elf $(SVCPROG_ELF) $(EXTRA_BOOT_FILES) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) $(UNP_REC) $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) \
+	@python3 $(TOP)/tools/mkdisk.py --sys $(SYS_VOL) --sys-room $(TEST_DISK_ROOM) $@ $(TEST_DISK_MB) $(USER_ELF) $(UOBJ)/init.elf $(SVCPROG_ELF) $(EXTRA_BOOT_FILES) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) $(UNP_REC) $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) \
 	  $$(ls $(UOBJ)/rec/sys/*.bin 2>/dev/null) $(KTEST_XTAD) $(KTEST_DEF)
 
 test: $(EXE_FILE).elf $(TEST_DEPS)

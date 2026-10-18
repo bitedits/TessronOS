@@ -202,17 +202,44 @@ LOCAL DTWIN *admin_host( void )
  * AD_TRIES wrong ones. The keys go back to the asking program's window
  * win (NULL: none said) when the panel is put away.
  */
+LOCAL ER admin_ask( CONST UB *who, CONST UB *what, CONST TS_UUID *win, ID pid );
+
 EXPORT ER dt_admin_ask( ID pid, CONST UB *what, CONST TS_UUID *win )
 {
+	UB	who[160];
+
+	who_asks(pid, who, sizeof(who));
+	return admin_ask(who, what, win, pid);
+}
+
+/*
+ * The same for what the desktop does itself from its menus, 'name' being
+ * the menu ("ディスク操作"): no process is given the rights.
+ */
+EXPORT ER dt_admin_self( CONST char *name, CONST UB *what )
+{
+	UB	who[160];
+	INT	n = 0, i;
+
+	for ( i = 0; "「"[i] != 0 && n < (INT)sizeof(who) - 1; i++ ) who[n++] = (UB)"「"[i];
+	for ( i = 0; name[i] != 0 && n < (INT)sizeof(who) - 1; i++ ) who[n++] = (UB)name[i];
+	for ( i = 0; "」には管理者の権限が要ります"[i] != 0 && n < (INT)sizeof(who) - 1; i++ ) {
+		who[n++] = (UB)"」には管理者の権限が要ります"[i];
+	}
+	who[n] = 0;
+	return admin_ask(who, what, NULL, 0);
+}
+
+LOCAL ER admin_ask( CONST UB *who, CONST UB *what, CONST TS_UUID *win, ID pid )
+{
 	DTWIN	*host = admin_host();
-	UB	who[160], *pw;
+	UB	*pw;
 	INT	t;
 	ER	er = E_OACV;
 
 	if ( host == NULL ) {
 		return E_NOEXS;
 	}
-	who_asks(pid, who, sizeof(who));
 	pw = (UB *)Kmalloc(AD_PW_MAX);
 	if ( pw == NULL ) {
 		return E_NOMEM;

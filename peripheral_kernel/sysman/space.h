@@ -15,12 +15,18 @@
 #ifndef _SYSMAN_SPACE_H_
 #define _SYSMAN_SPACE_H_
 
+#include <sys/machine.h>
+
 #define ASID_NULL	0		/* empty space of kernel tasks */
 #define ASID_SYSPRC	1		/* system process (PID 0) */
-#define ASID_MAX	65535		/* TCR is set for 16 bit ASIDs (TCR_EL1.AS) */
+#define ASID_MAX	MMU_ASID_MAX	/* the largest the MMU is set for (sysdepend.h) */
 
 #define USER_TEXT_VA	0x0000000000400000ULL	/* program image base (design 6.2.2) */
+#ifdef CPU_CORE_X86_64
+#define USER_STACK_TOP	0x00007FFFF0000000ULL	/* user stacks grow down from here (the user half ends at 2^47) */
+#else
 #define USER_STACK_TOP	0x0000FFFFF0000000ULL	/* user stacks grow down from here */
+#endif
 
 /*
  * The shared memory window (design 6.8): what is mapped here is at the

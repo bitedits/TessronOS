@@ -157,6 +157,31 @@ EXPORT BOOL dt_carry_window( INT wid, CONST T_DPRECT *o )
 	return FALSE;
 }
 
+/*
+ * Links and shapes carried show as themselves when windows are moved as
+ * they go (LK_LIVE), and as outlines otherwise: n outlines r, each dx, dy
+ * away from where its thing lies on the screen, have the looks of those
+ * places. Called once, when the outlines are first laid.
+ */
+EXPORT void dt_carry_looks( CONST T_DPRECT *r, INT n, INT dx, INT dy )
+{
+	T_DPRECT	from[WM_DRAG_MAX];
+	INT		i;
+
+	if ( wm_num(LK_LIVE, 1) == 0 || n <= 0 ) {
+		return;
+	}
+	if ( n > WM_DRAG_MAX ) {
+		n = WM_DRAG_MAX;
+	}
+	for ( i = 0; i < n; i++ ) {
+		from[i] = r[i];
+		from[i].left -= dx;  from[i].right -= dx;
+		from[i].top -= dy;   from[i].bottom -= dy;
+	}
+	(void)wm_set_drag_from(from, n);
+}
+
 /* The button let go: TRUE when the window went where its outline was */
 EXPORT BOOL dt_carry_end( INT wid )
 {
@@ -981,6 +1006,16 @@ LOCAL void carry_start( CONST T_DTREQ *rq, SZ anssz )
 	carry.pending = FALSE;
 	carry.x0 = px;
 	carry.y0 = py;
+	{
+		/* the link where it lies in the program's window, under the hand */
+		T_DPRECT	r;
+
+		r.left = px - carry.rq.grab_x;
+		r.top = py - carry.rq.grab_y;
+		r.right = r.left + carry.rq.look.w;
+		r.bottom = r.top + carry.rq.look.h;
+		dt_carry_looks(&r, 1, 0, 0);
+	}
 	carry_outline(px, py);
 	wm_update();
 }
@@ -1201,6 +1236,14 @@ LOCAL void process_requests( void )
 			an.er = dt_pkg_install(&rq.target, (BOOL)( rq.recno == 1 ), &an.into, &an.how);
 		} else if ( rq.req == DT_RQ_REMOVE ) {
 			an.er = dt_prog_remove(&rq.target);
+		} else if ( ( rq.req == DT_RQ_FONT_REG || rq.req == DT_RQ_FONT_SET || rq.req == DT_RQ_FONT_DEL )
+			 && !knl_ob_pid_admin(knl_obchan_last_from(&dt_req_u))
+			 && ( an.er = dt_admin_ask(knl_obchan_last_from(&dt_req_u),
+						   (CONST UB *)( ( rq.req == DT_RQ_FONT_DEL ) ? "書体の削除"
+										 : "書体の登録" ), &rq.win) ) < E_OK ) {
+			/* only an administrator changes the system's faces: the password asked for */
+		} else if ( rq.req >= DT_RQ_FONT_REG && rq.req <= DT_RQ_FONT_TRY ) {
+			an.er = dt_font_req(&rq, &an);		/* システム環境設定's 書体 */
 		} else if ( rq.req == DT_RQ_TOOL ) {
 			rq.name[sizeof(rq.name) - 1] = 0;
 			n = dt_prog_list(DT_PK_ACCESSORY, list, 64);
@@ -3185,7 +3228,7 @@ EXPORT BOOL dt_drop_links( DTWIN *d, INT sx, INT sy, CONST T_VOBJ *v, INT n )
 	Kfree(dv);
 	Kfree(name);
 	if ( er < E_OK ) {
-		(void)wm_msg_put("この窓には置けません");
+		(void)wm_msg_put("このウインドウには置けません");
 	}
 	return TRUE;			/* over another's window, nothing here moves */
 }
@@ -3287,6 +3330,7 @@ LOCAL void desktop_run( void )
 		own_poll();			/* a slide's or a player's program asked for something */
 		dt_tail_poll();			/* an accessory chosen in a program's menu */
 		dt_winlist_poll();		/* ウインドウ一覧, when the windows changed */
+		df_panel_poll();		/* 道具パネル: with the figure in use */
 		dt_scr_poll();			/* 画面印刷: its panel, and the count down */
 		dt_fix_poll();			/* ディスク修復: the check followed */
 		dt_disk_poll();			/* disks attached, taken away, taken out, come back */

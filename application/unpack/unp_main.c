@@ -278,7 +278,7 @@ static void carry( INT x, INT y )
 	tm_putstring((const UB *)s);
 	if ( er == E_OBJ || er == E_ABORT ) return;	/* a click, or not wanted */
 	if ( er == E_NOEXS ) {
-		say("解凍する所は、図形・仮身一覧・文章の窓です");
+		say("解凍する所は、図形・仮身一覧・文章のウインドウです");
 		return;
 	}
 	if ( er < E_OK ) {

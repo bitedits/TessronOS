@@ -28,6 +28,7 @@
 #include <ts/umem.h>
 #include <stdlib.h>
 #include <string.h>
+#include "../libpthread/pth_cpu.h"
 
 #define PAGE	4096UL
 
@@ -80,7 +81,7 @@ void __ts_start( void )
 	lo = (char *)map + PAGE;
 	hi = lo + stk;
 	tp = pth_tls_make(hi, pth_main());
-	__asm__ volatile ( "msr tpidr_el0, %0" :: "r"(tp) : "memory" );
+	pth_tp_set(tp);
 	pth_init_main(lo, hi, tp);
 	__ts_time_init();
 

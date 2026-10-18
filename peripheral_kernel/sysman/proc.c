@@ -54,6 +54,7 @@
 #include "space.h"
 #include "umem.h"
 #include "../obj/obj.h"
+#include "cpu_ufault.h"
 
 #define PRC_DEFAULT_STKSZ	(64 * 1024)
 #define PRC_TSK_STKMAX		(1024 * 1024)	/* the most user stack a task of a process asks for */
@@ -135,6 +136,9 @@ typedef struct {
 	/* the reservations and pages it asked for (design 9.8.1, umem.c) */
 	T_UMEM	*umem;
 
+	/* the shared image of its program its space maps (elf.c), NULL for none */
+	void	*img;
+
 	/* where a fault of its own goes (ts_def_flt), 0 for none: the process ends */
 	UD	flt_entry;
 
@@ -203,7 +207,7 @@ LOCAL T_PCB *pid_to_pcb( ID pid )
 /* The process whose space ttbr0 is */
 LOCAL T_PCB *ttbr0_to_pcb( UD ttbr0 )
 {
-	T_PCB	*p = prc_by_asid[( ttbr0 >> 48 ) & ASID_MAX];
+	T_PCB	*p = prc_by_asid[knl_mmu_root_asid(ttbr0)];
 
 	return ( p != NULL && p->used && p->space.ttbr0 == ttbr0 ) ? p : NULL;
 }
@@ -381,6 +385,8 @@ LOCAL void prc_release( T_PCB *p )
 	if ( left == 0 && !p->keep_space ) {
 		knl_space_delete(&p->space);
 		knl_umem_free(&p->umem);
+		knl_elf_img_put(p->img);	/* after the space: the pages it shares are mapped no more */
+		p->img = NULL;
 	} else if ( left == 0 ) {
 		tm_printf((UB*)"TessronOS: pid %d was stopped inside a call: its pages are kept\n",
 			  p->pid);
@@ -683,17 +689,19 @@ EXPORT ID ts_cre_prc( CONST char *path, CONST T_CPRC *pk_cprc )
  * until the reading is over. The space is the caller's alone until
  * cre_prc hands it to the control block.
  */
-LOCAL ER load_image( CONST PRCIMG *img, CONST T_CPRC *pk_cprc, T_SPACE *sp, UD *p_entry, UD *p_brk )
+LOCAL ER load_image( CONST PRCIMG *img, CONST T_CPRC *pk_cprc, T_SPACE *sp, UD *p_entry, UD *p_brk,
+		       void **p_shared )
 {
 	ER	er;
 
+	*p_shared = NULL;
 	er = knl_space_create(sp);
 	if ( er < E_OK ) {
 		return er;
 	}
 	er = ( img->path != NULL ) ? knl_elf_load(img->path, sp, p_entry, p_brk)
 				   : knl_elf_load_rec(img->vol, img->uuid, img->recno, sp,
-						      p_entry, p_brk);
+						      p_entry, p_brk, p_shared);
 	if ( er < E_OK ) goto err;
 
 	/* the start-up argument, as read only pages in the space */
@@ -718,6 +726,8 @@ LOCAL ER load_image( CONST PRCIMG *img, CONST T_CPRC *pk_cprc, T_SPACE *sp, UD *
 
     err:
 	knl_space_delete(sp);
+	knl_elf_img_put(*p_shared);	/* after the space, as when a process ends */
+	*p_shared = NULL;
 	return er;
 }
 
@@ -731,6 +741,7 @@ LOCAL ID cre_prc( CONST PRCIMG *img, CONST T_CPRC *pk_cprc, CONST T_SPAWN *sp )
 	T_CFLG	cflg;
 	T_PCB	*parent;
 	T_SPACE	space;
+	void	*shared = NULL;
 	UD	stksz, entry = 0, brk = 0;
 	PRI	pri;
 	ER	er;
@@ -757,7 +768,7 @@ LOCAL ID cre_prc( CONST PRCIMG *img, CONST T_CPRC *pk_cprc, CONST T_SPAWN *sp )
 	}
 
 	knl_memset(&space, 0, sizeof(space));
-	er = load_image(img, pk_cprc, &space, &entry, &brk);
+	er = load_image(img, pk_cprc, &space, &entry, &brk, &shared);
 	if ( er < E_OK ) {
 		return er;
 	}
@@ -814,9 +825,11 @@ LOCAL ID cre_prc( CONST PRCIMG *img, CONST T_CPRC *pk_cprc, CONST T_SPAWN *sp )
 	p->flgid = tk_cre_flg(&cflg);
 	if ( p->flgid <= 0 ) { er = (ER)p->flgid; goto err1; }
 
-	/* the space is the process's from here, and goes with it */
+	/* the space is the process's from here, and goes with it, and so is the image it shares */
 	p->space = space;
 	space.l0_pa = 0;
+	p->img = shared;
+	shared = NULL;
 	prc_by_asid[p->space.asid] = p;
 	p->entry = entry;
 	p->brk = brk;
@@ -918,12 +931,15 @@ LOCAL ID cre_prc( CONST PRCIMG *img, CONST T_CPRC *pk_cprc, CONST T_SPAWN *sp )
 	prc_by_asid[p->space.asid] = NULL;
 	knl_space_delete(&p->space);
 	p->space.asid = 0;
+	knl_elf_img_put(p->img);
+	p->img = NULL;
     err1:
 	npid = ( p->inh != NULL ) ? p->pid : 0;
 	prc_free(p);
     err0:
 	tk_unl_mtx(prc_mtxid);
 	knl_space_delete(&space);	/* a space not handed to a process */
+	knl_elf_img_put(shared);	/* and the image it shared */
 	if ( sp != NULL && npid > 0 ) {
 		knl_fs_prc_end(npid);		/* what it was given, never to be used */
 	}
@@ -1420,30 +1436,20 @@ EXPORT BOOL knl_prc_kpan( UD ttbr0, ID tskid, UBINT va, UD esr, UD elr, UD lr )
  * turned for the access (knl_umem_fault). FALSE leaves the fault to end
  * the process.
  */
-#define ESR_EC(e)	( ( (e) >> 26 ) & 0x3f )
-#define EC_IABT_EL0	0x20
-#define EC_DABT_EL0	0x24
-#define ESR_FNV		( 1UL << 10 )
-#define ESR_CM		( 1UL << 8 )		/* by cache maintenance: a read */
-#define ESR_WNR		( 1UL << 6 )
-#define FSC_TRANS(f)	( (f) >= 0x04 && (f) <= 0x07 )
-#define FSC_PERM(f)	( (f) >= 0x0c && (f) <= 0x0f )
-
 EXPORT BOOL knl_prc_ufault( UBINT va, UD esr )
 {
 	T_PCB	*p;
-	UD	fsc = esr & 0x3f, ent;
+	UD	ent;
 	UINT	acc;
 	BOOL	ok = FALSE;
 
-	if ( !( FSC_TRANS(fsc) || FSC_PERM(fsc) ) || ( esr & ESR_FNV ) != 0
-	  || va < USER_TEXT_VA || va >= USER_STACK_TOP ) {
+	if ( knl_ufault_unfixable(esr) || va < USER_TEXT_VA || va >= USER_STACK_TOP ) {
 		return FALSE;
 	}
-	if ( ESR_EC(esr) == EC_IABT_EL0 ) {
+	if ( knl_ufault_is_exec(esr) ) {
 		acc = UM_ACC_EXEC;
-	} else if ( ESR_EC(esr) == EC_DABT_EL0 ) {
-		acc = ( ( esr & ESR_WNR ) != 0 && ( esr & ESR_CM ) == 0 ) ? UM_ACC_WRITE : UM_ACC_READ;
+	} else if ( knl_ufault_is_data(esr) ) {
+		acc = knl_ufault_is_write(esr) ? UM_ACC_WRITE : UM_ACC_READ;
 	} else {
 		return FALSE;
 	}
@@ -1451,9 +1457,9 @@ EXPORT BOOL knl_prc_ufault( UBINT va, UD esr )
 	p = cur_pcb();
 	if ( p != NULL && p->space.l0_pa != 0 ) {
 		ent = knl_pt_entry(p->space.l0_pa, va & ~(UBINT)( PAGE_SIZE - 1 ));
-		if ( ent != 0 && ( ent & PTE_AP_RW_ALL ) != 0
-		  && ( acc != UM_ACC_WRITE || ( ent & ( 3UL << 6 ) ) == PTE_AP_RW_ALL )
-		  && ( acc != UM_ACC_EXEC || ( ent & PTE_UXN ) == 0 ) ) {
+		if ( ent != 0 && PTE_USER_R(ent)
+		  && ( acc != UM_ACC_WRITE || PTE_USER_W(ent) )
+		  && ( acc != UM_ACC_EXEC || PTE_USER_X(ent) ) ) {
 			knl_tlb_flush_va(va);
 			ok = TRUE;
 		} else {
@@ -1467,20 +1473,13 @@ EXPORT BOOL knl_prc_ufault( UBINT va, UD esr )
 
 /* ---------------------------------------------------------------- a fault handed back (ts_def_flt) */
 
-/* The exception entry frame (T_EXCFRAME): x0-x18, then these */
-#define FR_FP		19
-#define FR_LR		20
-#define FR_ELR		21
-#define FR_SPSR		22
-#define FR_SP		23
-
 EXPORT ER ts_def_flt( void (*f)( T_TSFLT *flt ) )
 {
 	T_PCB	*p;
 	UBINT	va = (UBINT)f;
 	ER	er = E_OK;
 
-	if ( f != NULL && ( va < USER_TEXT_VA || va >= USER_STACK_TOP || ( va & 3 ) != 0 ) ) {
+	if ( f != NULL && ( va < USER_TEXT_VA || va >= USER_STACK_TOP || ( va & UFLT_PC_MASK ) != 0 ) ) {
 		return E_PAR;
 	}
 	tk_loc_mtx(prc_mtxid, TMO_FEVR);
@@ -1510,9 +1509,8 @@ EXPORT BOOL knl_prc_flt_give( void *frame, UD esr, UD far )
 	UD	entry = 0;
 	UBINT	sp;
 	ID	pid = 0;
-	INT	i;
 
-	if ( ESR_EC(esr) != EC_DABT_EL0 ) {
+	if ( !knl_ufault_is_data(esr) ) {
 		return FALSE;
 	}
 	tk_loc_mtx(prc_mtxid, TMO_FEVR);
@@ -1527,36 +1525,18 @@ EXPORT BOOL knl_prc_flt_give( void *frame, UD esr, UD far )
 	}
 
 	knl_memset(&c, 0, sizeof(c));
-	for ( i = 0; i < 19; i++ ) {
-		c.regs[i] = f[i];
-	}
-	c.regs[29] = f[FR_FP];
-	c.regs[30] = f[FR_LR];
-	c.sp = f[FR_SP];
-	c.pc = f[FR_ELR];
-	c.pstate = f[FR_SPSR] & PSR_NZCV;
-	c.far = far;
-	c.esr = esr;
-	/* the task's FP/SIMD registers are still its own: the kernel's code uses none */
-	Asm("stp q0, q1, [%0, #0]\n\tstp q2, q3, [%0, #32]\n\tstp q4, q5, [%0, #64]\n\t"
-	    "stp q6, q7, [%0, #96]\n\tstp q8, q9, [%0, #128]\n\tstp q10, q11, [%0, #160]\n\t"
-	    "stp q12, q13, [%0, #192]\n\tstp q14, q15, [%0, #224]\n\tstp q16, q17, [%0, #256]\n\t"
-	    "stp q18, q19, [%0, #288]\n\tstp q20, q21, [%0, #320]\n\tstp q22, q23, [%0, #352]\n\t"
-	    "stp q24, q25, [%0, #384]\n\tstp q26, q27, [%0, #416]\n\tstp q28, q29, [%0, #448]\n\t"
-	    "stp q30, q31, [%0, #480]" :: "r"(c.vregs) : "memory");
-	Asm("mrs %0, fpsr" : "=r"(c.fpsr));
-	Asm("mrs %0, fpcr" : "=r"(c.fpcr));
+	knl_uflt_from_frame(&c, f);
+	knl_uflt_set_fault(&c, far, esr);
+	knl_uflt_save_fp(&c);
 
 	/* the picture goes on the task's own stack, below where it was */
-	sp = ( (UBINT)f[FR_SP] - sizeof(c) - 64 ) & ~(UBINT)15;
-	if ( sp >= (UBINT)f[FR_SP] || !knl_prc_user_ok(pid, (CONST void *)sp, sizeof(c), TRUE) ) {
+	sp = ( (UBINT)knl_uframe_sp(f) - sizeof(c) - 64 ) & ~(UBINT)UFLT_SP_MASK;
+	if ( sp >= (UBINT)knl_uframe_sp(f) || !knl_prc_user_ok(pid, (CONST void *)sp, sizeof(c), TRUE) ) {
 		return FALSE;
 	}
 	knl_ua_put((void *)sp, &c, sizeof(c));
-	f[0] = sp;
-	f[FR_SP] = sp;
-	f[FR_ELR] = entry;
-	f[FR_LR] = 0;				/* the entry does not return: it calls ts_flt_ret */
+	knl_uframe_arg(f, 0, sp);
+	knl_uframe_call(f, entry, sp);		/* the entry does not return: it calls ts_flt_ret */
 
 	return TRUE;
 }
@@ -1565,32 +1545,17 @@ EXPORT ER knl_prc_flt_return( void *frame, CONST T_TSFLT *uflt )
 {
 	UD	*f = (UD *)frame;
 	T_TSFLT	c;
-	INT	i;
 
 	if ( !knl_prc_user_ok(ts_get_pid(), uflt, sizeof(c), FALSE) ) {
 		return E_MACV;
 	}
 	knl_ua_get(&c, uflt, sizeof(c));
-	if ( c.pc < USER_TEXT_VA || c.pc >= USER_STACK_TOP || ( c.pc & 3 ) != 0
-	  || c.sp < USER_TEXT_VA || c.sp > USER_STACK_TOP || ( c.sp & 15 ) != 0 ) {
+	if ( c.pc < USER_TEXT_VA || c.pc >= USER_STACK_TOP || ( c.pc & UFLT_PC_MASK ) != 0
+	  || c.sp < USER_TEXT_VA || c.sp > USER_STACK_TOP || ( c.sp & UFLT_SP_MASK ) != 0 ) {
 		return E_PAR;
 	}
-	for ( i = 0; i < 19; i++ ) {
-		f[i] = c.regs[i];
-	}
-	f[FR_FP] = c.regs[29];
-	f[FR_LR] = c.regs[30];
-	f[FR_ELR] = c.pc;
-	f[FR_SP] = c.sp;
-	f[FR_SPSR] = ( f[FR_SPSR] & ~PSR_NZCV ) | ( c.pstate & PSR_NZCV );
-	Asm("ldp q0, q1, [%0, #0]\n\tldp q2, q3, [%0, #32]\n\tldp q4, q5, [%0, #64]\n\t"
-	    "ldp q6, q7, [%0, #96]\n\tldp q8, q9, [%0, #128]\n\tldp q10, q11, [%0, #160]\n\t"
-	    "ldp q12, q13, [%0, #192]\n\tldp q14, q15, [%0, #224]\n\tldp q16, q17, [%0, #256]\n\t"
-	    "ldp q18, q19, [%0, #288]\n\tldp q20, q21, [%0, #320]\n\tldp q22, q23, [%0, #352]\n\t"
-	    "ldp q24, q25, [%0, #384]\n\tldp q26, q27, [%0, #416]\n\tldp q28, q29, [%0, #448]\n\t"
-	    "ldp q30, q31, [%0, #480]" :: "r"(c.vregs) : "memory");
-	Asm("msr fpsr, %0" :: "r"(c.fpsr));
-	Asm("msr fpcr, %0" :: "r"(c.fpcr));
+	knl_uflt_to_frame(f, &c);
+	knl_uflt_load_fp(&c);
 
 	return E_OK;
 }
@@ -1993,7 +1958,7 @@ LOCAL UD cyc_ms( UD cyc )
 {
 	UD	f;
 
-	Asm("mrs %0, cntfrq_el0" : "=r"(f));
+	f = SysCounterFreq();
 	return ( f != 0 ) ? cyc / ( f / 1000 ) : 0;
 }
 
@@ -3438,7 +3403,7 @@ EXPORT BOOL knl_psx_deliver( void *frame, UD ret )
 	UD		deliv, entry;
 	UBINT		sp;
 	ID		pid;
-	INT		sig, i;
+	INT		sig;
 
 	p = cur_pcb();
 	if ( p == NULL || p->ending ) {
@@ -3476,39 +3441,21 @@ EXPORT BOOL knl_psx_deliver( void *frame, UD ret )
 	pid = p->pid;
 	tk_unl_mtx(prc_mtxid);
 
-	for ( i = 0; i < 19; i++ ) {
-		c->flt.regs[i] = f[i];
-	}
-	c->flt.regs[0] = ret;
-	c->flt.regs[29] = f[FR_FP];
-	c->flt.regs[30] = f[FR_LR];
-	c->flt.sp = f[FR_SP];
-	c->flt.pc = f[FR_ELR];
-	c->flt.pstate = f[FR_SPSR] & PSR_NZCV;
-	/* the task's FP/SIMD registers are still its own: the kernel's code uses none */
-	Asm("stp q0, q1, [%0, #0]\n\tstp q2, q3, [%0, #32]\n\tstp q4, q5, [%0, #64]\n\t"
-	    "stp q6, q7, [%0, #96]\n\tstp q8, q9, [%0, #128]\n\tstp q10, q11, [%0, #160]\n\t"
-	    "stp q12, q13, [%0, #192]\n\tstp q14, q15, [%0, #224]\n\tstp q16, q17, [%0, #256]\n\t"
-	    "stp q18, q19, [%0, #288]\n\tstp q20, q21, [%0, #320]\n\tstp q22, q23, [%0, #352]\n\t"
-	    "stp q24, q25, [%0, #384]\n\tstp q26, q27, [%0, #416]\n\tstp q28, q29, [%0, #448]\n\t"
-	    "stp q30, q31, [%0, #480]" :: "r"(c->flt.vregs) : "memory");
-	Asm("mrs %0, fpsr" : "=r"(c->flt.fpsr));
-	Asm("mrs %0, fpcr" : "=r"(c->flt.fpcr));
+	knl_uflt_from_call(&c->flt, f, ret);
+	knl_uflt_save_fp(&c->flt);
 
 	/* the picture on the task's own stack, below where it was and below its red zone */
-	sp = ( (UBINT)f[FR_SP] - sizeof(*c) - 256 ) & ~(UBINT)15;
-	if ( sp >= (UBINT)f[FR_SP] || !knl_prc_user_ok(pid, (CONST void *)sp, sizeof(*c), TRUE) ) {
+	sp = ( (UBINT)knl_uframe_sp(f) - sizeof(*c) - 256 ) & ~(UBINT)UFLT_SP_MASK;
+	if ( sp >= (UBINT)knl_uframe_sp(f) || !knl_prc_user_ok(pid, (CONST void *)sp, sizeof(*c), TRUE) ) {
 		Kfree(c);
 		(void)knl_psx_kill(pid, TS_SIGKILL);	/* nowhere to hand it over */
 		return FALSE;
 	}
 	knl_ua_put((void *)sp, c, sizeof(*c));
 	Kfree(c);
-	f[0] = sp;
-	f[1] = (UD)sig;
-	f[FR_SP] = sp;
-	f[FR_ELR] = entry;
-	f[FR_LR] = 0;				/* the entry does not return: it calls ts_sig_ret */
+	knl_uframe_arg(f, 0, sp);
+	knl_uframe_arg(f, 1, (UD)sig);
+	knl_uframe_call(f, entry, sp);		/* the entry does not return: it calls ts_sig_ret */
 	return TRUE;
 }
 

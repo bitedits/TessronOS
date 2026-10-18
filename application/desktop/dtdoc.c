@@ -3488,6 +3488,7 @@ EXPORT void dd_link_follow( INT sx, INT sy )
 	T_WMWIN		w;
 	T_DPRECT	r;
 	INT		x, y;
+	BOOL		first;
 
 	if ( lc_win == NULL || wm_ref(lc_win->wid, &w) < E_OK ) {
 		return;
@@ -3501,6 +3502,7 @@ EXPORT void dd_link_follow( INT sx, INT sy )
 	if ( lc_fixed && !lc_copy ) {
 		return;			/* protected: it stays where it is */
 	}
+	first = (BOOL)!lc_moved;
 	lc_moved = TRUE;
 	if ( lc_size != 0 ) {
 		INT	bw = lc_box.right - lc_box.left, bh = lc_box.bottom - lc_box.top;
@@ -3535,6 +3537,9 @@ EXPORT void dd_link_follow( INT sx, INT sy )
 	}
 	r.left += w.work.left;  r.right += w.work.left;
 	r.top += w.work.top;    r.bottom += w.work.top;
+	if ( first && lc_size == 0 ) {
+		dt_carry_looks(&r, 1, x - lc_x0, y - lc_y0);
+	}
 	wm_set_drag(&r, 1);
 	wm_update();
 }

@@ -67,9 +67,14 @@
 
 #define NFAILED			16	/* failed fences remembered */
 
-/* A process's view of a BO: uncached, read and write, never executed */
+/*
+ * A process's view of a BO: uncached, read and write, never executed
+ * (made here where the architecture's sysdef.h does not name it)
+ */
+#ifndef PTE_PAGE_UDATA_NC
 #define PTE_PAGE_UDATA_NC	(PTE_PAGE | PTE_ATTR(MAIR_IDX_NORMAL_NC) | PTE_AP_RW_ALL | \
 				 PTE_SH_INNER | PTE_AF | PTE_nG | PTE_PXN | PTE_UXN)
+#endif
 
 struct gpubo {
 	UD		npages;
@@ -121,6 +126,7 @@ LOCAL UINT		live_as;	/* address spaces of the backend's that are alive */
 
 EXPORT void knl_gpu_dcache_clean_inval( UBINT va, UBINT len )
 {
+#ifdef CPU_CORE_ARMV8A
 	UBINT	end = va + len;
 
 	Asm("dsb sy" ::: "memory");
@@ -128,6 +134,9 @@ EXPORT void knl_gpu_dcache_clean_inval( UBINT va, UBINT len )
 		Asm("dc civac, %0" :: "r"(va) : "memory");
 	}
 	Asm("dsb sy" ::: "memory");
+#else
+	DCacheFlushRange((CONST void *)va, len);
+#endif
 }
 
 /* ---------------------------------------------------------------- buffer objects */
@@ -676,12 +685,22 @@ LOCAL void gpu_task( INT stacd, void *exinf )
 				failed_at = ( failed_at + 1 ) % NFAILED;
 			}
 			for ( i = 0; i < q->nbo; i++ ) q->bo[i]->busy--;
+			ISpinUnlock(&gpu_lock, &imask);
+
+			/*
+			 * The job's hold on its buffers and its address space is
+			 * given back before the fence is said to be over: one
+			 * who waited for the fence may then count on a buffer it
+			 * let go of being gone.
+			 */
+			for ( i = 0; i < q->nbo; i++ ) knl_gpu_bo_put(q->bo[i]);
+			knl_gpu_as_put(q->as);
+
+			ISpinLock(&gpu_lock, &imask);
 			fence_done = q->fence;
 			q_running = FALSE;
 			ISpinUnlock(&gpu_lock, &imask);
 
-			for ( i = 0; i < q->nbo; i++ ) knl_gpu_bo_put(q->bo[i]);
-			knl_gpu_as_put(q->as);
 			Kfree(q);
 			tk_set_flg(gpu_flg, FLG_DONE);
 		}

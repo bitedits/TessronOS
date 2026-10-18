@@ -18,6 +18,7 @@
 
 #include <pthread.h>
 #include <stdint.h>
+#include "pth_cpu.h"
 
 #define PTH_NAME_MAX	16
 #define PTH_DEF_STACK	( 1024 * 1024 )		/* a thread's stack when none is asked for */
@@ -30,10 +31,11 @@ typedef struct pth_dtor {
 } PTH_DTOR;
 
 /*
- * TPIDR_EL0 points at the thread's control block: 16 bytes whose first
- * word is the thread's record, followed (on the alignment the program's
- * TLS asks for) by the thread's copy of .tdata and .tbss. The compiler
- * reaches a thread_local variable at a fixed distance from TPIDR_EL0.
+ * The thread pointer points at the thread's control block, one word of
+ * which is the thread's record; the thread's copy of .tdata and .tbss
+ * lies beside it where the architecture's TLS has it (pth_cpu.h), and
+ * the compiler reaches a thread_local variable at a fixed distance from
+ * the thread pointer.
  */
 typedef struct pth {
 	int		tid;		/* the task */
@@ -45,7 +47,7 @@ typedef struct pth {
 	void		*map;		/* stack and TLS block as asked for (ts_map_mem) */
 	size_t		mapsz;
 	void		*stk_lo, *stk_hi;	/* the stack it runs on */
-	void		*tls;		/* where TPIDR_EL0 points */
+	void		*tls;		/* where the thread pointer points */
 
 	volatile int	detached;
 	volatile int	done;		/* it has run to its end */
@@ -65,16 +67,16 @@ typedef struct pth {
 /* The calling thread */
 static inline PTH *pth_me( void )
 {
-	PTH	**tp;
+	PTH	**tp = (PTH **)pth_tp_get();
 
-	__asm__ volatile ( "mrs %0, tpidr_el0" : "=r"(tp) );
-	return ( tp != NULL ) ? *tp : NULL;
+	return ( tp != NULL ) ? tp[PTH_TCB_OWNER] : NULL;
 }
 
 /*
  * The program's TLS image (etc/linker/user/program_cxx.ld), and a new
  * control block and TLS block for a thread at 'at' (tls_block_size
- * bytes, aligned to tls_block_align): returns the value for TPIDR_EL0.
+ * bytes, aligned to tls_block_align): returns the thread pointer
+ * (pth_cpu.h).
  */
 size_t	pth_tls_size( void );
 size_t	pth_tls_align( void );

@@ -18,7 +18,7 @@
       "id": "screen-print",
       "kind": "accessory",
       "name": "画面印刷",
-      "version": "R1.100",
+      "version": "R1.110",
       "menu": true,
       "builtin": true,
       "base": []

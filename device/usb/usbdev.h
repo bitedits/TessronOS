@@ -63,7 +63,7 @@ IMPORT void knl_dmabuf_read( DMABUF *b, INT off, UB *dst, INT len );
 IMPORT void knl_dmabuf_write( DMABUF *b, INT off, CONST UB *src, INT len );
 
 /* The barrier between writing memory the controller reads and telling it */
-#define USB_MB()	Asm("dsb sy" ::: "memory")
+#define USB_MB()	DeviceBarrier()
 
 /* ---------------------------------------------------------------- descriptors */
 

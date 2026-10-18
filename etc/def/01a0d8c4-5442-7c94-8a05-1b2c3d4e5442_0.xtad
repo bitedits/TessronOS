@@ -1,10 +1,10 @@
 <tad version="1.0" encoding="UTF-8" filename="ブラウザのデータボックス">
 <document>
 <p>ブラウザのデータボックス</p>
-<p>頁が尋ねるalert・confirm・promptのパネル、頁のselectの一覧を選ぶパネル、頁が求める許可を尋ねるパネル、頁に渡すファイルの実身を選ぶパネル、Widevineを導入する前に示すパネルの定義。言葉は部品1〜6、入力欄と一覧は部品11、ボタンは101(取消、拒否)と102(了解、許可、導入)。</p>
+<p>ページが尋ねるalert・confirm・promptのパネル、ページのselectの一覧を選ぶパネル、ページが求める許可を尋ねるパネル、ページに渡すファイルの実身を選ぶパネル、Widevineを導入する前に示すパネルの定義。言葉は部品1〜6、入力欄と一覧は部品11、ボタンは101(取消、拒否)と102(了解、許可、導入)。</p>
 </document>
 <databox>
-<panel num="1" rect="0,0,460,190" title="頁からの知らせ">
+<panel num="1" rect="0,0,460,190" title="ページからの知らせ">
 <text num="1" x="20" y="36"> </text>
 <text num="2" x="20" y="58"> </text>
 <text num="3" x="20" y="80"> </text>
@@ -12,7 +12,7 @@
 <text num="5" x="20" y="124"> </text>
 <button num="102" rect="356,152,444,178" emph="true">了解</button>
 </panel>
-<panel num="2" rect="0,0,460,190" title="頁からの確認">
+<panel num="2" rect="0,0,460,190" title="ページからの確認">
 <text num="1" x="20" y="36"> </text>
 <text num="2" x="20" y="58"> </text>
 <text num="3" x="20" y="80"> </text>
@@ -21,7 +21,7 @@
 <button num="101" rect="260,152,348,178" answer="cancel">取消</button>
 <button num="102" rect="356,152,444,178" emph="true">了解</button>
 </panel>
-<panel num="3" rect="0,0,460,226" title="頁からの問い合わせ">
+<panel num="3" rect="0,0,460,226" title="ページからの問い合わせ">
 <text num="1" x="20" y="36"> </text>
 <text num="2" x="20" y="58"> </text>
 <text num="3" x="20" y="80"> </text>
@@ -44,7 +44,7 @@
 <button num="102" rect="356,130,444,156" emph="true">許可</button>
 </panel>
 <panel num="6" rect="0,0,420,340" title="ファイルの選択">
-<text num="1" x="20" y="28">頁に渡す実身を選んでください。</text>
+<text num="1" x="20" y="28">ページに渡す実身を選んでください。</text>
 <text num="2" x="20" y="50">トレーにある仮身と、ここに入れた仮身が並びます。</text>
 <list num="11" rect="12,64,408,286"/>
 <button num="101" rect="224,300,312,326" answer="cancel">取消</button>
@@ -53,7 +53,7 @@
 <panel num="7" rect="0,0,580,228" title="Widevineの導入">
 <text num="1" x="20" y="36">Widevineは、Googleの独自のソフトウェア(CDM)です。</text>
 <text num="2" x="20" y="58">TessronOSにもブラウザにも同梱していません。</text>
-<text num="3" x="20" y="80">〈導入〉を選ぶと、Raspberry Piの公式の倉庫</text>
+<text num="3" x="20" y="80">〈導入〉を選ぶと、Raspberry Piの公式のリポジトリ</text>
 <text num="4" x="20" y="102">(archive.raspberrypi.com)からlibwidevinecdm0を取ってきて、</text>
 <text num="5" x="20" y="124">この利用者の実身に入れます(〈Widevineを外す〉で消せます)。</text>
 <text num="6" x="20" y="146">利用の条件は、導入する前にご自身で確かめてください。</text>

@@ -98,6 +98,7 @@ typedef struct {
 	UD	seq;			/* the number the next one takes */
 	INT	handles;		/* on the running transaction */
 	BOOL	committing;		/* the last handle let go; it is being written */
+	BOOL	frozen;			/* no transaction begins: the volume is being grown */
 	BOOL	doomed;			/* a handle gave up: the whole of it goes */
 	JENT	txn[TSFSJ_MAX_BLOCKS];
 	INT	ntxn;
@@ -423,11 +424,13 @@ EXPORT ER ts_jrnl_begin( ID vol )
 			tk_unl_mtx(j->mtx);
 			return E_IO;
 		}
-		if ( !j->committing ) {
+		/* a handle joining the running transaction is let in while
+		   frozen: the freeze waits for that transaction to end */
+		if ( !j->committing && !( j->frozen && j->handles == 0 ) ) {
 			break;
 		}
 		tk_unl_mtx(j->mtx);
-		tk_dly_tsk(1);			/* the last one is being written */
+		tk_dly_tsk(1);			/* the last one is being written, or the volume grown */
 	}
 	if ( j->handles == 0 ) {
 		txn_drop(j);
@@ -741,6 +744,47 @@ EXPORT ER ts_jrnl_checkpoint( ID vol )
 	}
 	tk_loc_mtx(j->mtx, TMO_FEVR);
 	er = ckpt_locked(j);
+	tk_unl_mtx(j->mtx);
+	return er;
+}
+
+/*
+ * No transaction begins while the volume is frozen (on): the ones
+ * running are waited for, up to five seconds, and everything committed
+ * is put in place, so that the ring holds nothing a replay would bring
+ * back. A volume being grown needs this: a group head or a superblock
+ * copy from before, put back after, would undo the grow. E_BUSY when a
+ * transaction does not end in time; nothing is frozen then.
+ */
+EXPORT ER knl_jrnl_freeze( ID vol, BOOL on )
+{
+	TSFSJRNL	*j = jrnl_find(vol);
+	INT		tries;
+	ER		er = E_OK;
+
+	if ( j == NULL ) {
+		return E_OK;
+	}
+	tk_loc_mtx(j->mtx, TMO_FEVR);
+	if ( !on ) {
+		j->frozen = FALSE;
+		tk_unl_mtx(j->mtx);
+		return E_OK;
+	}
+	j->frozen = TRUE;
+	for ( tries = 0; ( j->handles > 0 || j->committing ) && tries < 500; tries++ ) {
+		tk_unl_mtx(j->mtx);
+		tk_dly_tsk(10);
+		tk_loc_mtx(j->mtx, TMO_FEVR);
+	}
+	if ( j->handles > 0 || j->committing ) {
+		er = E_BUSY;
+	} else {
+		er = ckpt_locked(j);
+	}
+	if ( er < E_OK ) {
+		j->frozen = FALSE;
+	}
 	tk_unl_mtx(j->mtx);
 	return er;
 }

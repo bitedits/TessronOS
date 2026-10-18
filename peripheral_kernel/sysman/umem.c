@@ -62,11 +62,10 @@
 #define PROT_ALL	( TS_MEM_RW | TS_MEM_EXEC )
 #define IS_JIT(prot)	( ( (prot) & ( TS_MEM_WRITE | TS_MEM_EXEC ) ) == ( TS_MEM_WRITE | TS_MEM_EXEC ) )
 
-/* What a process may do with a page, by its entry */
-#define AP_MASK		( 3UL << 6 )
-#define ENT_EL0_R(e)	( ( (e) & PTE_AP_RW_ALL ) != 0 )		/* AP[1]: EL0 has it */
-#define ENT_EL0_W(e)	( ( (e) & AP_MASK ) == PTE_AP_RW_ALL )
-#define ENT_EL0_X(e)	( ( (e) & PTE_UXN ) == 0 )
+/* What a process may do with a page, by its entry (sys/sysdef.h) */
+#define ENT_EL0_R(e)	PTE_USER_R(e)
+#define ENT_EL0_W(e)	PTE_USER_W(e)
+#define ENT_EL0_X(e)	PTE_USER_X(e)
 
 typedef struct {
 	UBINT	s, e;			/* [s, e), page aligned */

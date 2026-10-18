@@ -39,7 +39,7 @@
 #include <sys/machine.h>
 #include "kernel.h"
 #include "sysdepend/sysdepend.h"
-#include "sysdepend/cpu/core/armv8a/cpu_task.h"
+#include "sysdepend/cpu_task.h"
 #include <tm/tmonitor.h>
 #include <ts/svc.h>
 #include <ts/time.h>
@@ -2446,7 +2446,8 @@ LOCAL UBINT svc_pan_probe( CONST UD *p, BOOL opened )
 #endif
 
 /*
- * Called from vector.S with the exception frame; returns the value for x0.
+ * Called from vector.S with the exception frame; returns the value for
+ * the register the call's value goes back in (KNL_SVC_RET).
  *
  * A task of a process (its TCB's owner) has class 0 through
  * knl_tk_prc_tbl, where it names only its process's objects. While it
@@ -2456,7 +2457,7 @@ LOCAL UBINT svc_pan_probe( CONST UD *p, BOOL opened )
  */
 EXPORT UBINT knl_svc_gateway( T_EXCFRAME *frame )
 {
-	UINT	fncd = (UINT)frame->x[8];
+	UINT	fncd = (UINT)KNL_SVC_FNCD(frame);
 	UINT	cls = TSN_CLASS(fncd), no = TSN_NUMBER(fncd);
 	FP	fn = NULL;
 	UBINT	ret;
@@ -2543,19 +2544,20 @@ EXPORT UBINT knl_svc_gateway( T_EXCFRAME *frame )
 		ret = (UBINT)(BINT)( ( cls == TSN_CLASS_FS ) ? EX_INTR : E_DISWAI );
 	} else if ( fncd == TSN_TS_FLT_RET ) {
 		/* back to where a fault's picture says: the call's own frame is turned to it */
-		ret = (UBINT)(BINT)knl_prc_flt_return(frame, (CONST T_TSFLT *)frame->x[0]);
+		ret = (UBINT)(BINT)knl_prc_flt_return(frame, (CONST T_TSFLT *)KNL_SVC_ARG(frame, 0));
 		if ( (BINT)ret >= E_OK ) {
-			ret = frame->x[0];
+			ret = KNL_SVC_RET(frame);
 		}
 	} else if ( fncd == TSN_TS_SIG_RET && prc > 0 ) {
 		/* back from a signal's handler, its mask put back */
-		ret = (UBINT)(BINT)knl_psx_sig_return(frame, (CONST T_TSSIGFR *)frame->x[0]);
+		ret = (UBINT)(BINT)knl_psx_sig_return(frame, (CONST T_TSSIGFR *)KNL_SVC_ARG(frame, 0));
 		if ( (BINT)ret >= E_OK ) {
-			ret = frame->x[0];
+			ret = KNL_SVC_RET(frame);
 		}
 	} else {
-		ret = ((SVCFN)fn)(frame->x[0], frame->x[1], frame->x[2], frame->x[3],
-				  frame->x[4], frame->x[5], frame->x[6], frame->x[7]);
+		ret = ((SVCFN)fn)(KNL_SVC_ARG(frame, 0), KNL_SVC_ARG(frame, 1), KNL_SVC_ARG(frame, 2),
+				  KNL_SVC_ARG(frame, 3), KNL_SVC_ARG(frame, 4), KNL_SVC_ARG(frame, 5),
+				  KNL_SVC_ARG(frame, 6), KNL_SVC_ARG(frame, 7));
 		if ( inside || knl_prc_kfaults > 0 ) {
 			knl_prc_call_leave(inside);
 		}
@@ -2569,7 +2571,7 @@ EXPORT UBINT knl_svc_gateway( T_EXCFRAME *frame )
 	 */
 	if ( prc > 0 ) {
 		if ( knl_psx_deliver(frame, (UD)ret) ) {
-			ret = frame->x[0];		/* turned to the signal's entry */
+			ret = KNL_SVC_RET(frame);	/* turned to the signal's entry */
 		}
 	}
 	if ( busy ) {

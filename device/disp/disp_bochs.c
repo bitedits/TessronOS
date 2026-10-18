@@ -73,7 +73,7 @@ LOCAL UBINT	vbe_fb_pages = 0;		/* the pages mapped of it */
 LOCAL void vbe_write( UINT reg, UH val )
 {
 	*(volatile UH *)(vbe_base + VBE_OFF + reg * 2) = val;
-	Asm("dsb sy" ::: "memory");
+	DeviceBarrier();
 }
 
 LOCAL UH vbe_read( UINT reg )

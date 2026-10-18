@@ -37,6 +37,7 @@ SRCS_SYSMAN := \
 	peripheral_kernel/sysman/smem.c \
 	peripheral_kernel/sysman/space.c \
 	peripheral_kernel/sysman/part.c \
+	peripheral_kernel/sysman/gpt.c \
 	peripheral_kernel/fs/fs.c \
 	peripheral_kernel/fs/pipefs.c \
 	peripheral_kernel/fs/devfs.c \
@@ -46,6 +47,7 @@ SRCS_SYSMAN := \
 	peripheral_kernel/fs/crc32c.c \
 	peripheral_kernel/fs/tsfs.c \
 	peripheral_kernel/fs/tsfsblk.c \
+	peripheral_kernel/fs/tsfspart.c \
 	peripheral_kernel/fs/tsfsbtree.c \
 	peripheral_kernel/fs/tsfsjrnl.c \
 	peripheral_kernel/fs/tsfsobj.c \
@@ -341,6 +343,7 @@ SRCS_APP += \
 	tests/ktest/ktest_xfu.c \
 	tests/ktest/ktest_btcd.c \
 	tests/ktest/ktest_vols.c \
+	tests/ktest/ktest_grow.c \
 	lib/libbtfs/btfs.c \
 	lib/libtxc/txc.c \
 	lib/libtxc/txc_tab.c \
@@ -414,8 +417,9 @@ SRCS_KTEST_QEMU := \
 	tests/ktest/ktest_pcie.c
 endif
 
-# コア依存(AArch64)。ボード依存は各 .mk で足す
-SRCS_CORE := \
+# コア依存。ARCH_CORE(makefile)の置き場のものを選ぶ。ボード依存は各 .mk で足す
+# AArch64(armv8a)
+SRCS_CORE_armv8a := \
 	kernel/sysdepend/cpu/core/armv8a/boot.S \
 	kernel/sysdepend/cpu/core/armv8a/vector.S \
 	kernel/sysdepend/cpu/core/armv8a/dispatch.S \
@@ -435,6 +439,31 @@ SRCS_CORE := \
 	lib/libtk/sysdepend/cpu/core/armv8a/spinlock.c \
 	lib/libtk/sysdepend/cpu/core/armv8a/wusec_armv8a.c \
 	lib/libtm/sysdepend/pl011/tm_com.c
+
+# x86-64(x86_64)
+SRCS_CORE_x86_64 := \
+	kernel/sysdepend/cpu/core/x86_64/boot.S \
+	kernel/sysdepend/cpu/core/x86_64/vector.S \
+	kernel/sysdepend/cpu/core/x86_64/dispatch.S \
+	kernel/sysdepend/cpu/core/x86_64/tramp.S \
+	kernel/sysdepend/cpu/core/x86_64/interrupt.c \
+	kernel/sysdepend/cpu/core/x86_64/exc_hdl.c \
+	kernel/sysdepend/cpu/core/x86_64/syscall.c \
+	kernel/sysdepend/cpu/core/x86_64/cpu_cntl.c \
+	kernel/sysdepend/cpu/core/x86_64/reset_main.c \
+	kernel/sysdepend/cpu/core/x86_64/board.c \
+	kernel/sysdepend/cpu/core/x86_64/mmu.c \
+	kernel/sysdepend/cpu/core/x86_64/apic.c \
+	kernel/sysdepend/cpu/core/x86_64/sys_timer.c \
+	kernel/sysdepend/cpu/core/x86_64/smp.c \
+	kernel/sysdepend/cpu/core/x86_64/lockup.c \
+	kernel/sysdepend/cpu/core/x86_64/cpuclk.c \
+	lib/libtk/sysdepend/cpu/core/x86_64/int_x86_64.c \
+	lib/libtk/sysdepend/cpu/core/x86_64/spinlock.c \
+	lib/libtk/sysdepend/cpu/core/x86_64/wusec_x86_64.c \
+	lib/libtm/sysdepend/ns16550/tm_com.c
+
+SRCS_CORE := $(SRCS_CORE_$(ARCH_CORE))
 
 SRCS := $(SRCS_TKERNEL) $(SRCS_SYSMAN) $(SRCS_SYSINIT) \
 	$(SRCS_LIBTK) $(SRCS_LIBTM) $(SRCS_LIBTAD) $(SRCS_LIBOM) $(SRCS_LIBIMG) $(SRCS_TRAY) $(SRCS_LIBJSON) $(SRCS_LIBCONF) \

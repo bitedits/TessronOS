@@ -1,7 +1,7 @@
 <tad version="1.0" encoding="UTF-8" filename="システム環境設定のデータボックス">
 <document>
 <p>システム環境設定のデータボックス</p>
-<p>システム環境設定の窓のパネルと、尋ねるパネルの定義。〈画面〉の〈ウィンドウ〉はウィンドウの見た目(透明度、色、角の丸み、影、ぼかし、開閉の動き、移動中の表示)と、ウィンドウの合成にGPUを使うかどうか(GPUで合成)を設定する。〈機器〉の〈電源管理〉は、再起動と電源の切断のほか、プロセッサのクロックの上限、今のクロックと電源の状態、ウォッチドッグを扱う。〈機器情報〉のサウンドは、音の出力先(自動、I2SのDAC、HDMI0、HDMI1、つながっているUSBオーディオ機器)を選び、試聴、音量、出力を止めずに流し続けるかどうかを扱う。</p>
+<p>システム環境設定のウインドウのパネルと、尋ねるパネルの定義。〈画面〉の〈ウィンドウ〉はウィンドウの見た目(透明度、色、角の丸み、影、ぼかし、開閉の動き、移動中の表示)と、ウィンドウの合成にGPUを使うかどうか(GPUで合成)を設定する。〈機器〉の〈電源管理〉は、再起動と電源の切断のほか、プロセッサのクロックの上限、今のクロックと電源の状態、ウォッチドッグを扱う。〈機器情報〉のサウンドは、音の出力先(自動、I2SのDAC、HDMI0、HDMI1、つながっているUSBオーディオ機器)を選び、試聴、音量、出力を止めずに流し続けるかどうかを扱う。〈書体〉は書体箱の書体の一覧と、それぞれを使用するかどうかを扱い、［詳細情報］でフォント設定のウインドウ(パネル14)を開く。フォント設定のファミリの詳細はパネル15、登録と更新を尋ねるのはパネル16から20、削除を尋ねるのはパネル21である。</p>
 </document>
 <databox>
 <panel num="1" rect="0,0,600,470" title="システム環境設定" kind="bare">
@@ -88,8 +88,11 @@
 <select num="71" sheet="5" rect="184,422,400,450" across="true" value="1"><name>中身ごと</name><name>枠線だけ</name></select>
 <button num="72" sheet="5" rect="404,424,490,448">初期値</button>
 <button num="73" sheet="5" rect="496,424,588,448">取り消し</button>
-<list num="13" sheet="6" rect="12,40,588,416"/>
-<box num="14" sheet="6" rect="12,424,588,450" off="true"/>
+<list num="13" sheet="6" rect="12,40,588,384"/>
+<text sheet="6" x="16" y="414">使用：</text>
+<select num="83" sheet="6" rect="104,394,384,424" across="true" value="1"><name>使用する</name><name>使用しない</name></select>
+<button num="14" sheet="6" rect="480,396,588,420">詳細情報</button>
+<text sheet="6" x="16" y="452">書体の実身の仮身を一覧に落とすと登録</text>
 <text sheet="7" x="16" y="59">システムバージョン：</text>
 <box num="15" sheet="7" rect="184,40,588,66" off="true"/>
 <text sheet="7" x="16" y="89">カーネル：</text>
@@ -192,6 +195,91 @@
 <text x="24" y="172">以前の画面の設定に戻します。</text>
 <button num="104" rect="192,200,320,224" answer="cancel">再起動しない</button>
 <button num="105" rect="332,200,460,224" answer="ok" emph="true">再起動する</button>
+</panel>
+<panel num="14" rect="0,0,560,384" title="フォント設定" kind="bare">
+<text x="16" y="31">個別定義：</text>
+<popup num="1" rect="120,12,548,38"/>
+<text x="16" y="65">実身容量：</text>
+<box num="2" rect="120,46,548,72" off="true"/>
+<text x="16" y="99">定義範囲：</text>
+<box num="3" rect="120,80,548,106" off="true"/>
+<switch num="4" rect="120,114,260,140">見本表示</switch>
+<switch num="5" rect="272,114,412,140">注釈表示</switch>
+<text x="16" y="167">詳細名：</text>
+<box num="6" rect="120,148,548,174" jp="true"/>
+<text x="16" y="201">使用：</text>
+<select num="7" rect="120,182,400,210" across="true" value="1"><name>使用する</name><name>使用しない</name></select>
+<text x="16" y="235">属性：</text>
+<switch num="8" rect="120,216,200,242">太字</switch>
+<switch num="9" rect="208,216,288,242">斜体</switch>
+<switch num="10" rect="296,216,392,242">袋文字</switch>
+<switch num="11" rect="400,216,520,242">影付文字</switch>
+<switch num="12" rect="120,248,200,274" off="true">比例</switch>
+<switch num="13" rect="208,248,304,274" off="true">縦書き</switch>
+<switch num="14" rect="312,248,392,274">詳細</switch>
+<box num="15" rect="400,248,476,274" ascii="true" off="true"/>
+<text x="16" y="301">ファミリ：</text>
+<popup num="16" rect="120,282,440,308"/>
+<button num="17" rect="452,283,548,307">詳細</button>
+<switch num="18" rect="452,316,548,342">統一</switch>
+<text x="16" y="374">［閉じる］で登録するかどうかを選びます</text>
+</panel>
+<panel num="15" rect="0,0,480,336" title="ファミリ">
+<text x="16" y="27">〈ファミリ〉</text>
+<text x="16" y="57">名称：</text>
+<box num="1" rect="72,38,300,64" jp="true"/>
+<text x="312" y="57">クラス：</text>
+<box num="2" rect="384,38,464,64" ascii="true"/>
+<list num="3" rect="16,70,464,140"/>
+<text x="16" y="167">〈ベース〉</text>
+<text x="16" y="197">名称：</text>
+<box num="4" rect="72,178,300,204" jp="true"/>
+<text x="312" y="197">クラス：</text>
+<box num="5" rect="384,178,464,204" ascii="true"/>
+<list num="6" rect="16,210,464,280"/>
+<button num="7" rect="264,298,356,322" answer="cancel">取消</button>
+<button num="8" rect="368,298,460,322" answer="ok" emph="true">設定</button>
+</panel>
+<panel num="16" rect="0,0,560,128" title="書体の登録">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<button num="161" rect="16,92,176,116">登録しないで終了</button>
+<button num="162" rect="304,92,396,116" answer="cancel" emph="true">取消</button>
+<button num="163" rect="408,92,544,116" answer="ok">登録して終了</button>
+</panel>
+<panel num="17" rect="0,0,620,128" title="書体の登録">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<button num="161" rect="16,92,176,116">登録しないで終了</button>
+<button num="162" rect="216,92,308,116" answer="cancel" emph="true">取消</button>
+<button num="163" rect="320,92,456,116">登録して終了</button>
+<button num="164" rect="468,92,604,116" answer="ok">更新して終了</button>
+</panel>
+<panel num="18" rect="0,0,560,128" title="書体の更新">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<button num="161" rect="16,92,176,116">更新しないで終了</button>
+<button num="162" rect="304,92,396,116" answer="cancel" emph="true">取消</button>
+<button num="164" rect="408,92,544,116" answer="ok">更新して終了</button>
+</panel>
+<panel num="19" rect="0,0,460,128" title="書体の登録">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<button num="162" rect="244,92,336,116" answer="cancel" emph="true">取消</button>
+<button num="165" rect="348,92,440,116" answer="ok">登録</button>
+</panel>
+<panel num="20" rect="0,0,460,128" title="書体の登録">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<button num="162" rect="140,92,232,116" answer="cancel" emph="true">取消</button>
+<button num="165" rect="244,92,336,116">登録</button>
+<button num="166" rect="348,92,440,116" answer="ok">更新</button>
+</panel>
+<panel num="21" rect="0,0,460,128" title="書体の削除">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<button num="162" rect="244,92,336,116" answer="cancel" emph="true">取消</button>
+<button num="167" rect="348,92,440,116" answer="ok">削除</button>
 </panel>
 </databox>
 </tad>

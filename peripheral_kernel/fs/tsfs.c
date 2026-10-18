@@ -668,6 +668,7 @@ EXPORT ER ts_cls_vol( ID vol )
 	bvol = v->bvol;
 	v->bvol = 0;
 	v->used = FALSE;
+	knl_elf_forget(vol, NULL);		/* the programs kept of it: another volume may take its number */
 	tk_del_sem(v->wsem);
 	tk_del_mtx(v->mtxid);
 	tk_unl_mtx(tsfs_mtxid);
@@ -999,6 +1000,9 @@ EXPORT ID ts_opn_obj( ID vol, CONST TS_UUID *uuid, UINT omode )
 
 	if ( v == NULL || uuid == NULL ) {
 		return E_ID;
+	}
+	if ( ( omode & ( TFO_WRITE | TFO_EXCL ) ) != 0 ) {
+		knl_elf_forget(vol, uuid);	/* a program kept of it is read again after it is written */
 	}
 	if ( v->bvol > 0 ) {
 		if ( ts_obj_exists(v->bvol, uuid) < E_OK ) {

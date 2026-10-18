@@ -6,18 +6,19 @@ TOP     := ..
 OBJDIR  := obj/$(TARGET)$(if $(filter 1,$(KTEST)),_ktest)$(BUILD_ID)
 INCPATH := -I$(TOP)/include -I$(TOP)/config -I$(TOP)/kernel/knlinc \
 	-I$(TOP)/kernel -I$(TOP)/peripheral_kernel \
-	-I$(TOP)/kernel/sysdepend/cpu/core/armv8a -I$(OBJDIR) \
+	-I$(TOP)/kernel/sysdepend/cpu/core/$(ARCH_CORE) -I$(OBJDIR) \
 	-I$(TOP)/peripheral_kernel/network/lwip/src/include \
 	-I$(TOP)/peripheral_kernel/libc/include \
 	-I$(TOP)/peripheral_kernel/network/port/include \
 	-I$(TOP)/outer_kernel/font/port \
 	-I$(TOP)/outer_kernel/font/freetype/include
 
-# 命令セットの基準。Raspberry Pi 4 系の Cortex-A72 は ARMv8.0-A で、CRC32 の命令はあるが、
+# 命令セットの基準(ARCH=aarch64)。Raspberry Pi 4 系の Cortex-A72 は ARMv8.0-A で、CRC32 の命令はあるが、
 # LSE のアトミック命令(ldadd、cas など)も暗号拡張(AES、SHA)も持たない。そのターゲットだけ
 # ARMv8.0-A に CRC32 を足したもので作り、ほかは ARMv8.2-A のまま(docs/tessronos/03-platform.md 3.6)
 # アトミック操作は、ARMv8.0-A では関数(libgcc の __aarch64_cas4_acq_rel など)を呼ぶ形が
 # 既定になる。ライブラリを結ばない小物もあるので、排他ロードとストアの命令で直に作らせる
+ifeq ($(ARCH),aarch64)
 ifeq ($(TARGET),_RPI4_)
 ARCH_MARCH := armv8-a+crc
 ARCHFLAGS := -march=$(ARCH_MARCH) -mno-outline-atomics
@@ -25,18 +26,35 @@ else
 ARCH_MARCH := armv8.2-a
 ARCHFLAGS := -march=$(ARCH_MARCH)
 endif
+# カーネルは浮動小数点・SIMD のレジスタを使わず(-mgeneral-regs-only)、整列の検査に
+# 頼らない(-mstrict-align)。アトミック操作は関数を呼ばず、命令で直に作らせる
+ARCH_KFLAGS  := -mgeneral-regs-only -mstrict-align
+ARCH_KFLAGS2 := -mno-outline-atomics
+endif
+# x86_64: 命令セットの基準は x86-64-v2(SSE4.2、POPCNT。AVX2 は実行時に選ぶ)。カーネルは
+# 最上位の 2GB に置き(-mcmodel=kernel)、割込みが利用者のでないスタックの赤い領域を
+# 壊さないよう -mno-red-zone、浮動小数点・SIMD のレジスタは使わない(-mgeneral-regs-only)
+# (docs/private/x64_surface_go2_study.md 2.11)
+ifeq ($(ARCH),x86_64)
+ARCH_MARCH := x86-64-v2
+ARCHFLAGS := -march=$(ARCH_MARCH)
+ARCH_KFLAGS  := -mgeneral-regs-only -mno-red-zone -mcmodel=kernel
+ARCH_KFLAGS2 :=
+endif
 
 # 利用者のプログラムと実身のレコード、それらが結ぶライブラリの置き場。命令セットの基準が
 # 違うターゲットのものは混ぜない
 ifeq ($(TARGET),_RPI4_)
 UOBJ := obj/v80
+else ifeq ($(ARCH),x86_64)
+UOBJ := obj/x64
 else
 UOBJ := obj
 endif
 
-CFLAGS_COMMON := $(ARCHFLAGS) -mgeneral-regs-only -mstrict-align \
+CFLAGS_COMMON := $(ARCHFLAGS) $(ARCH_KFLAGS) \
 	-ffreestanding -fno-builtin -fno-common -fno-pic -fno-stack-protector \
-	-fno-omit-frame-pointer -mno-outline-atomics \
+	-fno-omit-frame-pointer $(ARCH_KFLAGS2) \
 	-std=gnu11 -Wall -Wextra -Wno-unused-parameter \
 	-Werror=implicit-function-declaration -Werror=int-conversion \
 	-MMD -MP
@@ -111,6 +129,10 @@ endif
 # make NETSTACK=netbsd(既定)で、TCP/IP スタックは NetBSD のもの(rump カーネルとして
 # tools/netbsd/build.sh が作る一つのオブジェクト)。NETSTACK=lwip で以前の lwIP に戻す
 # (設計書 12.6)。オブジェクトが無ければ、リンクの前に tools/netbsd/build.sh が作る
+# x86_64 は段階1では lwIP(NetBSD のスタックの x86_64 版はまだ作っていない)
+ifeq ($(ARCH),x86_64)
+NETSTACK ?= lwip
+endif
 NETSTACK ?= netbsd
 # 命令セットの基準ごとに別の置き場に作る(Raspberry Pi 4 系は ARMv8.0-A の版)
 ifeq ($(TARGET),_RPI4_)

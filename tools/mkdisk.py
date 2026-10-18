@@ -13,7 +13,13 @@ Layout (512 byte sectors):
   ...    partition 5, basic data: a FAT12 volume of 2MB (tools/mkfat.py)
   end-33 backup entry array, end  backup header
 
-Usage: mkdisk.py [--sys IMAGE] <output> [size_mb] [file to place in the FAT root ...]
+With --sys-room N the disk is written as a card written with a smaller
+image has it: the tables end N MB before the end of the disk (the backup
+right there), and partition 3, the system volume, is placed last, after
+partitions 4 and 5, so that the start grows it into the N MB (design
+7.7). Its number among the partitions stays 3.
+
+Usage: mkdisk.py [--sys IMAGE] [--sys-room N] <output> [size_mb] [file to place in the FAT root ...]
 """
 
 import binascii
@@ -50,14 +56,20 @@ def gpt_header(my_lba, alt_lba, first, last, entry_lba, entries_crc, disk_guid):
 def main():
     args = sys.argv[1:]
     sysvol = None
-    if len(args) >= 2 and args[0] == "--sys":
-        with open(args[1], "rb") as f:
-            sysvol = f.read()
+    room_mb = 0
+    while len(args) >= 2 and args[0] in ("--sys", "--sys-room"):
+        if args[0] == "--sys":
+            with open(args[1], "rb") as f:
+                sysvol = f.read()
+        else:
+            room_mb = int(args[1])
         args = args[2:]
     out = args[0]
     size_mb = int(args[1]) if len(args) > 1 else 96
     files = args[2:]
-    nsect = size_mb * 1024 * 1024 // SECTOR
+    disk_sect = size_mb * 1024 * 1024 // SECTOR
+    # where the tables end: the end of the disk, or of the image a card was written with
+    nsect = disk_sect - room_mb * 2048
 
     entry_sectors = ENTRIES * ENTRY_SIZE // SECTOR          # 32
     first_usable = 2 + entry_sectors                        # 34
@@ -72,10 +84,16 @@ def main():
     p5_sectors = 2 * 2048                                   # FAT12
     p2_sectors = (last_usable + 1 - p2_start - p3_sectors - p4_sectors - p5_sectors) \
         // 2048 * 2048                                      # FAT32
-    p3_start = p2_start + p2_sectors
-    p4_start = p3_start + p3_sectors
-    p5_start = p4_start + p4_sectors
-    assert p5_start + p5_sectors <= last_usable + 1, "image too small"
+    if room_mb > 0 and sysvol is not None:
+        p4_start = p2_start + p2_sectors
+        p5_start = p4_start + p4_sectors
+        p3_start = p5_start + p5_sectors
+        assert p3_start + p3_sectors <= last_usable + 1, "image too small"
+    else:
+        p3_start = p2_start + p2_sectors
+        p4_start = p3_start + p3_sectors
+        p5_start = p4_start + p4_sectors
+        assert p5_start + p5_sectors <= last_usable + 1, "image too small"
 
     parts = [
         (TSFS_GUID, p1_start, p1_start + p1_sectors - 1, "TessronOS TSFS"),
@@ -95,7 +113,7 @@ def main():
     entries_crc = crc32(bytes(entries))
     disk_guid = uuid.uuid4()
 
-    img = bytearray(nsect * SECTOR)
+    img = bytearray(disk_sect * SECTOR)
 
     # Protective MBR: one entry of type 0xEE covering the disk
     mbr = bytearray(SECTOR)
@@ -134,7 +152,8 @@ def main():
 
     with open(out, "wb") as f:
         f.write(img)
-    print("%s: %d MB, %d sectors, %d partitions" % (out, size_mb, nsect, len(parts)))
+    print("%s: %d MB, %d sectors, %d partitions%s" % (out, size_mb, disk_sect, len(parts),
+          ", %d MB after the tables" % room_mb if room_mb else ""))
 
 
 if __name__ == "__main__":

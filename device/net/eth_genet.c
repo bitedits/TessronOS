@@ -255,13 +255,7 @@ LOCAL BOOL	gen_found = FALSE;
 
 LOCAL void dcache_flush( CONST void *p, UD len )
 {
-	UBINT	a = (UBINT)p & ~63ULL, end = (UBINT)p + len;
-
-	Asm("dsb sy" ::: "memory");
-	for ( ; a < end; a += 64 ) {
-		Asm("dc civac, %0" :: "r"(a) : "memory");
-	}
-	Asm("dsb sy" ::: "memory");
+	DCacheFlushRange(p, len);
 }
 
 /* ---------------------------------------------------------------- PHY */
@@ -279,7 +273,7 @@ LOCAL INT mdio_cmd( UW cmd )
 			return (INT)v;
 		}
 		if ( ( i & 15 ) == 15 && tk_dly_tsk(1) != E_OK ) {
-			Asm("yield");
+			CpuRelax();
 		}
 	}
 	return E_TMOUT;
@@ -557,7 +551,7 @@ EXPORT ER net_send( CONST void *frame, SZ len )
 	out_w(DESC_ADDR_HI(TDMA_BASE, desc), (UW)( pa >> 32 ));
 	out_w(DESC_STATUS(TDMA_BASE, desc), ( (UW)len << DS_LEN_SHIFT ) | DS_SOP | DS_EOP
 					    | DS_TX_APPEND_CRC | DS_TX_QTAG);
-	Asm("dsb sy" ::: "memory");
+	DeviceBarrier();
 	gen.tx_prod = ( gen.tx_prod + 1 ) & INDEX_MASK;
 	out_w(TDMA_PROD_INDEX, gen.tx_prod);
 

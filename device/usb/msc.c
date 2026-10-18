@@ -480,6 +480,8 @@ LOCAL ER msc_attr( MSCDEV *m, INT unitno, T_DEVREQ *req )
 	return E_OK;
 }
 
+LOCAL ER msc_register( MSCDEV *m );
+
 LOCAL ER msc_exec( T_DEVREQ *req, TMO tmout, void *exinf )
 {
 	MSCDEV	*m = (MSCDEV *)exinf;
@@ -497,6 +499,14 @@ LOCAL ER msc_exec( T_DEVREQ *req, TMO tmout, void *exinf )
 	}
 	if ( req->start == TDN_FLUSH && req->cmd == TDC_WRITE ) {
 		req->error = m->medium ? scsi_sync(m) : E_NOMDA;
+		goto done;
+	}
+	/* the partition table read again after it was written (gpt.c) */
+	if ( req->start == TDN_PARTSCAN && req->cmd == TDC_WRITE ) {
+		INT	n = ( unitno != 0 || !m->medium || m->blksz != BLK_SECTOR_SIZE ) ? E_PAR
+			    : knl_part_rescan(msc_readfn, m, m->nblocks, &m->tbl);
+
+		req->error = ( n < E_OK ) ? n : msc_register(m);
 		goto done;
 	}
 	if ( req->start < 0 ) {

@@ -189,13 +189,7 @@ LOCAL UW vblk_in( VBLK_DEV *d, UW off )
  */
 LOCAL void dcache_flush( CONST void *p, UD len )
 {
-	UBINT	a = (UBINT)p & ~63ULL, end = (UBINT)p + len;
-
-	Asm("dsb sy" ::: "memory");
-	for ( ; a < end; a += 64 ) {
-		Asm("dc civac, %0" :: "r"(a) : "memory");
-	}
-	Asm("dsb sy" ::: "memory");
+	DCacheFlushRange(p, len);
 }
 
 /* ---------------------------------------------------------------- interrupt */
@@ -283,7 +277,7 @@ LOCAL ER vblk_run( VBLK_DEV *d, INT k, INT ndesc, TMO tmout, BOOL *p_lost )
 	tk_loc_mtx(d->mtxid, TMO_FEVR);
 	idx = sh->avail.idx;
 	sh->avail.ring[idx % VBLK_QSIZE] = (UH)( k * VBLK_SLOT_DESC );	/* head descriptor */
-	Asm("dmb ishst" ::: "memory");			/* the ring entry before the index */
+	SmpWriteBarrier();			/* the ring entry before the index */
 	sh->avail.idx = idx + 1;
 	dcache_flush(&sh->avail, sizeof(sh->avail));
 	vblk_out(d, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
@@ -544,6 +538,8 @@ LOCAL ER vblk_attr( VBLK_DEV *d, INT unitno, T_DEVREQ *req )
 	return E_OK;
 }
 
+LOCAL ER vblk_define( VBLK_DEV *d );
+
 LOCAL ER vblk_exec( T_DEVREQ *req, TMO tmout, void *exinf )
 {
 	VBLK_DEV *d = (VBLK_DEV *)exinf;
@@ -556,6 +552,13 @@ LOCAL ER vblk_exec( T_DEVREQ *req, TMO tmout, void *exinf )
 
 	if ( req->start == TDN_FLUSH && req->cmd == TDC_WRITE ) {
 		req->error = vblk_flush(d, tmout);
+		return E_OK;
+	}
+	/* the partition table read again after it was written (gpt.c) */
+	if ( req->start == TDN_PARTSCAN && req->cmd == TDC_WRITE ) {
+		INT	n = ( unitno != 0 ) ? E_PAR : knl_part_rescan(vblk_readfn, d, d->capacity, &d->tbl);
+
+		req->error = ( n < E_OK ) ? n : vblk_define(d);
 		return E_OK;
 	}
 	if ( req->start < 0 ) {
@@ -609,6 +612,31 @@ LOCAL ER vblk_abort( ID tskid, T_DEVREQ *req, INT nreq, void *exinf )
 LOCAL INT vblk_event( INT evttyp, void *evtinf, void *exinf )
 {
 	return E_NOSPT;
+}
+
+/* The device under its name, the partitions as its subunits; again when they change */
+LOCAL ER vblk_define( VBLK_DEV *d )
+{
+	T_DDEV	ddev;
+	ID	id;
+
+	ddev.exinf   = d;
+	ddev.drvatr  = 0;
+	ddev.devatr  = TDK_DISK | TDK_UNDEF;
+	ddev.nsub    = d->tbl.n;
+	ddev.blksz   = BLK_SECTOR_SIZE;
+	ddev.openfn  = (FP)vblk_open;
+	ddev.closefn = (FP)vblk_close;
+	ddev.execfn  = (FP)vblk_exec;
+	ddev.waitfn  = (FP)vblk_wait;
+	ddev.abortfn = (FP)vblk_abort;
+	ddev.eventfn = (FP)vblk_event;
+
+	id = tk_def_dev(d->devnm, &ddev, NULL);
+	if ( id > 0 ) {
+		d->devid = id;
+	}
+	return ( id > 0 ) ? E_OK : (ER)id;
 }
 
 /* ---------------------------------------------------------------- start-up */
@@ -695,11 +723,11 @@ LOCAL ER vblk_setup( VBLK_DEV *d )
  */
 EXPORT INT knl_vblk_init( void )
 {
-	T_DDEV	ddev;
 	T_CMTX	cmtx;
 	T_CSEM	csem;
 	T_CFLG	cflg;
 	INT	slot, i;
+	ER	er;
 
 	for ( slot = 0; slot < VIRTIO_MMIO_NUM && vblk_ndev < VBLK_MAX_DEV; slot++ ) {
 		VBLK_DEV *d = &vblk_dev[vblk_ndev];
@@ -744,23 +772,11 @@ EXPORT INT knl_vblk_init( void )
 		d->devnm[0] = 'v'; d->devnm[1] = 'b'; d->devnm[2] = 'l';
 		d->devnm[3] = 'k'; d->devnm[4] = (UB)('a' + (d - vblk_dev)); d->devnm[5] = '\0';
 
-		ddev.exinf   = d;
-		ddev.drvatr  = 0;
-		ddev.devatr  = TDK_DISK | TDK_UNDEF;
-		ddev.nsub    = d->tbl.n;
-		ddev.blksz   = BLK_SECTOR_SIZE;
-		ddev.openfn  = (FP)vblk_open;
-		ddev.closefn = (FP)vblk_close;
-		ddev.execfn  = (FP)vblk_exec;
-		ddev.waitfn  = (FP)vblk_wait;
-		ddev.abortfn = (FP)vblk_abort;
-		ddev.eventfn = (FP)vblk_event;
-
-		d->devid = tk_def_dev(d->devnm, &ddev, NULL);
-		if ( d->devid <= 0 ) {
+		er = vblk_define(d);
+		if ( er < E_OK ) {
 			DisableInt(d->intno);
 			vblk_ndev--;
-			return d->devid;
+			return er;
 		}
 
 		tm_printf((UB*)"TessronOS: %s %d sectors (%d MB)%s, %d partitions (%s)\n",

@@ -149,7 +149,7 @@ LOCAL void look_at( CONST TS_UUID *u, ENT *e )
 	e->size = r.size;
 	if ( r.type != OB_T_STORAGE ) {
 		e->label = ( r.type == OB_T_DEVICE ) ? "デバイス" : ( r.type == OB_T_PROCESS ) ? "プロセス"
-			 : ( r.type == OB_T_CHANNEL ) ? "通信" : ( r.type == OB_T_WINDOW ) ? "窓" : "実身";
+			 : ( r.type == OB_T_CHANNEL ) ? "通信" : ( r.type == OB_T_WINDOW ) ? "ウインドウ" : "実身";
 		return;
 	}
 	key = ob_opn_obj(u, OB_OP_ATRRD);

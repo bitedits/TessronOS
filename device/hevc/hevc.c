@@ -161,13 +161,7 @@
 /* What the processor wrote, out to memory and out of its cache */
 LOCAL void cache_flush( CONST void *p, UD len )
 {
-	UBINT	va = (UBINT)p, end = va + len;
-
-	Asm("dsb sy" ::: "memory");
-	for ( va &= ~63ULL; va < end; va += 64 ) {
-		Asm("dc civac, %0" :: "r"(va) : "memory");
-	}
-	Asm("dsb sy" ::: "memory");
+	DCacheFlushRange(p, len);
 }
 
 typedef struct {
@@ -788,7 +782,7 @@ LOCAL ER pass1( CONST PIC *p, UW ncmd )
 		out_w(REG(R_COEFFWBASE), A64(hv.coeff.pa));
 		out_w(REG(R_COEFFWSTRIDE), L64(cos));
 		out_w(REG(R_CFNUM), ncmd);
-		Asm("dsb sy" ::: "memory");
+		DeviceBarrier();
 		out_w(REG(R_CFBASE), A64(hv.cmd.pa));
 		er = pass_wait(1);
 		if ( er < E_OK ) {
@@ -856,7 +850,7 @@ LOCAL ER pass2( CONST PIC *p )
 	out_w(REG(R_MVBASE), mk_mv ? A64(out->mv.pa) : 0);
 	out_w(REG(R_COLBASE), ( use_mv && p->col_dpb >= 0 && (UW)p->col_dpb < j->ndpb )
 			      ? A64(hv.slot[j->dpb[p->col_dpb].slot].mv.pa) : 0);
-	Asm("dsb sy" ::: "memory");
+	DeviceBarrier();
 	out_w(REG(R_NUMROWS), p->ch);
 	if ( pass_wait(2) < E_OK ) {
 		hv.info.last_error = 0x30000;

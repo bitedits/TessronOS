@@ -33,6 +33,56 @@
 #include "../../device/gpu/v3d/v3d.h"
 #include "../../device/gpu/v3d/v3d_regs.h"
 
+IMPORT BOOL knl_pt_reclaim( void );
+#if TS_NETSTACK_NETBSD
+IMPORT UD knl_rump_pages( void );
+#endif
+
+/*
+ * The free pages with what comes and goes for nothing the test did left
+ * out: the page tables taken out of spaces earlier, given back only once
+ * every other processor has been seen past them (knl_pt_reclaim, waited
+ * for here), and the pages the network stack keeps for its pools, which
+ * grow now and then (counted as free, as ktest_proc does).
+ */
+LOCAL UD free_quiet( void )
+{
+	INT	i;
+	UD	f;
+#if TS_NETSTACK_NETBSD
+	UD	r;
+#endif
+
+	UD	last = 0;
+	INT	same = 0;
+
+	/*
+	 * Counted once the count stops moving: pages let go of late by
+	 * what ran before (page tables reclaimed after the processors have
+	 * passed, a job's buffers given back) come home within a few tenths
+	 * of a second; the count is taken once it holds still that long.
+	 */
+	for ( i = 0; i < 50; i++ ) {
+		INT	k;
+
+		for ( k = 0; k < 50 && knl_pt_reclaim(); k++ ) tk_dly_tsk(20);
+#if TS_NETSTACK_NETBSD
+		do {
+			r = knl_rump_pages();
+			f = knl_pf_free_count(-1);
+		} while ( knl_rump_pages() != r );
+		f += r;
+#else
+		f = knl_pf_free_count(-1);
+#endif
+		same = ( i > 0 && f == last ) ? same + 1 : 0;
+		if ( same >= 3 ) break;
+		last = f;
+		tk_dly_tsk(100);
+	}
+	return f;
+}
+
 #define TEST_VA		( 64UL * 1024 * 1024 )	/* a small GPU address space */
 #define MS		1000			/* TMO_U of a millisecond */
 
@@ -112,7 +162,7 @@ LOCAL void gpu_bo_pages( void )
 {
 	T_GPUBO		*bo;
 	T_GPUBOINFO	bi;
-	UD		free0 = knl_pf_free_count(-1);
+	UD		free0 = free_quiet();
 	UD		i, j;
 	ER		er;
 
@@ -139,14 +189,14 @@ LOCAL void gpu_bo_pages( void )
 		KT_ASSERT(zero);
 	}
 	KT_ASSERT_EQ(knl_gpu_bo_page(bo, 3), 0);
-	KT_ASSERT(knl_pf_free_count(-1) + 3 <= free0);
+	KT_ASSERT(free_quiet() + 3 <= free0);
 
 	knl_gpu_bo_get(bo);
 	knl_gpu_bo_ref(bo, &bi);
 	KT_ASSERT_EQ(bi.refcnt, 2);
 	knl_gpu_bo_put(bo);
 	knl_gpu_bo_put(bo);
-	KT_ASSERT_EQ(knl_pf_free_count(-1), free0);
+	KT_ASSERT_EQ(free_quiet(), free0);
 }
 
 LOCAL void gpu_bo_map( void )
@@ -156,7 +206,7 @@ LOCAL void gpu_bo_map( void )
 	T_GPUBOINFO	bi;
 	UBINT		va = 0, va2 = 0;
 	UD		i, e;
-	UD		free0 = knl_pf_free_count(-1);
+	UD		free0 = free_quiet();
 	ER		er;
 
 	bo = knl_gpu_bo_create(4 * 4096, GPU_BO_NOGPU, &er);
@@ -195,7 +245,7 @@ LOCAL void gpu_bo_map( void )
 	knl_gpu_bo_ref(bo, &bi);
 	KT_ASSERT_EQ(bi.refcnt, 1);
 	knl_gpu_bo_put(bo);
-	KT_ASSERT_EQ(knl_pf_free_count(-1), free0);
+	KT_ASSERT_EQ(free_quiet(), free0);
 }
 
 /* ---------------------------------------------------------------- a backend of the test's own */
@@ -276,7 +326,7 @@ LOCAL void gpu_jobs( void )
 		KT_ASSERT(FALSE);
 		return;
 	}
-	free0 = knl_pf_free_count(-1);
+	free0 = free_quiet();
 	er = knl_gpu_register(&tb_ops, &tb);
 	if ( er == E_OBJ ) {
 		v3d_mmu_fini(&tb.mmu);
@@ -357,7 +407,7 @@ out_bo:
 	knl_gpu_bo_put(bo);
 out:
 	KT_ASSERT_ER(knl_gpu_unregister(), E_OK);
-	KT_ASSERT_EQ(knl_pf_free_count(-1), free0);
+	KT_ASSERT_EQ(free_quiet(), free0);
 	KT_ASSERT_EQ(tb.mmu.nfree, tb.mmu.npte - ( V3D_VA_RESERVED >> 12 ));
 	v3d_mmu_fini(&tb.mmu);
 }

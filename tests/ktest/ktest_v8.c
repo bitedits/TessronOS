@@ -425,7 +425,7 @@ LOCAL CONST char page_form[] =
 LOCAL CONST char page_tall[] =
 	"<!DOCTYPE html><html><head><title>result</title></head><body style=\"margin:0\">"
 	"<a href=\"/r?blank\" target=\"_blank\" style=\"position:absolute;left:300px;top:20px;"
-	"width:200px;height:40px;background:#fff\">別の窓へ</a>"
+	"width:200px;height:40px;background:#fff\">別のウインドウへ</a>"
 	"<div style=\"height:400px;background:rgb(200,0,0)\"></div>"
 	"<div style=\"height:3000px;background:rgb(0,0,200)\"></div></body></html>";
 
@@ -2276,6 +2276,38 @@ LOCAL CONST char page_cache[] =
 	"</script></body></html>";
 
 /*
+ * The page of test_blink_cachekeep: "?fill" makes the cache "big" anew
+ * with 24 responses of 512KB, and six seconds later puts one small one
+ * more ("/k/tiny"), so that the store writes the 12MB once and then only
+ * the small entry; "?check", in the next browser, counts the entries
+ * read back, reads the small one and checks the bytes of a large one,
+ * and deletes the cache.
+ */
+LOCAL CONST char page_cachekeep[] =
+	"<!DOCTYPE html><html><head><title>csk</title></head><body><script>"
+	"function done(t) { document.title = 'csk ' + t; }"
+	"function fail(e) { done('err:' + e); }"
+	"if (location.search == '?fill') {"
+	" caches.delete('big').then(function () { return caches.open('big'); }).then(function (c) {"
+	"  var b = new Uint8Array(524288), p = Promise.resolve();"
+	"  for (var i = 0; i < b.length; i++) b[i] = i & 255;"
+	"  for (var i = 0; i < 24; i++) (function (n) { p = p.then(function () {"
+	"   return c.put('/k/' + n, new Response(b, { headers: { 'Content-Type': 'application/octet-stream' } })); }); })(i);"
+	"  return p.then(function () { setTimeout(function () {"
+	"   c.put('/k/tiny', new Response('tiny')).then(function () { return c.keys(); }).then(function (k) {"
+	"    setTimeout(function () { done('filled ' + k.length); }, 5000); }, fail); }, 6000); });"
+	" }).catch(fail);"
+	"} else {"
+	" caches.open('big').then(function (c) { return c.keys().then(function (k) {"
+	"  return c.match('/k/tiny').then(function (m) { return m ? m.text() : 'none'; }).then(function (t) {"
+	"   return c.match('/k/3').then(function (m) { return m ? m.arrayBuffer() : null; }).then(function (a) {"
+	"    var ok = a && a.byteLength == 524288 && new Uint8Array(a)[300] == 44;"
+	"    return caches.delete('big').then(function () { done(k.length + ' ' + t + ' ' + (ok ? 'body' : 'nobody')); });"
+	"   }); }); }); }).catch(fail);"
+	"}"
+	"</script></body></html>";
+
+/*
  * The pages of test_blink_shared: two SharedWorkers of "/sw.js" with the
  * same name are one worker, which numbers its connections and answers
  * each message on a port with the message and the number of that port's
@@ -2511,6 +2543,128 @@ LOCAL CONST char script_owl[] =
 	"if (!g) { postMessage('none'); } else { g.clearColor(1, 0, 0, 1); g.clear(g.COLOR_BUFFER_BIT);"
 	" var p = new Uint8Array(4); g.readPixels(0, 0, 1, 1, g.RGBA, g.UNSIGNED_BYTE, p);"
 	" postMessage(g.getParameter(g.VERSION).slice(0, 9).replace(' ', '_') + ':' + Array.prototype.join.call(p, ',')); }";
+
+/*
+ * The pages of test_blink_glw: two dedicated workers draw with WebGL (1
+ * and 2) on OffscreenCanvases of their own while the page makes WebGL
+ * contexts of its own, for 4 s, all compiling shaders with numbers in
+ * them all the time; each reads one pixel back. The page's web font
+ * (@font-face) is asked for first from the HTTP cache alone, then from
+ * the server.
+ */
+#define GLW_COMPILE \
+	"function compile(g) { var s = g.createShader(g.FRAGMENT_SHADER), v = g.createShader(g.VERTEX_SHADER), q = g.createProgram();" \
+	" g.shaderSource(s, 'precision mediump float; void main() { gl_FragColor = vec4(0.125, ' + Math.random() + ', 0.375, 1.0); }');" \
+	" g.shaderSource(v, 'attribute vec4 a; void main() { gl_Position = a * ' + Math.random() + '; }');" \
+	" g.compileShader(s); g.compileShader(v); g.attachShader(q, s); g.attachShader(q, v); g.linkProgram(q);" \
+	" var ok = g.getProgramParameter(q, g.LINK_STATUS); g.deleteProgram(q); g.deleteShader(s); g.deleteShader(v); return ok; }"
+
+LOCAL CONST char page_glw[] =
+	"<!DOCTYPE html><html><head><title>glw</title>"
+	"<style>@font-face { font-family: T; src: url(/glw.woff2) format('woff2'); }</style></head>"
+	"<body><p style='font-family: T'>font</p><script>var r = {}, n = 0, bad = 0, t0 = performance.now();"
+	"try { document.querySelector('!glw'); } catch (e) { r.qs = e.name; }"
+	"function done() { document.title = 'glw ' + Object.keys(r).sort().map(function (k) { return k + '=' + r[k]; }).join(' '); }"
+	GLW_COMPILE
+	"document.fonts.load('16px T').then(function () { r.font = 'done'; done(); }, function () { r.font = 'done'; done(); });"
+	"for (var i = 0; i < 2; i++) { var w = new Worker('/glw.js'); w.onmessage = function (e) { r['w' + e.data.k] = e.data.v; done(); };"
+	" w.postMessage(i); }"
+	"function main() { var c = document.createElement('canvas'); c.width = c.height = 8; var g = c.getContext('webgl'), p = new Uint8Array(4);"
+	" if (!compile(g)) bad++; g.clearColor(0, 1, 0, 1); g.clear(g.COLOR_BUFFER_BIT);"
+	" g.readPixels(0, 0, 1, 1, g.RGBA, g.UNSIGNED_BYTE, p); n++; r.main = Array.prototype.join.call(p, ',');"
+	" if (n < 5 || performance.now() - t0 < 4000) { setTimeout(main, 50); return; }"
+	" r.mainn = n >= 5 ? 'many' : n; r.bad = bad; done(); }"
+	"main();"
+	"</script></body></html>";
+
+/*
+ * After the drawing, each worker reads a pixel back asynchronously
+ * (WebGL 2: readPixels into a pixel pack buffer, a fence polled with
+ * clientWaitSync from a timer, then getBufferSubData and getError) and
+ * waits for a link through
+ * KHR_parallel_shader_compile (COMPLETION_STATUS_KHR polled), each for
+ * 3 s at most, then gives getError(): "sig:<pixel>:<error>" or "nosig"
+ * ("nofence" in WebGL 1), "done", "fail" or "nodone" ("noext" without
+ * the extension)
+ */
+LOCAL CONST char script_glw[] =
+	GLW_COMPILE
+	"function fence(g, then) { if (!g.fenceSync) { then('nofence'); return; }"
+	" var b = g.createBuffer(), q = new Uint8Array(4); g.bindBuffer(g.PIXEL_PACK_BUFFER, b); g.bufferData(g.PIXEL_PACK_BUFFER, 4, g.STREAM_READ);"
+	" g.readPixels(0, 0, 1, 1, g.RGBA, g.UNSIGNED_BYTE, 0); g.bindBuffer(g.PIXEL_PACK_BUFFER, null);"
+	" var f = g.fenceSync(g.SYNC_GPU_COMMANDS_COMPLETE, 0), t1 = performance.now(); g.flush();"
+	" (function poll() { var s = g.clientWaitSync(f, 0, 0);"
+	"  if (s == g.ALREADY_SIGNALED || s == g.CONDITION_SATISFIED) {"
+	"   var st = g.getSyncParameter(f, g.SYNC_STATUS) == g.SIGNALED ? 'sig' : 'half'; g.deleteSync(f);"
+	"   g.bindBuffer(g.PIXEL_PACK_BUFFER, b); g.getBufferSubData(g.PIXEL_PACK_BUFFER, 0, q); g.bindBuffer(g.PIXEL_PACK_BUFFER, null);"
+	"   then(st + ':' + Array.prototype.join.call(q, ',') + ':' + g.getError()); return; }"
+	"  if (performance.now() - t1 > 3000) { then('nosig'); return; } setTimeout(poll, 10); })(); }"
+	"function par(g, then) { var x = g.getExtension('KHR_parallel_shader_compile'); if (!x) { then('noext'); return; }"
+	" var s = g.createShader(g.FRAGMENT_SHADER), v = g.createShader(g.VERTEX_SHADER), q = g.createProgram(), t1 = performance.now();"
+	" g.shaderSource(s, 'precision mediump float; void main() { gl_FragColor = vec4(0.5); }');"
+	" g.shaderSource(v, 'attribute vec4 a; void main() { gl_Position = a; }');"
+	" g.compileShader(s); g.compileShader(v); g.attachShader(q, s); g.attachShader(q, v); g.linkProgram(q);"
+	" (function poll() { if (g.getProgramParameter(q, x.COMPLETION_STATUS_KHR)) {"
+	"   then(g.getProgramParameter(q, g.LINK_STATUS) ? 'done' : 'fail'); return; }"
+	"  if (performance.now() - t1 > 3000) { then('nodone'); return; } setTimeout(poll, 10); })(); }"
+	"onmessage = function (e) { var k = e.data, c = new OffscreenCanvas(8, 8), g = c.getContext(k ? 'webgl2' : 'webgl'),"
+	" t0 = performance.now(), n = 0, bad = 0, p = new Uint8Array(4);"
+	" if (!g) { postMessage({ k: k, v: 'none' }); return; }"
+	" (function run() { for (var i = 0; i < 5; i++) { if (!compile(g)) bad++; g.clearColor(1, 0, 0, 1); g.clear(g.COLOR_BUFFER_BIT);"
+	"  g.readPixels(0, 0, 1, 1, g.RGBA, g.UNSIGNED_BYTE, p); n++; }"
+	"  if (performance.now() - t0 < 4000) { setTimeout(run, 10); return; }"
+	"  fence(g, function (fs) { par(g, function (ps) {"
+	"   postMessage({ k: k, v: Array.prototype.join.call(p, ',') + ':' + ( n > 20 ? 'many' : n ) + ':' + bad + ':' + fs + ':' + ps + ':' + g.getError() }); }); }); })(); };";
+
+/*
+ * The pages of test_blink_csp. "/csa" is under a CSP whose scripts must
+ * carry the nonce "aaa"; its script goes on to "/csb", which is under
+ * one of its own (nonce "bbb") and no longer under the first: its inline
+ * script and its external one (/csb.js), both with the nonce "bbb", run,
+ * and the nonce is hidden from the attribute but not from the property.
+ * Its fetch() to another origin ("localhost") that does not follow
+ * redirects ends at the redirect, whose CORS headers allow the page: it
+ * is an opaque redirect, and where it leads (/cst) is not asked for. A
+ * fetch() and an XMLHttpRequest POST to its own origin are not CORS
+ * requests: they carry "Sec-Fetch-Site: same-origin" (the server says
+ * which it was given), and their answers have no CORS headers.
+ */
+LOCAL CONST char page_csa[] =
+	"<!DOCTYPE html><html><head><title>csa</title></head><body>"
+	"<script nonce='aaa'>location.href = '/csb';</script></body></html>";
+
+LOCAL CONST char page_csb[] =
+	"<!DOCTYPE html><html><head><title>csb</title><script nonce='bbb'>var r = { inl: 'ok' };"
+	"function done() { document.title = 'csb ' + Object.keys(r).sort().map(function (k) { return k + '=' + r[k]; }).join(' '); }"
+	"</script><script nonce='bbb' src='/csb.js'></script></head><body><script nonce='bbb'>"
+	"fetch('http://localhost:18172/csr', { redirect: 'manual', credentials: 'include' })"
+	".then(function (x) { r.man = x.type; done(); }, function (e) { r.man = 'err'; done(); });"
+	"fetch('/csf', { method: 'POST', body: 'a=1', headers: { 'X-Same-Domain': '1',"
+	" 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' } })"
+	".then(function (x) { return x.text(); }).then(function (t) { r.same = t; done(); }, function () { r.same = 'err'; done(); });"
+	"var x = new XMLHttpRequest(); x.open('POST', '/csx'); x.setRequestHeader('X-Same-Domain', '1');"
+	"x.onload = function () { r.xhr = x.status + ':' + x.responseText; done(); };"
+	"x.onerror = function () { r.xhr = 'err'; done(); }; x.send('b=2');"
+	"done();</script></body></html>";
+
+/*
+ * The second page of test_blink_csp: "http://localhost:18172/csc" is
+ * redirected to another site (127.0.0.1), whose redirect sets a cookie
+ * without a SameSite attribute (Lax by default) before it goes on to
+ * "/cse". A window's navigation follows its redirects as its own site,
+ * so the cookie is kept, and the page's own request to "/csk" sends it
+ * ("cookie=yes"). csk_tag is the cookie's value for this run.
+ */
+LOCAL UW	csk_tag;
+
+LOCAL CONST char page_cse[] =
+	"<!DOCTYPE html><html><head><title>cse</title></head><body><script>"
+	"fetch('/csk').then(function (x) { return x.text(); }).then(function (t) { document.title = 'cse ' + t; },"
+	" function () { document.title = 'cse err'; });</script></body></html>";
+
+LOCAL CONST char script_csb[] =
+	"r.ext = 'ok'; r.nonce = document.currentScript.nonce;"
+	"r.attr = document.currentScript.getAttribute('nonce') === '' ? 'hidden' : 'shown'; done();";
 
 /*
  * The page of test_blink_hist, in turn: an iframe's documents and its
@@ -5620,6 +5774,25 @@ LOCAL CONST char page_wgw[] =
 	"</script></body></html>";
 
 /*
+ * The page of test_blink_v3dfall: a WebGL 2 canvas cleared red and read
+ * back, with the renderer ANGLE draws on (its spaces and punctuation made
+ * '_'), and a 2D canvas of the page painted after it
+ */
+LOCAL CONST char page_v3dfall[] =
+	"<!DOCTYPE html><html><head><title>v3dfall</title></head><body><script>var r = [];"
+	"try { var c = document.createElement('canvas'); c.width = c.height = 8; var g = c.getContext('webgl2');"
+	" if ( !g ) { r.push('gl=none'); } else {"
+	"  g.clearColor(1, 0, 0, 1); g.clear(g.COLOR_BUFFER_BIT);"
+	"  var p = new Uint8Array(4); g.readPixels(0, 0, 1, 1, g.RGBA, g.UNSIGNED_BYTE, p); r.push('px=' + p.join('.'));"
+	"  var x = g.getExtension('WEBGL_debug_renderer_info');"
+	"  r.push('ren=' + (x ? String(g.getParameter(x.UNMASKED_RENDERER_WEBGL)) : 'noext').replace(/[ ,()]/g, '_')); }"
+	" var d = document.createElement('canvas'); d.width = d.height = 4; var k = d.getContext('2d');"
+	" k.fillStyle = '#00ff00'; k.fillRect(0, 0, 4, 4); r.push('two=' + Array.from(k.getImageData(1, 1, 1, 1).data).join('.'));"
+	"} catch (e) { r.push('exc=' + e.name); }"
+	"document.title = 'v3dfall ' + r.join(' ');"
+	"</script></body></html>";
+
+/*
  * The page of test_blink_glgpu: WebGL and WebGPU together. A WebGL
  * canvas cleared green is copied into a WebGPU texture
  * (copyExternalImageToTexture) and read back through a buffer; a WebGPU
@@ -6435,6 +6608,18 @@ LOCAL BOOL srv_held( INT s )
 }
 
 /*
+ * The page of test_blink_cachecut ("/ccut"): once loaded it adds the
+ * script "/ccut.js", which names the page "ccut whole"; the script ends
+ * inside a comment, so a part of it does not run at all
+ */
+LOCAL CONST char page_ccut[] =
+	"<!doctype html><title>ccut start</title><script>\n"
+	"onload=function(){var s=document.createElement('script');s.src='/ccut.js';document.head.appendChild(s);};\n"
+	"</script><p>ccut</p>\n";
+LOCAL char	ccut_js[8192];
+LOCAL BOOL	ccut_half;	/* "/ccut.js" answered with half of its body, the rest never sent */
+
+/*
  * The page of test_blink_wv ("/wv"): it asks for Widevine (software
  * security), for Widevine with hardware security and for Clear Key, and
  * writes the answers in its title. With "?want=ok" or "?want=gone" it
@@ -6632,6 +6817,12 @@ LOCAL void srv_one( INT s )
 		srv_put(s, num);
 		srv_put(s, "\r\nConnection: close\r\n\r\n");
 		srv_put(s, page_cache);
+	} else if ( wv_prefix(path, "/csk") && ( path[4] == '\0' || path[4] == '?' ) ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_cachekeep), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_cachekeep);
 	} else if ( knl_strcmp(path, "/sw") == 0 || knl_strcmp(path, "/sw.js") == 0 ) {
 		CONST char *body = ( path[3] == '\0' ) ? page_shared : script_shared;
 
@@ -6689,6 +6880,79 @@ LOCAL void srv_one( INT s )
 		srv_put(s, num);
 		srv_put(s, "\r\nConnection: close\r\n\r\n");
 		srv_put(s, body);
+	} else if ( knl_strcmp(path, "/glw") == 0 || knl_strcmp(path, "/glw.js") == 0 ) {
+		BOOL		js = ( path[4] != '\0' );
+		CONST char	*body = js ? script_glw : page_glw;
+
+		srv_put(s, js ? "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: "
+			      : "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(body), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, body);
+	} else if ( knl_strcmp(path, "/csa") == 0 || knl_strcmp(path, "/csb") == 0 || knl_strcmp(path, "/csb.js") == 0 ) {
+		BOOL		js = ( path[4] != '\0' );
+		CONST char	*body = js ? script_csb : ( path[3] == 'a' ) ? page_csa : page_csb;
+
+		srv_put(s, js ? "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\n"
+			      : ( path[3] == 'a' ) ? "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+						     "Content-Security-Policy: script-src 'nonce-aaa'\r\n"
+						   : "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+						     "Content-Security-Policy: script-src 'nonce-bbb'\r\n");
+		srv_put(s, "Content-Length: ");
+		srv_num(num, knl_strlen(body), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, body);
+	} else if ( knl_strcmp(path, "/csr") == 0 ) {
+		/* a redirect whose CORS headers allow the page's origin; where it leads has none */
+		srv_put(s, "HTTP/1.1 301 Moved Permanently\r\nLocation: http://127.0.0.1:18172/cst\r\n"
+			   "Access-Control-Allow-Origin: http://127.0.0.1:18172\r\nAccess-Control-Allow-Credentials: true\r\n"
+			   "Content-Length: 0\r\nConnection: close\r\n\r\n");
+	} else if ( knl_strcmp(path, "/csc") == 0 ) {
+		srv_put(s, "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:18172/csd\r\nContent-Length: 0\r\n"
+			   "Connection: close\r\n\r\n");
+	} else if ( knl_strcmp(path, "/csd") == 0 ) {
+		/* the redirect of the second site sets the cookie (no SameSite: Lax) */
+		srv_put(s, "HTTP/1.1 302 Found\r\nLocation: /cse\r\nSet-Cookie: cst=");
+		srv_num(num, csk_tag, 10);
+		srv_put(s, num);
+		srv_put(s, "; Path=/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+	} else if ( knl_strcmp(path, "/cse") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_cse), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_cse);
+	} else if ( knl_strcmp(path, "/csk") == 0 ) {
+		char	want[32];
+
+		knl_strcpy(want, "cst=");
+		srv_num(want + 4, csk_tag, 10);
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 10\r\nConnection: close\r\n\r\n");
+		srv_put(s, find_text(req, n, want) >= 0 ? "cookie=yes" : "cookie=no ");
+	} else if ( knl_strcmp(path, "/cst") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\nConnection: close\r\n\r\ncst");
+	} else if ( knl_strcmp(path, "/csf") == 0 || knl_strcmp(path, "/csx") == 0 ) {
+		/* the Sec-Fetch-Site the request carried, and whether it had an Origin */
+		char	site[32];
+		INT	at = find_text(req, n, "Sec-Fetch-Site:"), j = 0;
+
+		if ( at >= 0 ) {
+			for ( at += 15; at < n && req[at] == ' '; at++ ) ;
+			while ( at < n && req[at] != '\r' && j < (INT)sizeof(site) - 3 ) site[j++] = req[at++];
+		}
+		site[j++] = ',';
+		site[j++] = find_text(req, n, "Origin: http://127.0.0.1:18172") >= 0 ? 'o' : 'n';
+		site[j] = '\0';
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: ");
+		srv_num(num, knl_strlen(site), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, site);
+	} else if ( knl_strcmp(path, "/glw.woff2") == 0 ) {
+		/* not a font Blink takes; what is looked at is that it is asked for */
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: font/woff2\r\nContent-Length: 8\r\nConnection: close\r\n\r\nwOF2glw.");
 	} else if ( knl_strcmp(path, "/api2") == 0 ) {
 		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
 		srv_num(num, knl_strlen(page_api2), 10);
@@ -6957,6 +7221,12 @@ LOCAL void srv_one( INT s )
 		srv_put(s, num);
 		srv_put(s, "\r\nConnection: close\r\n\r\n");
 		srv_put(s, pg);
+	} else if ( knl_strcmp(path, "/v3dfall") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_v3dfall), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_v3dfall);
 	} else if ( knl_strcmp(path, "/webnn") == 0 ) {
 		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
 		srv_num(num, knl_strlen(page_webnn), 10);
@@ -7226,6 +7496,24 @@ LOCAL void srv_one( INT s )
 		srv_put(s, "<script>var a = []; for (var i = 0; i < 100000; i++) a.push({n: i, s: 'x' + i});"
 			   "document.title = 'big ' + a.length + ' ' + document.querySelectorAll('div').length;"
 			   "</script></body></html>");
+	} else if ( knl_strcmp(path, "/ccut") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\n"
+			   "Content-Length: ");
+		srv_num(num, knl_strlen(page_ccut), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_ccut);
+	} else if ( knl_strcmp(path, "/ccut.js") == 0 ) {
+		/* kept a day; the first time only half of it comes, and the connection stays open */
+		SZ	len = knl_strlen(ccut_js);
+
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nCache-Control: max-age=86400\r\n"
+			   "Content-Length: ");
+		srv_num(num, len, 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		(void)so_send(s, ccut_js, ccut_half ? len / 2 : len, 0);
+		if ( ccut_half && srv_nhold < SRV_HOLD ) srv_hold[srv_nhold++] = s;
 	} else if ( knl_strcmp(path, "/hang") == 0 ) {
 		/* asked for and never answered: the connection stays open */
 		if ( srv_nhold < SRV_HOLD ) srv_hold[srv_nhold++] = s;
@@ -7308,6 +7596,7 @@ LOCAL char	brmeta[OB_ATR_MAX + 1];
 LOCAL ID	mem_pid;		/* the browser run_browser started */
 LOCAL CONST char *shot_later;	/* a second screen, shot_wait ms after the first */
 LOCAL INT	shot_wait = 3000;
+LOCAL void	(*shot_then)( void );	/* what is done to the page after the screens */
 LOCAL char	brarg[1536];
 
 LOCAL INT find_text( CONST char *s, INT n, CONST char *w )
@@ -7457,9 +7746,23 @@ LOCAL INT run_browser( CONST TS_UUID *page, CONST char *lines, CONST char *shot,
 	if ( i < 1200 && shot != NULL && kt_screen() ) {
 		(void)kt_shot(shot);
 		if ( shot_later != NULL ) {
+#ifdef KT_SITE
+			/* a site looked at: what the browser's process maps, every 10 s while it is waited for */
+			INT	t;
+			T_RPRC	rp;
+
+			for ( t = 0; t < shot_wait; t += 10000 ) {
+				if ( ts_ref_prc(pid, &rp) >= E_OK ) {
+					tm_printf((UB*)"  at %d s the process maps %d KB\n", t / 1000, (INT)( rp.memsz / 1024 ));
+				}
+				tk_dly_tsk(shot_wait - t < 10000 ? shot_wait - t : 10000);
+			}
+#else
 			tk_dly_tsk(shot_wait);
+#endif
 			(void)kt_shot(shot_later);
 		}
+		if ( shot_then != NULL ) shot_then();
 	}
 	(void)fs_unlink(BRREADY);
 	psts.exitcd = -1;
@@ -7943,6 +8246,50 @@ LOCAL void test_https( void )
 #endif
 }
 #ifdef KT_SITE
+#ifdef KT_SITE_CLICK
+/*
+ * make ... KT_SITE_CLICK=<x>,<y>,...: after the screens, the pointer goes
+ * to each point of the screen and the left button is pressed there and
+ * let go, through the desktop as a user's hand gives it; each press is
+ * followed 4 s later by the screen (SITEC1.PPM, SITEC2.PPM...)
+ */
+LOCAL CONST INT	site_at[] = { KT_SITE_CLICK };
+#define SITE_CLICKS	( (INT)( sizeof(site_at) / sizeof(site_at[0]) ) / 2 )
+/*
+ * The browser's "quit=" counts from the page shown, but each screen
+ * written to /boot takes many seconds while the browser keeps the
+ * processors busy (12 to 15 s with Google Maps on QEMU): the clicks get
+ * that much room on top of their own time, or the browser has ended
+ * and its window gone before they come
+ */
+#define SITE_CLICK_MS	( SITE_CLICKS * 25000 + 30000 )
+
+LOCAL void hid_ev( UINT type, UINT code, INT x, INT y, UINT mods, INT dz );
+
+LOCAL void site_clicks( void )
+{
+	char	name[32];
+	INT	i, x, y;
+	SYSTIM	t;
+
+	for ( i = 0; i < SITE_CLICKS; i++ ) {
+		x = site_at[i * 2];
+		y = site_at[i * 2 + 1];
+		(void)tk_get_otm(&t);
+		tm_printf((UB*)"  click %d at %d,%d (%d ms after the start)\n", i + 1, x, y, (INT)t.lo);
+		hid_ev(HID_EV_MOVE, 0, x, y, 0, 0);
+		tk_dly_tsk(200);
+		hid_ev(HID_EV_BTN_DOWN, 0, x, y, 0, 0);
+		tk_dly_tsk(100);
+		hid_ev(HID_EV_BTN_UP, 0, x, y, 0, 0);
+		tk_dly_tsk(4000);
+		tm_sprintf((UB *)name, (UB *)"/boot/SITEC%d.PPM", i + 1);
+		(void)kt_shot(name);
+	}
+}
+#else
+#define SITE_CLICK_MS	0
+#endif
 /* One site on its own (make ... NET=user KT_SITE=<URL>): it must come, and the screen is taken */
 LOCAL void test_site( void )
 {
@@ -7958,20 +8305,41 @@ LOCAL void test_site( void )
 	addr = user_net_addr();
 	tm_printf((UB*)"  %s\n", KT_SITE);
 	shot_later = "/boot/SITE2.PPM";
+#ifdef KT_SITE_CLICK
+	{
+		/* the desktop takes the input and gives it to the window in front */
+		TS_UUID	d;
+		INT	i;
+
+		KT_ASSERT_ER(dt_start(), E_OK);
+		for ( i = 0; i < 100 && ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK; i++ ) {
+			tk_dly_tsk(100);
+		}
+		KT_ASSERT(i < 100);
+		tk_dly_tsk(1000);
+	}
+	shot_then = site_clicks;
+#endif
 #ifdef KT_SITE_WAIT
 	/* a page that goes on building itself after it is shown: the second screen later (make KT_SITE_WAIT=<ms>) */
 	{
 		char	lines[1024];
 
 		shot_wait = KT_SITE_WAIT;
-		tm_sprintf((UB *)lines, (UB *)"%s\nready=" BRREADY "\nquit=%d\n", KT_SITE, KT_SITE_WAIT + 7000);
+		tm_sprintf((UB *)lines, (UB *)"%s\nready=" BRREADY "\nquit=%d\n", KT_SITE, KT_SITE_WAIT + 7000 + SITE_CLICK_MS);
 		KT_ASSERT_EQ(run_browser(NULL, lines, "/boot/SITE.PPM", NULL), 0);
 		shot_wait = 3000;
 	}
 #else
-	KT_ASSERT_EQ(run_browser(NULL, KT_SITE "\nready=" BRREADY "\nquit=10000\n", "/boot/SITE.PPM", NULL), 0);
+	{
+		char	lines[1024];
+
+		tm_sprintf((UB *)lines, (UB *)"%s\nready=" BRREADY "\nquit=%d\n", KT_SITE, 10000 + SITE_CLICK_MS);
+		KT_ASSERT_EQ(run_browser(NULL, lines, "/boot/SITE.PPM", NULL), 0);
+	}
 #endif
 	shot_later = NULL;
+	shot_then = NULL;
 }
 #endif
 
@@ -8494,11 +8862,22 @@ LOCAL void input_check( CONST TS_UUID *page )
 
 	/* a link to be opened in another window, with no opener: a browser of its own asks for it */
 	tk_dly_tsk(1500);
-	hid_ev(HID_EV_MOVE, 0, wp.wleft + 400, wp.wtop + BAR_H + 40, 0, 0);
-	hid_ev(HID_EV_BTN_DOWN, 0, wp.wleft + 400, wp.wtop + BAR_H + 40, 0, 0);
-	hid_ev(HID_EV_BTN_UP, 0, wp.wleft + 400, wp.wtop + BAR_H + 40, 0, 0);
-	in_blank = asked_for("/r?blank", 8000);
-	tm_printf((UB*)"  target=_blank opened apart: %s\n", in_blank ? "/r?blank" : "(nothing)");
+	{
+		SYSTIM	t0, t1;
+
+		hid_ev(HID_EV_MOVE, 0, wp.wleft + 400, wp.wtop + BAR_H + 40, 0, 0);
+		hid_ev(HID_EV_BTN_DOWN, 0, wp.wleft + 400, wp.wtop + BAR_H + 40, 0, 0);
+		(void)tk_get_otm(&t0);
+		hid_ev(HID_EV_BTN_UP, 0, wp.wleft + 400, wp.wtop + BAR_H + 40, 0, 0);
+		/*
+		 * the new browser is a process of its own: its program is about
+		 * 190 MB with GL=1, and the new browser comes up before it asks
+		 */
+		in_blank = asked_for("/r?blank", 20000);
+		(void)tk_get_otm(&t1);
+		tm_printf((UB*)"  target=_blank opened apart: %s, %d ms after the click\n",
+			  in_blank ? "/r?blank" : "(nothing)", (INT)( t1.lo - t0.lo ));
+	}
 	(void)ob_del_obj(&win);
 }
 
@@ -8755,7 +9134,7 @@ LOCAL void test_blink_menu( void )
  * (BROWSER_BLINK=1): the page object starts at "/f" and the browser goes
  * on to "/next" ("then=" line). The window's menu is opened with the
  * right button; the pointer stays on 〈編集〉 (the tenth row: 閉じる, a
- * line, 戻る, 進む, 再読込, a line, アドレス入力, 最初の頁, a line) until
+ * line, 戻る, 進む, 再読込, a line, アドレス入力, 最初のページ, a line) until
  * its list opens beside it, then presses the list's first row. The
  * object's text must then be "/next"'s address.
  */
@@ -8835,7 +9214,7 @@ LOCAL void home_check( CONST TS_UUID *page )
 	tk_dly_tsk(800);
 	/*
 	 * on 〈編集〉, the menu's 19th row (閉じる, 戻る to 再読込, アドレス入力 to
-	 * 頁の中を検索, 印刷 and メディア, 拡大 to 全画面表示, each group after a
+	 * ページの中を検索, 印刷 and メディア, 拡大 to 全画面表示, each group after a
 	 * line), until its list opens
 	 */
 	if ( menu_row(18, &x, &y) ) x -= 20;
@@ -9699,6 +10078,88 @@ LOCAL void test_blink_cache( void )
 }
 
 /*
+ * Cache Storage kept by entries (BROWSER_BLINK=1, design 14.8): "/csk?fill"
+ * puts 12MB in a cache and then one small entry, which the store writes
+ * on its own thread, the second time only the small entry (the console
+ * says how long each save took and how much it wrote, "store caches
+ * saved"); the next browser reads all 25 back, the large bodies whole.
+ */
+LOCAL void test_blink_cachekeep( void )
+{
+	T_FSTAT	st;
+	TS_UUID	page;
+	INT	n;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( !srv_start(HTTP_PORT + 97) ) {
+		KT_SKIP("no network stack");
+	}
+	if ( !make_page("http://127.0.0.1:18177/csk?fill", &page) ) {
+		srv_end();
+		return;
+	}
+	KT_ASSERT_EQ(run_browser(&page, "ready=" BRREADY "\nquit=20000\n", NULL, NULL), 0);
+	n = read_title();
+	KT_ASSERT(find_text(brmeta, n, "\"title\": \"csk filled 25\"") > 0);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+	if ( !make_page("http://127.0.0.1:18177/csk?check", &page) ) {
+		srv_end();
+		return;
+	}
+	KT_ASSERT_EQ(run_browser(&page, "ready=" BRREADY "\nquit=8000\n", NULL, NULL), 0);
+	srv_end();
+	n = read_title();
+	KT_ASSERT(find_text(brmeta, n, "\"title\": \"csk 25 tiny body\"") > 0);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+}
+
+/*
+ * The HTTP cache kept between runs (BROWSER_BLINK=1, design 14.8) keeps
+ * no entry whose body is still coming: "/ccut.js" may be kept a day, but
+ * its first answer stops halfway with the connection left open, and the
+ * browser ends so, its cache saved as it ends. The next browser asks the
+ * server for the script again and runs the whole of it ("ccut whole"),
+ * where a cache that kept the half would give that half as the whole
+ * response (the script cut short does not parse, the title stays
+ * "ccut start", and the server is asked once).
+ */
+LOCAL void test_blink_cachecut( void )
+{
+	T_FSTAT	st;
+	TS_UUID	page;
+	INT	n, i;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	knl_strcpy(ccut_js, "document.title = 'ccut ' + 'whole';\n/*");
+	n = (INT)knl_strlen(ccut_js);
+	for ( i = 0; i < 6000; i++ ) ccut_js[n++] = (char)( 'a' + i % 26 );
+	knl_strcpy(ccut_js + n, "*/\n");
+	if ( !srv_start(HTTP_PORT + 98) ) {
+		KT_SKIP("no network stack");
+	}
+	if ( !make_page("http://127.0.0.1:18178/ccut", &page) ) {
+		srv_end();
+		return;
+	}
+	ccut_half = TRUE;
+	KT_ASSERT_EQ(run_browser(&page, "ready=" BRREADY "\nquit=4000\n", NULL, NULL), 0);
+	n = read_title();
+	KT_ASSERT(find_text(brmeta, n, "\"title\": \"ccut start\"") > 0);
+	KT_ASSERT_EQ(seen_count("/ccut.js"), 1);
+	ccut_half = FALSE;
+	KT_ASSERT_EQ(run_browser(&page, "ready=" BRREADY "\nquit=4000\n", NULL, NULL), 0);
+	n = read_title();
+	KT_ASSERT(find_text(brmeta, n, "\"title\": \"ccut whole\"") > 0);
+	KT_ASSERT_EQ(seen_count("/ccut.js"), 2);
+	srv_end();
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+}
+
+/*
  * Shared workers (BROWSER_BLINK=1): "/sw" makes two SharedWorkers of the
  * same address and name; they are one worker (its script fetched once),
  * which answers each port with the number of its connection.
@@ -10096,6 +10557,117 @@ LOCAL void test_blink_owl( void )
 	KT_ASSERT(find_text(brmeta, n, "wgl=WebGL_1.0:255,0,0,255") > 0);
 	KT_ASSERT(find_text(brmeta, n, "loafd=ge50") > 0);
 	KT_ASSERT(find_text(brmeta, n, "loafs=") > 0);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+}
+
+/*
+ * WebGL on several threads at once, and a web font (BROWSER_BLINK=1):
+ * "/glw" (see page_glw). Each worker's context and the page's draw what
+ * they were asked to (red, green) and link every program, and the
+ * browser does not fault: with GL=1 the contexts of the workers have
+ * native contexts of their own, and the C library's conversions of
+ * numbers the shaders' translation makes on all the threads run one at
+ * a time. Without GL=1 the workers' WebGL 2 is not there (none). Then
+ * WebGL 2's fence signals (clientWaitSync polled from a timer) and a
+ * link polled through KHR_parallel_shader_compile completes, with no
+ * error left for getError: both are queries of the command buffer's own
+ * targets, which ANGLE does not know (port/webgl/gl_angle.cc). The
+ * font's first request is made from the HTTP cache alone, which does not
+ * have it (ERR_CACHE_MISS); Blink asks again from the network, so the
+ * server is asked for it. The page object's text has a line
+ * "trace=exceptions" besides the address, which the browser takes as the
+ * start-up line: the exception querySelector throws is told on the
+ * console ("browser: api threw: Document.querySelector: ...").
+ */
+LOCAL void test_blink_glw( void )
+{
+	T_FSTAT	st;
+	TS_UUID	page;
+	INT	n;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	/* a line "trace=" in the page object's text traces as the start-up line does (on the console) */
+	if ( !make_page_text("<p>http://127.0.0.1:18171/glw</p>\n<p>trace=exceptions</p>", &page) ) return;
+	if ( !srv_start(HTTP_PORT + 91) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	KT_ASSERT_EQ(run_browser(&page, "ready=" BRREADY "\nquit=22000\n", NULL, NULL), 0);
+	KT_ASSERT(asked_for("/glw.woff2", 100));
+	srv_end();
+	n = read_title();
+	KT_ASSERT(find_text(brmeta, n, "font=done") > 0);
+	KT_ASSERT(find_text(brmeta, n, "qs=SyntaxError") > 0);
+	KT_ASSERT(find_text(brmeta, n, "main=0,255,0,255") > 0);
+	KT_ASSERT(find_text(brmeta, n, "mainn=many") > 0);
+	KT_ASSERT(find_text(brmeta, n, "bad=0") > 0);
+	KT_ASSERT(find_text(brmeta, n, "w0=255,0,0,255:many:0:nofence:") > 0);
+	/* a link polled through KHR_parallel_shader_compile completes */
+	KT_ASSERT(find_text(brmeta, n, ":nodone") < 0);
+	KT_ASSERT(find_text(brmeta, n, ":fail") < 0);
+	if ( fs_stat("/boot/GLPROG.ELF", &st) >= EX_OK ) {
+		/* WebGL 2's fence signals, and no query left an error for getError */
+		KT_ASSERT(find_text(brmeta, n, "w1=255,0,0,255:many:0:sig:255,0,0,255:0:done:0") > 0 ||
+			  find_text(brmeta, n, "w1=255,0,0,255:many:0:sig:255,0,0,255:0:noext:0") > 0);
+	} else {
+		KT_ASSERT(find_text(brmeta, n, "w1=none") > 0);
+	}
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+}
+
+/*
+ * A document's CSP and its own-origin requests (BROWSER_BLINK=1): "/csa"
+ * and "/csb" (see page_csb). The second document is held to its own CSP
+ * alone, not also to the one of the document before it in the window:
+ * its scripts with its nonce run. A fetch() with redirect "manual" ends
+ * at the redirect (an opaque redirect), checked by its CORS headers,
+ * and what it leads to is never asked for. A fetch() and an
+ * XMLHttpRequest to the page's own origin go as same-origin requests,
+ * with an Origin as a POST has it, and are not refused by CORS.
+ */
+LOCAL void test_blink_csp( void )
+{
+	T_FSTAT	st;
+	TS_UUID	page;
+	INT	n;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( !make_page("http://127.0.0.1:18172/csa", &page) ) return;
+	if ( !srv_start(HTTP_PORT + 92) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	KT_ASSERT_EQ(run_browser(&page, "ready=" BRREADY "\nquit=10000\n", NULL, NULL), 0);
+	KT_ASSERT(asked_for("/csb.js", 100));
+	KT_ASSERT(asked_for("/csr", 100));
+	KT_ASSERT(!asked_for("/cst", 100));
+	srv_end();
+	n = read_title();
+	KT_ASSERT(find_text(brmeta, n, "inl=ok") > 0);
+	KT_ASSERT(find_text(brmeta, n, "ext=ok") > 0);
+	KT_ASSERT(find_text(brmeta, n, "nonce=bbb") > 0);
+	KT_ASSERT(find_text(brmeta, n, "attr=hidden") > 0);
+	KT_ASSERT(find_text(brmeta, n, "man=opaqueredirect") > 0);
+	KT_ASSERT(find_text(brmeta, n, "same=same-origin,o") > 0);
+	KT_ASSERT(find_text(brmeta, n, "xhr=200:same-origin,o") > 0);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+
+	/* a navigation redirected to another site keeps the cookie that site's redirect set */
+	csk_tag = lag_now() | 1;
+	if ( !make_page("http://localhost:18172/csc", &page) ) return;
+	if ( !srv_start(HTTP_PORT + 92) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	KT_ASSERT_EQ(run_browser(&page, "ready=" BRREADY "\nquit=8000\n", NULL, NULL), 0);
+	KT_ASSERT(asked_for("/csk", 100));
+	srv_end();
+	n = read_title();
+	KT_ASSERT(find_text(brmeta, n, "cse cookie=yes") > 0);
 	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
 }
 
@@ -12413,6 +12985,55 @@ LOCAL void test_blink_glgpu( void )
 	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
 }
 
+/*
+ * The GPU that does not draw (BROWSER_BLINK=1 GL=1): "/v3dfall" (see
+ * page_v3dfall) with "gpufake=", the DRM shim pretending the Raspberry Pi
+ * 5's V3D, whose jobs end without drawing. The EGL platform takes the
+ * driver v3d through the loader, makes its screen, finds its check frame
+ * wrong and goes back to softpipe (step 6, TS_GL_PROBE_NODRAW): WebGL
+ * still draws, on softpipe, and so does the page.
+ */
+#define GPUFAKE		"/boot/GPUFAKE.TXT"
+
+LOCAL void test_blink_v3dfall( void )
+{
+	T_FSTAT	st;
+	TS_UUID	page;
+	char	got[64];
+	INT	n, fd, len = 0;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( fs_stat("/boot/GLPROG.ELF", &st) < EX_OK ) {
+		KT_SKIP("the browser is built without OpenGL ES (make GL=1)");
+	}
+	if ( !make_page("http://127.0.0.1:18173/v3dfall", &page) ) return;
+	if ( !srv_start(HTTP_PORT + 93) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	(void)fs_unlink(GPUFAKE);
+	KT_ASSERT_EQ(run_browser(&page, "gpufake=" GPUFAKE "\nready=" BRREADY "\nquit=12000\n", NULL, NULL), 0);
+	srv_end();
+	n = read_title();
+	KT_ASSERT(find_text(brmeta, n, "px=255.0.0.255") > 0);
+	KT_ASSERT(find_text(brmeta, n, "ren=") > 0);
+	KT_ASSERT(find_text(brmeta, n, "softpipe") > 0);
+	KT_ASSERT(find_text(brmeta, n, "two=0.255.0.255") > 0);
+	KT_ASSERT(find_text(brmeta, n, "exc=") < 0);
+	fd = fs_open(GPUFAKE, O_RDONLY);
+	if ( fd >= 0 ) {
+		len = fs_read(fd, got, sizeof(got) - 1);
+		(void)fs_close(fd);
+	}
+	got[len > 0 ? len : 0] = '\0';
+	tm_printf((UB*)"  the pretended V3D: %s\n", got);
+	KT_ASSERT(find_text(got, len, "driver=v3d step=6") >= 0);
+	(void)fs_unlink(GPUFAKE);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+}
+
 #ifdef _QEMU_VIRT_
 /*
  * A USB gamepad and a USB MIDI device, plugged into the USB controller in
@@ -13807,6 +14428,16 @@ LOCAL void test_blink_cache( void )
 	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
 }
 
+LOCAL void test_blink_cachekeep( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_cachecut( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
 LOCAL void test_blink_shared( void )
 {
 	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
@@ -13848,6 +14479,16 @@ LOCAL void test_blink_swframe( void )
 }
 
 LOCAL void test_blink_owl( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_glw( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_csp( void )
 {
 	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
 }
@@ -14067,6 +14708,11 @@ LOCAL void test_blink_glgpu( void )
 	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
 }
 
+LOCAL void test_blink_v3dfall( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
 LOCAL void test_blink_pad( void )
 {
 	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
@@ -14199,6 +14845,8 @@ EXPORT void ktest_v8( void )
 	V8_RUN(test_blink_dialog);
 	V8_RUN(test_blink_clip);
 	V8_RUN(test_blink_cache);
+	V8_RUN(test_blink_cachekeep);
+	V8_RUN(test_blink_cachecut);
 	V8_RUN(test_blink_shared);
 	V8_RUN(test_blink_file);
 	V8_RUN(test_blink_codecs);
@@ -14208,6 +14856,8 @@ EXPORT void ktest_v8( void )
 	V8_RUN(test_blink_sw);
 	V8_RUN(test_blink_swframe);
 	V8_RUN(test_blink_owl);
+	V8_RUN(test_blink_glw);
+	V8_RUN(test_blink_csp);
 	V8_RUN(test_blink_hist);
 	V8_RUN(test_blink_api2);
 	V8_RUN(test_blink_fsa);
@@ -14243,6 +14893,7 @@ EXPORT void ktest_v8( void )
 	V8_RUN(test_blink_webnn);
 	V8_RUN(test_blink_wgw);
 	V8_RUN(test_blink_glgpu);
+	V8_RUN(test_blink_v3dfall);
 	V8_RUN(test_blink_dir);
 	V8_RUN(test_blink_mic);
 	V8_RUN(test_blink_wam);

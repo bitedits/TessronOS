@@ -804,6 +804,31 @@ static nir_shader *vs_rect( void )
 
 /* ---------------------------------------------------------------- compiling */
 
+/*
+ * The check of compute dispatch: CSD_NWG workgroups of CSD_WG_SIZE
+ * invocations, each writing 3 * n + 1 at word n of buffer 0, n being
+ * its number across the dispatch. The kernel runs it once at start and
+ * offers compute dispatch only when every word comes back right.
+ */
+#define CSD_WG_SIZE	16
+#define CSD_NWG		4
+
+static nir_shader *cs_check( void )
+{
+	nir_builder	b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, &nir_options, "csd_check");
+	nir_def		*wg, *n;
+
+	b.shader->info.workgroup_size[0] = CSD_WG_SIZE;
+	b.shader->info.workgroup_size[1] = 1;
+	b.shader->info.workgroup_size[2] = 1;
+	b.shader->info.num_ssbos = 1;
+	wg = nir_channel(&b, nir_load_workgroup_id(&b), 0);
+	n = nir_iadd(&b, nir_imul_imm(&b, wg, CSD_WG_SIZE), nir_load_local_invocation_index(&b));
+	nir_store_ssbo(&b, nir_iadd_imm(&b, nir_imul_imm(&b, n, 3), 1), nir_imm_int(&b, B_SRC),
+		       nir_imul_imm(&b, n, 4), .write_mask = 0x1, .align_mul = 4, .align_offset = 0);
+	return b.shader;
+}
+
 static unsigned type_size( const struct glsl_type *type, bool bindless )
 {
 	return glsl_count_attribute_slots(type, false);
@@ -823,6 +848,9 @@ static void prepare( nir_shader *s )
 	if ( s->info.stage == MESA_SHADER_FRAGMENT ) {
 		NIR_PASS(_, s, nir_lower_io, nir_var_shader_in | nir_var_shader_out, type_size,
 			 (nir_lower_io_options)0);
+	}
+	if ( s->info.stage == MESA_SHADER_COMPUTE ) {
+		NIR_PASS(_, s, nir_lower_compute_system_values, NULL);
 	}
 	NIR_PASS(_, s, nir_lower_load_const_to_scalar);
 	v3d_optimize_nir(NULL, s);
@@ -861,7 +889,7 @@ static void compile( PROG *p, const char *name, nir_shader *s, struct v3d_key *k
 		p->pd->uniforms.count);
 }
 
-static PROG	vs, cs;
+static PROG	vs, cs, csd;
 #define NFS	10
 static PROG	fs[NFS];
 static const char *fs_names[NFS] = { "piece", "shadow", "halve", "smooth3", "smooth5", "double", "moving",
@@ -886,6 +914,13 @@ static void compile_all( void )
 		vk.used_outputs[vk.num_used_outputs++] = v3d_slot_from_slot_and_component(VARYING_SLOT_POS, i);
 	}
 	compile(&cs, "cs", vs_rect(), &vk.base);
+
+	{
+		struct v3d_key	ck;
+
+		memset(&ck, 0, sizeof(ck));
+		compile(&csd, "csd", cs_check(), &ck);
+	}
 
 	for ( i = 0; i < NFS; i++ ) {
 		memset(&fk, 0, sizeof(fk));
@@ -966,6 +1001,19 @@ static void put_uniforms( PROG *p )
 		case QUNIFORM_VIEWPORT_Z_SCALE:
 			kind = U_CONST;
 			val = fbits(0.5f);
+			break;
+		/* the compute check's dispatch: its workgroups from 0, its size and count fixed */
+		case QUNIFORM_WORK_GROUP_BASE:
+			kind = U_CONST;
+			val = 0;
+			break;
+		case QUNIFORM_WORK_GROUP_SIZE:
+			kind = U_CONST;
+			val = ( val == 0 ) ? CSD_WG_SIZE : 1;
+			break;
+		case QUNIFORM_NUM_WORK_GROUPS:
+			kind = U_CONST;
+			val = ( val == 0 ) ? CSD_NWG : 1;
 			break;
 		default:
 			die("%s: a uniform of kind %d the kernel cannot fill", p->name, u->contents[i]);
@@ -1328,6 +1376,14 @@ int main( int argc, char **argv )
 	w = v3d_compute_rt_row_row_stride_128_bits(64, v3d_internal_bpp_words(V3D_INTERNAL_BPP_32));
 	fprintf(out, "/* The render target's stride in 128 bits covering two rows, 64 pixel tiles of 32 bits */\n");
 	fprintf(out, "#define CP_RT_STRIDE\t\t%d\n\n", w);
+
+	/* the check of compute dispatch, run once at start */
+	fprintf(out, "/* The check of compute dispatch: workgroups, their size, how the code runs */\n");
+	fprintf(out, "#define CP_CSD_NWG\t\t%d\n#define CP_CSD_WG_SIZE\t\t%d\n", CSD_NWG, CSD_WG_SIZE);
+	fprintf(out, "#define CP_CSD_THREADS\t\t%u\n#define CP_CSD_SINGLE_SEG\t%d\n\n",
+		csd.pd->threads, csd.pd->single_seg ? 1 : 0);
+	put_code(&csd);
+	put_uniforms(&csd);
 
 	fprintf(out, "#endif /* _V3D_CP_SHADERS_H_ */\n");
 	fclose(out);

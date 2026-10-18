@@ -21,7 +21,7 @@
 
 | 場所 | 内容 |
 | --- | --- |
-| `application/browser/br_main.cc`、`br_main_blink.cc` | ウインドウ、ツールパネル、入力、ページの実身の読み書き。Blinkの版は`br_main_blink.cc`が`br_main.cc`を読み込んで作る |
+| `application/browser/br_main.cc`、`br_main_blink.cc` | ウインドウ、ツールパネル、入力、ページの実身の読み書き。Blink版は`br_main_blink.cc`が`br_main.cc`を読み込んで作る |
 | `application/browser/br_blink.cc`、`br_bindings.cc`、`br_loader.cc` | Blinkの起動、ページの組み立てと描画、V8のバインディングの登録、部品(スタイルシート、画像、スクリプト)の読み込み |
 | `application/browser/br_http.cc`、`br_tls.cc`、`br_text.cc` | Blinkを使わない版のHTTP、TLS、文字だけの描画 |
 | `application/browser/br_obj.cc` | ページの実身のメタデータとレコード0 |
@@ -58,12 +58,12 @@ make TARGET=_QEMU_VIRT_ DESKTOP=1 BROWSER=1 BROWSER_BLINK=1 GL=1
 - gnの引数(`tools/browser/args.gn`)で、V8を機械語のコンパイラ(Sparkplug、Maglev、Turbofan、WebAssemblyのLiftoff)とともに作る(`v8_jitless = false`)。WebAssemblyのインタプリタDrumBrakeは作らない(`v8_enable_drumbrake = false`)。DrumBrakeをgccで作るためのパッチ(`wasm_interpreter.patch`、`wasm_interpreter_h.patch`)は、作り直すときのために残している。パッチを当てたヘッダのコピーのディレクトリはV8のすべてのソースのインクルードのディレクトリに加わるので、パッチを外すとV8のすべてのソースがコンパイルし直しになる。ポインタ圧縮を有効にし、その4GBのケージはプロセスの中で1つを共有する。この設定はホストの`mksnapshot`にも効き、スナップショットに入る組込み関数の一覧がプログラムのものと一致する。設定を変えたときは`build.sh gngen`と`build.sh hostgen`をやり直す。
 - 使わない部分(テスト、GPUのバックエンド、プロセス間のサンドボックスなど)は`tools/browser/exclude_blink.txt`で外す。ネットワークスタックはQUIC(`net/quic`、`third_party/quiche`、BoringSSLのQUICの部分)も含めてコンパイルし、システムに尋ねる部分(TCPとUDPのソケット、名前解決など)だけを外して、移植層の`port/net`のものを使う。
 - 同じ目標の8ファイルを1つの翻訳単位にまとめてコンパイルする。Blinkの1つの翻訳単位は1GBから3GBのメモリを使うので、並列はメモリ16GBで6までにする。最初から全部をコンパイルすると数時間かかる。WSLが使うメモリはWindowsから見ると確保済みのメモリになり、Windowsのページファイル(C:にある)がそれに合わせて大きくなる。C:の空きが少ないときは、並列を減らし、WSLのページキャッシュをこまめに捨てる。
-- リンクするときに解決できないシンボルには、`tools/browser/blink_stubs.py`がスタブを作る。関数は最初に呼ばれたときに名前を一度表示して0を返し、変数は0で埋めた領域になる。移植層に足した関数も、定義を無名の名前空間に置くなどしてリンクされないと気づかないうちにスタブになり、`std::string`のように値を返す関数では呼び出した側のメモリが壊れる。新しいインタフェースを足したら、実行の記録に`browser: stand-in called:`でその名前が出ないことを確かめる。
+- リンクするときに解決できないシンボルには、`tools/browser/blink_stubs.py`がスタブを作る。関数は最初に呼ばれたときに名前を一度表示して0を返し、変数は0で埋めた領域になる。移植層に足した関数も、定義を無名の名前空間に置くなどしてリンクされないと気づかないうちにスタブになり、`std::string`のように値を返す関数では呼び出した側のメモリが壊れる。新しいインタフェースを足したら、実行の記録に`browser: stand-in called:`でその名前が出ないことを確かめる。Cの名前は関数か変数かを名前から見分けられないので、移植層の変数がリンクされないと関数のスタブ(`.text`の数バイト)が当てられ、そこに書き込んだときに書き込み禁止の違反で落ちる(2026年10月、`br_net_quic`で起きた)。そのため、移植層の名前(`br_`、`ts_`、`knl_`、`tessronos`で始まる名前と、`tessronos::`の中や`Br`で始まるクラスのC++の名前)が解決できないときは、スタブを作らずに名前の一覧を出してビルドを止める。
 - `blink.sh all`はBlinkのcore、`base`、`net`などをコンパイルし、makeはそれをコンパイルし直さない。coreのソースに当てるパッチ(`loader_factory_for_frame.patch`など)を足したり変えたりしたときは、`blink.sh all`をやり直す(変わった翻訳単位だけをコンパイルするので数分で済む)。modulesのうちリンクするもの(`blink_modules_src.txt`)とバインディング(`blink_modules.txt`)は、makeのたびに変わったものをコンパイルする。
 - メディアのパイプラインのデコーダのために、gnの引数で`proprietary_codecs = true`、`ffmpeg_branding = "Chrome"`、`enable_hls_demuxer = false`とし、ChromiumのFFmpeg(H.264とAACを含む構成)、libvpx、libopusをBlinkと一緒にコンパイルする。FFmpegのNEONのアセンブリ(16ファイル)はコンパイルのコマンドに含まれないので、`build.sh`が`ffmpeg_internal.ninja`の定義とインクルードのディレクトリでアセンブルする。libvpxのうちドット積、行列積、SVEの命令を使うファイルは、`flags.txt`でその命令を許してコンパイルする。これらは実行時にプロセッサがその命令を持つと答えたときだけ呼ばれ、TessronOSでは呼ばれない。
 - Rustで書かれた部分(JPEG XL、AVIF、JSON、XML、Webフォントの形式の判定、Skiaのフォントの読込み)は、Chromiumのビルド規則でaarch64向けにビルドし、1つのオブジェクトファイルにまとめてリンクする。
 - パッチ`canvas_gpu.patch`は`canvas_2d_bitmap_provider.cc`だけを変え、ヘッダは変えないので、当てたときにコンパイルし直すのはその翻訳単位だけである(`blink.sh all`)。
-- 実行ファイルは約122MB(JITを入れる前は約106MB、`GL=1`でANGLEとMesaをリンクすると約142MB)で、プログラムの実身のレコード1になる。`BROWSER_BLINK=1`のときは、システムボリュームを320MB、試験用ディスクを1GBにする。
+- 実行ファイルは約122MB(JITを入れる前は約106MB、`GL=1`でANGLEとMesaをリンクすると約142MB)で、プログラムの実身のレコード1になる。`BROWSER_BLINK=1`のときは、システムボリュームを448MB、試験用ディスクを1GBにする。Raspberry Piのカードのイメージでは、システムボリュームはそれより先に2GBと決めてある(3.3)。
 
 `tessron-chromium`は、TessronOSのリポジトリと同じディレクトリに置く。別の場所に置くときは、makeに`CHROMIUM=<場所>`を、スクリプトを直接実行するときは環境変数`TESSRONOS=<TessronOSのリポジトリ>`を与える。
 
@@ -130,7 +130,7 @@ Chromiumでは、Blobの中身とその公開URLはブラウザのプロセス�
 | Web Locks(`navigator.locks`) | 名前ごとのロックを共有か排他で持ち、求められた順に与える。持ち主がハンドルを閉じると次に渡す。`steal`は持っているロックを壊す |
 | BroadcastChannel | 同じ名前のほかの接続のすべてに、それぞれのスレッドで渡す |
 | クリップボード(`ClipboardHost`。ページの中の複写と貼り込み、`execCommand`、`navigator.clipboard`が使う) | システムのトレー(18.16)を使う(`port/net/br_tray.cc`)。書き込みが確定すると、文字列を1行1段落のxmlTADの断片として、画像をPNGとして、1つの組でトレーに入れる。読むときは、手にある組の最初のxmlTADの記録の文字(タグを除き、段落の終わりと改行を改行に、実体参照を文字にしたもの)と最初の画像を返す。ほかのアプリが入れた組も読める |
-| Cache Storage(`caches`) | オリジンごとに、名前の付いたキャッシュを作った順に持つ。キャッシュは要求(アドレス、メソッド、ヘッダ)と応答の組の並びで、応答の本文はモジュールが作ったBlobのまま持つ。照合は仕様のとおり、フラグメントを除いたアドレス(`ignoreSearch`ならクエリも除く)、`ignoreMethod`でなければGETだけ、`ignoreVary`でなければ応答の`Vary`が挙げる要求ヘッダを比べる。`put`は同じ要求の項目を置き換える。返す応答は本文を共有するコピーである。キャッシュはブラウザを終えても残る。`put`された応答の本文はそのBlobから読み取って持ち、キャッシュが変わってから2秒後に全体(オリジンごとのキャッシュ、項目ごとの要求、応答、本文)を「ブラウザの保存域」のレコード6に書く。起動時に読み戻し、本文をBlobに作り直す。本文は合わせて64MBまでを残す。フレームのブローカが空のブローカのときにモジュールが拒むのは、パッチ`global_cache_storage.patch`で外す |
+| Cache Storage(`caches`) | オリジンごとに、名前の付いたキャッシュを作った順に持つ。キャッシュは要求(アドレス、メソッド、ヘッダ)と応答の組の並びで、応答の本文はモジュールが作ったBlobのまま持つ。照合は仕様のとおり、フラグメントを除いたアドレス(`ignoreSearch`ならクエリも除く)、`ignoreMethod`でなければGETだけ、`ignoreVary`でなければ応答の`Vary`が挙げる要求ヘッダを比べる。`put`は同じ要求の項目を置き換える。返す応答は本文を共有するコピーである。キャッシュはブラウザを終えても残る。`put`された応答の本文はそのBlobから読み取って持ち、キャッシュが変わってから2秒後に、前の保存から作られたキャッシュと項目、消えたキャッシュと項目だけを「ブラウザの保存域」のレコード6に書く(エントリ単位の保存、14.8.1)。起動時に読み戻し、本文をBlobに作り直す。本文は合わせて64MBまでを残す。フレームのブローカが空のブローカのときにモジュールが拒むのは、パッチ`global_cache_storage.patch`で外す |
 
 | `cookieStore` | ネットワークスタックのCookieの入れ物を使う(`port/blink/cookie_store_tessronos.cc`)。`get`と`getAll`はページのアドレスのCookieのうちスクリプトが見られるもの(HttpOnlyでないもの)を返し、`set`と`delete`はスクリプトが与えたものから作ったCookie(削除は期限の切れたもの)を入れる。`change`イベントは入れ物の変更の通知から作るので、応答、`document.cookie`、`cookieStore`のどれで変わっても届く。HttpOnlyのCookieは見せず、通知しない。フレームのブローカが空のブローカのときにモジュールが`cookieStore`をnullにするのは、パッチ`global_cookie_store.patch`で外す |
 | Payment Request(`new PaymentRequest`) | システムに支払いのアプリも手段もないので、`show()`は`NotSupportedError`、`canMakePayment()`と`hasEnrolledInstrument()`はfalseと答える。BlinkではPayment Requestは試験中の扱いなので、ブラウザが起動時に有効にする(`WebRuntimeFeatures::EnablePaymentRequest`) |
@@ -139,7 +139,7 @@ Protected Audience(`joinAdInterestGroup`、`runAdAuction`など)、Topics(`docum
 
 ストレージのバケット(`navigator.storageBuckets`、`port/blink/buckets_tessronos.cc`)は、オリジンの中の名前の付いた保存の場所である。バケットのIndexedDBとCache Storageは、オリジンのキーの後ろにバケットの名前を付けたものとして持つので、既定のバケットやほかのバケットのものと分かれ、データベースはほかのものと同じくブラウザを終えても残る。ロックはオリジンのものを使う。バケットのディレクトリ(`getDirectory`)は、バケットのキーで分けたオリジンごとのファイルシステム(下)である。`persisted`と期限はブラウザが動く間だけ覚える。バケットを消すと、そのデータベースとキャッシュも消える。Chromium 153のバケットには`durability()`がない。
 
-古いFile System API(`webkitRequestFileSystem`、`webkitResolveLocalFileSystemURL`、`port/blink/filesystem_tessronos.cc`)は、オリジンごとの一時(`TEMPORARY`)と永続(`PERSISTENT`)のファイルシステムを、ブラウザが動く間メモリの中に持つディレクトリとファイルのツリーとして扱う。アドレスは`filesystem:<起源>/temporary/a/b`の形である。ディレクトリの作成、一覧、移動、複写、削除、ファイルへのBlobの書込みと切り詰め、ファイルを`File`として読むこと(スナップショットは大きさと時刻だけを返し、中身はバイト列のBlobにする)ができる。サービスは専用のスレッドで動く。ページがファイルのBlobを待つ呼出しで求め、Blobの格納のスレッドに登録するためである。どちらの種類も、ブラウザを終えると中身は消える。
+古いFile System API(`webkitRequestFileSystem`、`webkitResolveLocalFileSystemURL`、`port/blink/filesystem_tessronos.cc`)は、オリジンごとの一時(`TEMPORARY`)と永続(`PERSISTENT`)のファイルシステムを、ブラウザが動く間メモリの中に持つディレクトリとファイルのツリーとして扱う。アドレスは`filesystem:<オリジン>/temporary/a/b`の形である。ディレクトリの作成、一覧、移動、複写、削除、ファイルへのBlobの書込みと切り詰め、ファイルを`File`として読むこと(スナップショットは大きさと時刻だけを返し、中身はバイト列のBlobにする)ができる。サービスは専用のスレッドで動く。ページがファイルのBlobを待つ呼出しで求め、Blobの格納のスレッドに登録するためである。どちらの種類も、ブラウザを終えると中身は消える。
 
 オリジンごとのファイルシステム(Origin Private File System、`navigator.storage.getDirectory()`、`port/blink/opfs_tessronos.cc`)は、オリジンごとのディレクトリとファイルのツリーをプロセスの中に持つ。ディレクトリは名前ごとの項目を、ファイルはバイト列と書いた時刻を持つ。ページが持つハンドルはツリーのノードへのパイプで、ツリーから外されたノードは`NotFoundError`と答える。
 
@@ -276,7 +276,7 @@ Blinkの実行時の機能(`RuntimeEnabledFeatures`)のうち、`base::Feature`�
 
 `screen.width`、`screen.height`、`screen.colorDepth`、画面の大きさのメディアクエリは、`ChromeClient`の`GetScreenInfos`が答える。画面の大きさはウインドウマネージャに尋ね(`wm_screen`、SVC 9-36)、1ピクセルを1 CSSピクセル、色の深さを24ビットとする。以前は基底の`ChromeClient`の空の値のままで、幅と高さと色の深さが0だった。
 
-ユーザエージェントの文字列は、Chrome 153のLinuxのデスクトップの縮小したユーザエージェントと同じ`Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36`である。Chromeは縮小したユーザエージェントでは、Linuxならプロセッサによらず`X11; Linux x86_64`と言い、`navigator.platform`も`Linux x86_64`を返す。以前は`X11; TessronOS aarch64`と言っていたが、`navigator.platform`(`Linux x86_64`)、クライアントヒントのプラットフォームと食い違い、ページから見て一貫しない姿だった。同じことをクライアントヒントでも示す(`br_user_agent_metadata`)。`navigator.userAgentData`のブランドは`Chromium` 153と、Chromiumがどの版でも足す意味のないブランド(版の番号から選ぶ`Not_A Brand` 8)で、この順に並ぶ(並びも版の番号から決まり、153ではChromiumが先)。詳しい版(`fullVersionList`、`uaFullVersion`、`Sec-CH-UA-Full-Version-List`)は、コンパイルしたソースの版`153.0.8010.36`である。プラットフォームは`Linux`、アーキテクチャは`arm`の64ビットである(プロセッサはクライアントヒントだけが言う)。フレーム、専用ワーカー、共有ワーカー、Service Workerが同じ値を持つ。安全なオリジンへの要求には、ネットワークの取得が`Sec-CH-UA`、`Sec-CH-UA-Mobile`、`Sec-CH-UA-Platform`のヘッダを付ける(ページが自分で付けたものは替えない)。`navigator.platform`は、ChromeがLinuxのどのアーキテクチャでも返す固定の値`Linux x86_64`である(Blinkのユーザエージェントの縮小の値)。
+ユーザエージェントの文字列は、Chrome 153のLinuxのデスクトップの縮小したユーザエージェントと同じ`Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36`である。Chromeは縮小したユーザエージェントでは、Linuxならプロセッサによらず`X11; Linux x86_64`と言い、`navigator.platform`も`Linux x86_64`を返す。以前は`X11; TessronOS aarch64`と言っていたが、`navigator.platform`(`Linux x86_64`)、クライアントヒントのプラットフォームと食い違い、ページから見て一貫しない姿だった。同じことをクライアントヒントでも示す(`br_user_agent_metadata`)。`navigator.userAgentData`のブランドは`Chromium` 153と、Chromiumがどのバージョンでも足す意味のないブランド(バージョン番号から選ぶ`Not_A Brand` 8)で、この順に並ぶ(並びもバージョン番号から決まり、153ではChromiumが先)。詳しいバージョン(`fullVersionList`、`uaFullVersion`、`Sec-CH-UA-Full-Version-List`)は、コンパイルしたソースのバージョン`153.0.8010.36`である。プラットフォームは`Linux`、アーキテクチャは`arm`の64ビットである(プロセッサはクライアントヒントだけが言う)。フレーム、専用ワーカー、共有ワーカー、Service Workerが同じ値を持つ。安全なオリジンへの要求には、ネットワークの取得が`Sec-CH-UA`、`Sec-CH-UA-Mobile`、`Sec-CH-UA-Platform`のヘッダを付ける(ページが自分で付けたものは替えない)。`navigator.platform`は、ChromeがLinuxのどのアーキテクチャでも返す固定の値`Linux x86_64`である(Blinkのユーザエージェントの縮小の値)。
 
 ChromeのLinux版のウインドウにあるインタフェースのうち、このブラウザになかったのは`BeforeInstallPromptEvent`だけだった(ウインドウのすべてのインタフェースの名前とメンバをページから書き出し、ChromiumのIDLと照らし合わせて確かめた。Android、ChromeOS、隔離されたWebアプリだけのもの、端末上の言語モデルを要するAIのAPIを除く)。そのモジュールをコンパイルして加えた。Webアプリのインストールはないので、`beforeinstallprompt`のイベントは起きない。
 
@@ -288,11 +288,11 @@ ChromeのLinux版のウインドウにあるインタフェースのうち、こ
 | `navigator.languages`、`Intl`の既定のロケール、`Date`の文字列 | `ja`、`en-US`、`en`。ICUの既定のロケールを`ja`にする(以前は`en-US`で、`navigator.language`と食い違っていた) |
 | `(pointer: fine)`、`(hover: hover)` | 真(マウスのあるマシン)。以前は偽で、ページがタッチの画面と見ていた |
 | `outerWidth`、`outerHeight`、`screenX`、`screenY` | ブラウザのウインドウの外寸と位置(`ChromeClient::RootWindowRect`)。以前は0だった |
-| 文書の応答 | 状態の番号、ヘッダの行、プロトコルを文書に渡す(`BrEngine::response`、`apply_response`)。`Content-Security-Policy`と`Content-Security-Policy-Report-Only`は、`Platform::AppendContentSecurityPolicy`で文書のCSPに入れる。`Permissions-Policy`、`Refresh`、`Link`などもBlinkが応答から読む。`performance.getEntriesByType('navigation')`の`nextHopProtocol`、`responseStatus`、`transferSize`と`chrome.loadTimes()`の`connectionInfo`はこれで実際の値になる。iframeの文書も同じ |
+| 文書の応答 | 状態の番号、ヘッダの行、プロトコルを文書に渡す(`BrEngine::response`、`apply_response`)。`Content-Security-Policy`と`Content-Security-Policy-Report-Only`は、`Platform::AppendContentSecurityPolicy`で文書のCSPに入れる。ネットワークから(または`data:`のURLで)メインフレームに確定する文書には、新しい既定のポリシーのコンテナを渡す(`main_policies`)。渡さないとBlinkはウインドウの前の文書のコンテナを引き継ぎ、新しい文書がそれまでの文書のCSPにも縛られる(2026年10月15日まで、Googleのログインの画面から移った`workspace.google.com`のページが、ログインの画面のnonce付きのCSPで自分のスクリプトを止められていた)。`about:blank`の文書は前の文書のものを引き継ぐ。`Permissions-Policy`、`Refresh`、`Link`などもBlinkが応答から読む。`performance.getEntriesByType('navigation')`の`nextHopProtocol`、`responseStatus`、`transferSize`と`chrome.loadTimes()`の`connectionInfo`はこれで実際の値になる。iframeの文書も同じ |
 
 `navigator.plugins`と`navigator.mimeTypes`は、PDFを表示するChromeと同じく5つ(`PDF Viewer`、`Chrome PDF Viewer`、`Chromium PDF Viewer`、`Microsoft Edge PDF Viewer`、`WebKit built-in PDF`)と2つ(`application/pdf`、`text/pdf`)で、`pdfViewerEnabled`は真である(14.6.6)。WebGLの`UNMASKED_RENDERER_WEBGL`は、`make GL=1`ではANGLEの文字列、そうでなければ`TessronOS software GL`である。
 
-試験のための起動の行に次のものがある。`script=js:<スクリプト>`は、ページを表示した後にそのスクリプトをメインワールドで実行する(`script=<URL>`は取得したスクリプトを実行する)。`features=<名前>,-<名前>`は、Blinkの実行時の機能を入れる(`-`を付けると切る。Chromeが試験中として切っているものを試すため)。`netlog=<語>,<語>`は、URLにその語を含む要求について、要求のヘッダと本文、応答の本文(文字は16KBまで、そのほかは2KBまでを16進で)をコンソールに出す。`trace=exceptions`は、ブラウザのAPIがページのスクリプトに投げた例外を、インタフェース、メンバ、例外の文の組ごとに1度コンソールに出す(V8の`SetExceptionPropagationCallback`で、Blinkが文を整えた後に見る)。
+試験のための起動の行に次のものがある。`script=js:<スクリプト>`は、ページを表示した後にそのスクリプトをメインワールドで実行する(`script=<URL>`は取得したスクリプトを実行する)。`features=<名前>,-<名前>`は、Blinkの実行時の機能を入れる(`-`を付けると切る。Chromeが試験中として切っているものを試すため)。`netlog=<語>,<語>`は、URLにその語を含む要求について、要求のヘッダと本文、応答の本文(文字は16KBまで、そのほかは2KBまでを16進で)をコンソールに出す。`quic=off`は、HTTP/3(QUIC)を使わず、すべての要求をTCPで送る(HTTP/3の転送の速さと比べるため)。`trace=exceptions`は、ブラウザのAPIがページのスクリプトに投げた例外を、インタフェース、メンバ、例外の文の組ごとに1度コンソールに出す(V8の`SetExceptionPropagationCallback`で、Blinkが文を整えた後に見る)。ページの実身の本文に`trace=exceptions`の段落を書き足しておくと、そのページの実身から開いたブラウザは、これを起動の行として受け取る(コンソールに`browser: trace=exceptions, from the page object`と出る)。実機で利用者がサイトの振る舞いを調べられるようにするためである。ほかの起動の行はページの実身からは受け取らない(`script=`はページで任意のスクリプトを動かし、`netlog=`は送ったパスワードもコンソールに出すため)。
 
 ### 14.4.13 組み込みのAI
 
@@ -303,7 +303,7 @@ Chrome 153がLinuxで出す組み込みのAIのAPI(`LanguageDetector`、`Transla
 
 ### 14.4.14 隔離されたWebアプリだけのAPI
 
-Chromeは、Direct Sockets、ウインドウの操作(`window.maximize`、`minimize`、`restore`、`setResizable`)、Web Printingなどを、隔離されたWebアプリ(IWA)にだけ出し、普通のページには出さない。このブラウザにはIWAの仕組みがないので、利用者が許したオリジンをIWAの代わりにする。ウインドウのメニューの〈このサイトを隔離されたWebアプリとして扱う〉を選ぶと、そのページのオリジンが許され(印が付く)、ページを読み直す。もう一度選ぶと外れる。許したオリジンは許可の答えとともに「ブラウザの保存域」のレコード7に残る。試験は起動の行`isolated=<起源>`でその実行のあいだだけ許す。
+Chromeは、Direct Sockets、ウインドウの操作(`window.maximize`、`minimize`、`restore`、`setResizable`)、Web Printingなどを、隔離されたWebアプリ(IWA)にだけ出し、普通のページには出さない。このブラウザにはIWAの仕組みがないので、利用者が許したオリジンをIWAの代わりにする。ウインドウのメニューの〈このサイトを隔離されたWebアプリとして扱う〉を選ぶと、そのページのオリジンが許され(印が付く)、ページを読み直す。もう一度選ぶと外れる。許したオリジンは許可の答えとともに「ブラウザの保存域」のレコード7に残る。試験は起動の行`isolated=<オリジン>`でその実行のあいだだけ許す。
 
 - 許したオリジンのウインドウは、Blinkにとって隔離されたコンテキスト(`IsIsolatedContext`)であり、クロスオリジン分離(`crossOriginIsolated`)でもある(パッチ`isolated_context.patch`)。IWAはいつもクロスオリジン分離されているからである。
 - Direct Sockets(`TCPSocket`、`UDPSocket`、`TCPServerSocket`)は、システムのソケットで動く(`port/blink/direct_sockets_tessronos.cc`)。TCPは名前を引いてつなぎ、受けたバイトをページの読むデータパイプへ、ページが書いたバイトをソケットへ、それぞれのスレッドで運ぶ。TCPのサーバは受け付けるたびに同じ形の接続を渡す。UDPは相手につないだものと、自分のアドレスにバインドして誰にでも送るものがあり、ページが求める数だけ受けたデータグラムを渡す。マルチキャストへの参加とTLSへの切り替えは扱わない。
@@ -338,7 +338,7 @@ WebNN(`navigator.ml`、`MLContext`、`MLGraphBuilder`、`MLGraph`、`MLTensor`)�
 
 ### 14.4.17 本物のChromeとの照合
 
-ページから見える姿とネットワークへの要求の形を、本物のChrome 153と同じページで比べてそろえた。基準は、WSLの中でXvfbの画面に出したGoogle Chrome 153.0.8010.36(Linux版の配布物)と、Chrome for Testingの同じ版である。Chrome for Testingは試験用の版で、XSLT、Topics、Protected Audience、Attribution Reportingを切り、WebMCPを入れているので、比べる基準はGoogle Chromeにした。
+ページから見える姿とネットワークへの要求の形を、本物のChrome 153と同じページで比べてそろえた。基準は、WSLの中でXvfbの画面に出したGoogle Chrome 153.0.8010.36(Linux版の配布物)と、Chrome for Testingの同じバージョンである。Chrome for Testingは試験用のビルドで、XSLT、Topics、Protected Audience、Attribution Reportingを切り、WebMCPを入れているので、比べる基準はGoogle Chromeにした。
 
 比べるページは、ウインドウと各インタフェースの静的な名前とプロトタイプの名前(`Reflect.ownKeys`をたどり、各プロパティの記述子、関数の`length`、`name`、`Function.prototype.toString`の形)、`navigator`、`screen`、`window`、`document`の値、`userAgentData.getHighEntropyValues`、メディアクエリ、`CSS.supports`、計算されたスタイル、`Intl`と`Date`、数学関数の値、時計の分解能と進み、エラーのスタックと文、権限の問合せ、WebGLの値と拡張、Web Audioの出力、canvasの描画、フォントの幅、メディアの型、WebCodecs、WebAuthnの能力、Wasmの機能、ワーカー(専用と共有)とiframeの中の同じ値、CORSのふるまい、`httpbin.org`が返す要求のヘッダを集め、JSONでサーバに送る。差分のツールがそれを「Chromeにだけある」「こちらにだけある」「値が違う」「並びが違う」に分け、画面の大きさ、プロセッサの数、GPU、時計の細かい値のような、本物のLinuxのマシンどうしでも違うものは別に分ける。
 
@@ -349,10 +349,11 @@ WebNN(`navigator.ml`、`MLContext`、`MLGraphBuilder`、`MLGraph`、`MLTensor`)�
 | CORS | 移植の取得の層(`br_loader.cc`)が検査をせず、ほかのオリジンへの`fetch`とXMLHttpRequestが読め、画像でcanvasが汚れず、ほかのオリジンのスクリプトの例外の文が見えた | 要求のモードとオリジンから、応答をCORSで検査する(`network::cors::CheckAccess`)。安全でないメソッドとヘッダには事前の要求(`OPTIONS`、`Access-Control-Max-Age`の間は覚える)を送る。`no-cors`のほかのオリジンへの応答は不透明(`opaque`)、CORSの応答は`cors`の型にし、Blinkが公開するヘッダを絞る。`same-origin`のモードのほかのオリジンへの要求は送らない |
 | 要求の`Origin`、`Sec-Fetch-Site`、`Sec-Fetch-Mode`、`Sec-Fetch-Dest`、`Sec-Fetch-Storage-Access` | 付けていなかった | ブラウザのネットワークのサービスと同じ規則で付ける(CORSの要求とGET、HEAD以外の`Origin`、安全な宛先への`Sec-Fetch-*`) |
 | 資格情報 | 常に送った | `credentials`が`omit`、または`same-origin`でほかのオリジンのときは、Cookieと認証を送らない |
+| ウインドウの移動のCookie | 移動の要求のCookieの基準のサイト(site for cookies)が最初のアドレスのままで、ほかのサイトへのリダイレクトの先はクロスサイトの要求として扱われた。`SameSite`のない(既定でLax)Cookieを、リダイレクトの応答が付けても保存せず、送りもしなかった。`www.gmail.com`から`accounts.google.com`へ転送されたログインの画面は、最初の応答が付けた`__Host-GAPS`を持たず、画面の要求(`batchexecute`、`browserinfo`)がHTTP 400で断られた(2026年10月15日まで) | ブラウザの移動と同じく、基準のサイトをリダイレクトごとにその先のアドレスにし、メインフレームの移動としてCookieを扱う。移動を求めたページのオリジンを要求の始まり(initiator)にし、利用者が求めた移動は始まりなしにする(`br_navigation_headers`の行`X-TessronOS-Navigation`、`X-TessronOS-Initiator`をネットワークスタックが取り去って使う) |
 | 優先度 | 全部が既定の優先度で、HTTP/2とHTTP/3の`priority`が`i`だけだった | Blinkが決めた優先度と`incremental`をネットワークの層に渡し、`u=1, i`などになる |
 | `Accept-Encoding` | `gzip, deflate` | `gzip, deflate, br, zstd`(BrotliとZstandardの復号を入れた) |
 | 高エントロピーのクライアントヒント | 送らなかった | ウインドウの文書の応答の`Accept-CH`をオリジンごとに覚え、文書をその指示で確定する(`enabled_client_hints`)。Blinkが部品の要求に`Sec-CH-UA-Arch`、`-Full-Version-List`、`Sec-CH-DPR`、`Sec-CH-Viewport-Width`、`Device-Memory`などを付ける。ウインドウの移動の要求にもChromeと同じ`Accept`、`Upgrade-Insecure-Requests`、`Sec-Fetch-*`、覚えたヒント、最高の優先度を付ける(`br_navigation_headers`) |
-| ブランドの並びと詳しい版 | `Not_A Brand`が先、詳しい版は`153.0.0.0` | `Chromium`が先、`153.0.8010.36` |
+| ブランドの並びと詳しいバージョン | `Not_A Brand`が先、詳しいバージョンは`153.0.0.0` | `Chromium`が先、`153.0.8010.36` |
 | `SharedArrayBuffer` | どのコンテキストにもあった | クロスオリジン分離のコンテキストだけ(V8の`--enable-sharedarraybuffer-per-context`) |
 | タッチのイベントのハンドラ(`ontouchstart`など) | あった | タッチの画面のないマシンなので無い |
 | Web Bluetooth | あった | ChromeのLinux版と同じく無い |
@@ -413,8 +414,9 @@ WebNN(`navigator.ml`、`MLContext`、`MLGraphBuilder`、`MLGraph`、`MLTensor`)�
 | XMLHttpRequestの`upload`のイベント | 起きなかった | 本文を送った後、応答の前に送った量を通知する |
 | 進捗のイベントの`lengthComputable` | いつも真 | 応答に`Content-Length`があるときだけ真 |
 | `statusText` | 200なら`OK`、ほかは空 | ステータス行の理由句(HTTP/2とHTTP/3では空)。待つ読込み(同期のXMLHttpRequest)も同じ(`br_net_fetch_sync_status_text`) |
-| リダイレクト | ネットワークスタックがBlinkに伝えずに辿り、`Response.redirected`、`Response.url`が元のままで、`redirect`の`manual`と`error`が効かなかった | 辿ったリダイレクトをBlinkに1つずつ伝える(`WillFollowRedirect`)。`error`は失敗にし、`manual`は最初のリダイレクトの応答を不透明なリダイレクトにする |
+| リダイレクト | ネットワークスタックがBlinkに伝えずに辿り、`Response.redirected`、`Response.url`が元のままで、`redirect`の`manual`と`error`が効かなかった | 辿ったリダイレクトをBlinkに1つずつ伝える(`WillFollowRedirect`)。`error`は失敗にし、`manual`は最初のリダイレクトの応答を不透明なリダイレクトにする。`manual`と`error`の要求は、ネットワークスタックが最初のリダイレクトで止まり(読込みの層の行`X-TessronOS-Redirect: stop`)、その先を求めない。CORSの要求は、リダイレクトの応答もCORSで検査する(2026年10月15日まで、`manual`の要求がその先まで辿られ、その先の応答をCORSで検査して断っていた。YouTubeのページが`https://youtube.com/`へ送るリダイレクトを辿らない`fetch`が、その先の`www.youtube.com`の応答のCORSのエラーになった) |
 | `fetch()`の`cache`の指定 | スタックに伝えなかった | 読込みのフラグ(検証する、キャッシュを通らない、など)を伝える |
+| 読込みの失敗の理由 | どの失敗も`ERR_FAILED`としてBlinkに伝えた。Webフォント(`@font-face`)は最初にHTTPキャッシュだけから読み(キャッシュを見た読込み)、`ERR_CACHE_MISS`ならネットワークから読み直すが、その印が伝わらず、キャッシュにないフォントはどれも読まれなかった(Google マップのボタンのアイコンが、記号の書体が読まれず、四角に×の形で表示された) | ネットワークスタックのエラー(`br_net_fetch_error`)をそのまま伝える(`br_loader.cc`の`Fail`) |
 | 許されないポート | 接続しに行った | ネットワークサービスと同じく直ちに断る(`net::IsPortAllowedForScheme`) |
 | URLのスキーム | `chrome-extension:`、`isolated-app:`などを特別なスキームとして登録していなかった | Linux版のChromeと同じく登録する(ホストを持ち、オリジンを持つ、安全、アクセスなし、など) |
 | `document.createEvent()` | モジュールのイベント(`StorageEvent`、`DeviceMotionEvent`など)を作れなかった | モジュールのイベントのファクトリを登録する |
@@ -459,7 +461,7 @@ YouTubeの再生の検証(`GenerateIT`)は、2026年10月9日の時点では答�
 
 - 同時に持つ接続は32までに抑え、それを超える要求はソケットが空くのを待つ。システム全体のソケットの上限は64である(9.2)。
 - TLSはChromiumのBoringSSLで、サーバの証明書はChromiumのルートストアの証明書(実行ファイルに埋め込む)で検証する。期限の切れた証明書のサイトは開かない。
-- Cookie、`localStorage`、HTTPキャッシュは、学習箱にある実身「ブラウザのCookie」、「ブラウザの保存域」、「ブラウザの蓄え」のレコード1にしまう(14.8)。Cookieと`localStorage`は変わってから2秒後、キャッシュは新しいものが来てから1分後に書き直し、終了時に残りを書く。
+- Cookie、`localStorage`、HTTPキャッシュは、学習箱にある実身「ブラウザのCookie」、「ブラウザの保存域」、「ブラウザの蓄え」のレコード1にしまう(14.8)。Cookieと`localStorage`は変わってから2秒後、キャッシュは新しいものが来てから1分後に保存し、終了時に残りを保存する。HTTPキャッシュはエントリ単位で、新しいエントリと変わったエントリ(ストリームの大きさか、ヘッダとメタデータのハッシュが変わったもの)、消えたエントリだけを書く。書き込みはストアのスレッドが行う(14.8.1)。
 - フォームの`POST`は、本文と種類をアプリが受け取り、ネットワークスタックで送る。
 - スクリプトの`fetch`と`XMLHttpRequest`の応答の本文は、Mojoのデータパイプで渡す。`fetch()`の`Response`は本文をストリームとしてだけ読むためである。応答は100ミリ秒だけ持っておき、その間に本文が終われば、応答と本文を1つのタスクでまとめて渡す(すぐに終わる応答が、それまでと同じ順でタスクに乗る。長いタスクの後のXMLHttpRequestの`timeout`の判定など)。終わらなければ、そこで応答とパイプを渡し、本文はネットワークスタックから届いた分ずつパイプに書く(`BrURLLoader`の`PipedPart`と`Release`、パイプは512KB)。パイプが一杯のときは、受け取れなかった分を取っておき、パイプが書けるようになったら書く。そのため、ページは本文を届いた分ずつ読め(`ReadableStream`、XMLHttpRequestの`progress`)、動画を`fetch()`で少しずつ受け取るページ(YouTubeのSABR)も、全部が届く前に再生に回せる。終わらない応答も、応答が来た時点で`fetch()`が答える。読み手が本文を手放したとき(`reader.cancel()`)と、ローダが捨てられたとき(`AbortController`)は、スタックに取得をやめさせる。こうした要求は、応答が来た時点でページの部品の待ちから外す。届いた分ごとにページのスレッドの仕事が1つ増えるので、動画を流し続けるページでは仕事の列が空にならない。そこで、エンジンのスレッドが仕事を回すのは列が空になるまでか、長くても100ミリ秒までとし(`run_tasks`)、残りは次に回す。そうしないと、スレッドがフレームと入力とページの部品の待ちに戻らず、YouTubeのページの表示が4分ほど遅れた。データパイプの共有メモリは、`lib/libcxxrt`の`memfd_create`が作るプロセスの中のメモリオブジェクトで(5.7)、パッチ`shared_memory_region.patch`と`shared_memory_tracker.patch`がそれを使わせる。同じ領域のマッピングはどれも同じアドレスになる。
 - `indexedDB`は、BlinkのIndexedDBのページ側(要求、トランザクションの進み、値からのキーの取出し、値の包み)をそのまま使い、ブラウザがプロセスの外に持つ格納側(Mojoの`IDBFactory`、`IDBDatabase`、`IDBTransaction`、`IDBCursor`)を`port/blink/indexeddb_tessronos.cc`がプロセスの中に持つ。ページが空のブローカに`IDBFactory`を求めると、そのページのオリジンの格納側が結ばれる。データはメモリにあり、オリジンごとのデータベース、データベースごとのオブジェクトストア、ストアごとのレコードとインデックスである。キーは、並びがIndexedDBのキーの順(数、日付、文字列、バイナリ、配列)になるバイト列にして持つので、レコードとインデックスの並びがそのままカーソルの順になる。書くトランザクションは最初に書く前にデータベースのコピーを取り、中断されるとコピーに戻す。トランザクションは互いを待たず、要求が来た順に答える。何かを変えたトランザクションが確定すると、2秒後に全体を「ブラウザの保存域」のレコード2に書き、起動時に読み戻す。BlobやFileを含む値(大きな値もBlinkがBlobに包んで渡す)は、値のバイト列の前にその外部オブジェクトの番号を付けて持つ。外部オブジェクトは番号ごとに、ページが渡したBlob(持ち続け、値を返すたびに複製して渡す)、種類、大きさ、Fileなら名前と時刻、Blobの格納側から後で読み取った中身を持つ。データベースを書くときは中身も書き、読み戻した中身は、それを含む値を最初に返すときにBlobに作り直す。File System Accessのハンドルを含む値は受け付けない。
@@ -521,10 +523,16 @@ ChromiumのWebGLは、普通はGPUプロセスの中で動く。レンダラのB
 | Mesa(`libtsgl.a`) | EGLのプラットフォーム`tessronos`と、OpenGL ES 3.1。softpipeかv3d |
 
 - ANGLEのエントリポイントは`GL_ActiveTexture`、`EGL_Initialize`のように名前の先頭が`GL_`と`EGL_`なので、同じプログラムにリンクするMesaの`glActiveTexture`、`eglInitialize`とぶつからない。`gl`と`egl`の名前を出すANGLEのファイル(`libGLESv2_autogen.cpp`、`libEGL`)はコンパイルしない。
-- `GLES2Interface`の約330のメソッドのうち、ANGLEに同じ関数がある約290は、`tools/browser/gen_gl_forward.py`がChromiumのヘッダ(`gles2_interface_autogen.h`)とANGLEのエントリポイントのヘッダから転送のコードを生成する(`gl_angle_forward.inc`、`gl_angle_entry.inc`)。Chromium独自の拡張の名前のメソッドは、ANGLE、EXT、OESなどの接尾辞の同じ関数に渡す。マルチドローの要素の位置は、バイト数の配列からポインタの配列に直す。残りのうちコマンドバッファのクライアントが自分で答えるもの(共有イメージ、拡張の要求、フラッシュ、同期トークン、WebGL 2の`getBufferSubData`)は手で書いた。どこにも渡せないもの(コマンドバッファのトレースやGPUフェンスなど)は、最初に呼ばれたときにコンソールに名前を出し、何もしない。
+- `GLES2Interface`の約330のメソッドのうち、ANGLEに同じ関数がある約290は、`tools/browser/gen_gl_forward.py`がChromiumのヘッダ(`gles2_interface_autogen.h`)とANGLEのエントリポイントのヘッダから転送のコードを生成する(`gl_angle_forward.inc`、`gl_angle_entry.inc`)。Chromium独自の拡張の名前のメソッドは、ANGLE、EXT、OESなどの接尾辞の同じ関数に渡す。マルチドローの要素の位置は、バイト数の配列からポインタの配列に直す。ただし、渡す先の拡張の関数がOpenGL ES 3.0のコアにもある場合は、OpenGL ES 3のコンテキスト(WebGL 2)ではコアの関数に、OpenGL ES 2のコンテキストでは拡張の関数に渡す。インスタンス描画(`DrawArraysInstancedANGLE`、`DrawElementsInstancedANGLE`、`VertexAttribDivisorANGLE`)、頂点配列オブジェクト(`BindVertexArrayOES`など)、問合せ(`GenQueriesEXT`、`BeginQueryEXT`など)、`TexStorage2DEXT`、`UnmapBufferCHROMIUM`は生成するコードで(`gen_gl_forward.py`の`CORE_IN_ES3`)、`DrawBuffersEXT`、`BlitFramebufferCHROMIUM`、`RenderbufferStorageMultisampleCHROMIUM`と問合せの開始と終了は`gl_angle.cc`の手で書いた部分で切り替える。GPUプロセスのデコーダが使うGLの関数の表も、OpenGL ES 3ではこれらの名前をコアの関数に結び付ける。`RenderbufferStorageMultisampleEXT`は`EXT_multisampled_render_to_texture`の別の関数なので、切り替えない。ANGLEは、拡張を有効にしていないコンテキストで拡張の関数が呼ばれると`GL_INVALID_OPERATION`(`Command requires an extension.`)にする。OpenGL ES 3のコンテキストでは`EXT_draw_buffers`も`ANGLE_instanced_arrays`も有効にならないので、以前はWebGL 2の`drawBuffers`とインスタンス描画が呼ばれるたびにこのエラーが残り、描画もされなかった(14.8.1)。残りのうちコマンドバッファのクライアントが自分で答えるもの(共有イメージ、拡張の要求、フラッシュ、同期トークン、WebGL 2の`getBufferSubData`)は手で書いた。どこにも渡せないもの(コマンドバッファのトレースやGPUフェンスなど)は、最初に呼ばれたときにコンソールに名前を出し、何もしない。
+- コマンドバッファ独自の問合せの対象は、ANGLEに渡さずに`gl_angle.cc`が答える。WebGL 2の`fenceSync`は、Blinkの中では`GL_READBACK_SHADOW_COPIES_UPDATED_CHROMIUM`の問合せで、`clientWaitSync`と`getSyncParameter`は、その結果が出たかを尋ねる。`KHR_parallel_shader_compile`の`COMPLETION_STATUS_KHR`も、`linkProgram`を挟んだ`GL_PROGRAM_COMPLETION_QUERY_CHROMIUM`の問合せである。以前はこれらもANGLEに渡していたが、ANGLEはこの対象を知らないので問合せは始まらず、結果はいつまでも出ず、尋ねるたびに`getError`に`INVALID_OPERATION`が残った。ページのフェンスは信号状態にならず、リンクは終わらなかった。Googleマップの地図の部品(`mapcore`)は、描いた画素を`PIXEL_PACK_BUFFER`に読み出してフェンスを置き、`clientWaitSync(sync, 0, 0)`をタイマで繰り返して読み出しの終わりを待つ。その待ちが終わらず、地図のフレームの完了と表示の安定を待つ処理(マップが`ActionFlow error: hung, waiting for done(). Branches: stableViewport flowType frame_complete_event`と報告する)が止まり、続く初期化と、左上のメニューのパネルを出す処理も止まった。いまは、フェンスの問合せは終わるときにANGLEのフェンス(`glFenceSync`)を置き、それが信号状態になったら結果が出たと答える(OpenGL ES 2のコンテキストにはWebGLのフェンスがないので、フラッシュした時点で出たとする)。リンクの問合せは終えた時点で出たとし、結果はそのプログラムのリンクの状態にする(ANGLEはリンクの状態を尋ねるとリンクの終わりを待つ)。
 - ANGLEのディスプレイは、OpenGL ESのバックエンド(`EGL_PLATFORM_ANGLE_TYPE_OPENGLES_ANGLE`)を、システムのEGLをデバイスとして(`EGL_PLATFORM_ANGLE_DEVICE_TYPE_EGL_ANGLE`)使う形で、プロセスに1つ作る。ANGLEはシステムのEGLを`dlopen`で開いて`eglGetProcAddress`を探す。ブラウザの`dlopen`(`port/compat/ts_linux.c`)は、名前に`EGL`を含むものを開くと、リンクしたMesaを指す値を返し、`dlsym`はMesaの`eglGetProcAddress`を返す。以降のEGLとOpenGL ESの関数はすべてそれで得る。MesaのEGLは既定のディスプレイでプラットフォーム`tessronos`になり、ピクセルバッファとサーフェスなしのコンテキストを持つ。Mesaの`dlopen`など(`lib/libgl/gl_os.c`)は弱い名前なので、ブラウザのものが使われる。
 - コンテキストはプロバイダ(`WebGraphicsContext3DProvider`)ごとに1つで、WebGL 1はOpenGL ES 2.0、WebGL 2は3.0のコンテキストである。WebGL向けの属性(`EGL_CONTEXT_WEBGL_COMPATIBILITY_ANGLE`)を付けて作るので、ANGLEがWebGLの規則で呼出しを検査し、シェーダを変換する。初期化されていないリソースは0で埋める(`EGL_ROBUST_RESOURCE_INITIALIZATION_ANGLE`)。描画は1×1のピクセルバッファを現在のサーフェスにして行い、描画先はいつもフレームバッファオブジェクトである。コンテキストを作ったとき、コマンドバッファのクライアントが自分のために使う拡張(フレームバッファのブリット、テクスチャのストレージ、テクスチャのコピー、`OES_packed_depth_stencil`など。GPUプロセスのデコーダが要求するものと同じ一覧)のうち、ANGLEが出せるものを要求する。OpenGL ES 3のコンテキストでは`OES_packed_depth_stencil`はコアの機能なので、拡張の文字列にないときは足して答える。BlinkはWebGLのコンテキストを作るときにこの名前を確かめる。
-- コンテキストは、それを描くcanvasのスレッドで使う。ページのcanvasならページのスレッド、ワーカーの`OffscreenCanvas`ならワーカーのスレッドである。ワーカーのコンテキストは、Blinkがページのスレッドに作らせて待つので、作ったスレッドと使うスレッドが違う。EGLのコンテキストは同時に1つのスレッドでしか現在のものにできないので、コンテキストは作る間だけ現在のものにし、作り終えたら手放す。使うスレッドが最初の呼出しで現在のものにする。どのコンテキストが現在のものかはスレッドごとに覚える。以前はプロセスで1つしか覚えず、ワーカーのスレッドはページのスレッドで現在のものになったコンテキストをそのまま使えると見なしていたので、ワーカーの`getContext('webgl')`はnullを返した。
+- ANGLEがエラーを記録したときの説明(どの関数か、なぜか)は、コンテキストを作るときに`KHR_debug`のコールバック(`GL_DebugMessageCallbackKHR`)で受け取り、`[.WebGL-<通し番号>]GL_INVALID_OPERATION: glDrawBuffersEXT: Command requires an extension.`の形にしてコンテキストのエラーメッセージのコールバック(`SetErrorMessageCallback`)に渡す。Blinkはそれをページのコンソールに警告として出す(コンテキストごとに256件まで)。同じ説明はシステムのコンソールにも、違う説明ごとに最初の1回だけ`browser: webgl:`の行で出す。ページが`getError`で受け取ったエラーを、どの呼出しが残したかをこれで確かめる。
+- `EXT_disjoint_timer_query`と`EXT_disjoint_timer_query_webgl2`はページに出さない。Blinkは、GPUの機能の情報(`GpuFeatureInfo`)で`ENABLE_WEBGL_TIMER_QUERY_EXTENSIONS`が有効なときだけこれを承認済みの拡張とし、このブラウザのプロバイダはそれを有効にしていないので、開発者向けの拡張のまま隠れる。LinuxのChromeはこれを有効にしている(Androidを除く)ので、Chromeでは出る。出すと、時間の問合せはANGLEを通ってMesaの`EXT_disjoint_timer_query`に渡る。softpipeは持つが、v3dでは確かめていないので、実機で確かめてから有効にする。
+- コンテキストは、それを描くcanvasのスレッドで使う。ページのcanvasならページのスレッド、ワーカーの`OffscreenCanvas`ならワーカーのスレッドである。ワーカーのコンテキストは、Blinkがページのスレッドに作らせて待つので、作ったスレッドと使うスレッドが違う。EGLのコンテキストは同時に1つのスレッドでしか現在のものにできないので、コンテキストは作る間だけ現在のものにし、作り終えたら手放す。使うスレッドが最初の呼出しで現在のものにする。どのコンテキストが現在のものかはスレッドごとに、コンテキストの通し番号で覚える(アドレスで覚えると、別のスレッドで捨てられたコンテキストのアドレスに新しいコンテキストが作られたとき、取り違える)。以前はプロセスで1つしか覚えず、ワーカーのスレッドはページのスレッドで現在のものになったコンテキストをそのまま使えると見なしていたので、ワーカーの`getContext('webgl')`はnullを返した。
+- `transferControlToOffscreen`でワーカーに渡したcanvasのフレームは、ワーカーの`OffscreenCanvas`が描くたびに、コンテキストのスナップショットとしてページに渡す(パッチ`offscreen_canvas_frame.patch`と`html_canvas_placeholder.patch`)。Chromiumでは、`OffscreenCanvas`はフレームをGPUプロセスの共有イメージ(GPUで合成しないときはソフトウェアのコンポジタの共有イメージ)としてコンポジタに渡し、ページのcanvas(プレースホルダ)はそれをレイヤーとして表示する。このブラウザはコンポジタもその共有イメージのインタフェースも持たないので、WebGLはフレームを作れず(`GetResourceForPushFrame`がいつもnull)、作れたWebGPUのフレームもページの描画では描かれなかった(`HTMLCanvasElement::Paint`はプレースホルダを描かない)。いまは、`OffscreenCanvas`のフレームごとに、WebGLは描画バッファの読み戻し、WebGPUは今のテクスチャの画素(14.6.5)、ほかはコンテキストの画像を、ラスタの`SkImage`にしてプレースホルダの番号で控え、ページのスレッドに知らせる。WebGLは、フレームを渡した後でコンポジタに渡したときと同じく合成済みとし(`MarkLayerComposited`)、描画バッファを保たない設定なら次のフレームの描画の前に消す。WebGLの読み戻しは毎回描画バッファから読む(`GetRGBAUnacceleratedStaticBitmapImage`)。WebGLのコンテキストが資源の作り手のないときのために持つスナップショット(`PaintRenderingResultsToSnapshot`の`cached_snapshot_`)は、1度作ると大きさが変わるまで作り直さないので、それを使った最初の版では、2枚目からのフレームがすべて1枚目のままになり、実機のGoogleマップは地図を描いても、ドラッグやズームが画面に出なかった。ページのスレッドはそのcanvasの描き直しを求め、ページを描くときにその画像をcanvasの大きさに描く。Googleマップは地図をこの形で描く(14.8.1)。
+- コンテキストごとに、5秒の間の呼出しの数、描画と消去の数、描画バッファから読んだフレームの数、`readPixels`の数(メモリとピクセルのパックのバッファ。メモリなら先頭の4バイト)、`getBufferSubData`の数と先頭の8バイト、フェンスの数と、その問合せに「終わった」「まだ」と答えた数、ページに返したエラーの数、色のバッファの大きさを数え、使われたコンテキストについて5秒ごとに1行コンソールに出す。最初のWebGL 1と2のコンテキストを作ったときは、限界値(テクスチャの大きさ、ユニフォームとバリイングの数、サンプル数、描画バッファの数、ユニフォームブロックの大きさなど)とフラグメントシェーダの`highp`の精度、拡張の一覧を1回ずつ出す。実機のV3DとQEMUのsoftpipeでページが選ぶ描き方が違うとき、どの値が違うかをこの行で比べる。
+- ANGLEのOpenGL ESのバックエンドは、仮想化のグループ(`EGL_CONTEXT_VIRTUALIZATION_GROUP_ANGLE`)が同じコンテキストを、システムのEGLの1つのコンテキストの上で切り替えて動かす。指定しなければディスプレイの全部のコンテキストが1つのグループになる。システムのコンテキストも同時に1つのスレッドでしか現在のものにできないので、ワーカーとページが同時にWebGLを使うと、互いにシステムのコンテキストを取り合い、システムの`eglMakeCurrent`が失敗して、呼出しが別のコンテキストの状態の上で動いた。新しく作ったコンテキストが返す文字列が不正なアドレスになり、ブラウザが落ちた(ワーカーの`OffscreenCanvas`とページのcanvasで同時にWebGLを使う試験のページで再現した。Google マップを`gpu=on`で開いたときも、同じ所で落ちていた)。そこで、ページのスレッドのコンテキストはディスプレイのグループに、ほかのスレッドのコンテキストはスレッドごとのグループに入れる。ワーカーのコンテキストはページのスレッドで作られるので、ワーカーのスレッドで最初に現在のものにするときに、そのスレッドのグループで作り直す(まだ何も描いていないので、要求した拡張を求め直すだけでよい)。システムのコンテキストは、ページのスレッドに1つ、WebGLを使うワーカーのスレッドごとに1つになる。softpipeではシステムのコンテキスト1つが約200MBを使うので、QEMUの2GBのマシンで`gpu=on`(Skiaのコンテキストがもう1つ)のままWebGLを使うワーカーのあるサイトを開くと、メモリが足りなくなることがある(4GBでは足りる)。`EGL_MakeCurrent`が失敗したときは、コンソールに1度`browser: webgl: a context could not be made current`を出し、どのコンテキストも現在のものにしないでおく(呼出しはコンテキストのないものとしてANGLEが答える)。
 - 描画バッファの色のバッファは共有イメージとして作られる。共有イメージのインタフェースは作られたときの大きさをメールボックスごとに覚え、`CreateAndTexStorage2DSharedImageCHROMIUM`がその大きさのRGBA8のテクスチャをANGLEに作る(`ColorBuffer`)。共有イメージへのアクセスの開始と終了、同期トークンは、呼出しが返ったときには実行が済んでいるので、何もしない。
 - 描いた結果は、合成をCPUで行う設定(`IsGpuCompositingDisabled`)により、描画バッファが`ReadPixels`で読み戻してcanvasのビットマップにし、Skiaがページに描く。ページをGPUでラスタ化するとき(14.7.2)は、Ganeshがそのビットマップをテクスチャにして描く。GPUから読み戻すので、v3dではキャッシュしないマッピングのBOを読むことになる。描画バッファ全体を原点から読む`ReadPixels`は表示のためのフレームとして数え、コンソールの`browser: draw: webgl`の行(14.7.2)に出す。後で、色のバッファをMesaのBOにしてウインドウシステムに渡し、GPUで合成する(13.10)ときは、色のバッファを作る1か所(`ColorBuffer`。BOのEGLイメージをテクスチャにする)と、描画バッファの出力(読み戻しをやめて共有イメージのまま渡す)を変える。転送の部分は変わらない。
 - softpipeはマルチサンプリングを持たず、`GL_MAX_SAMPLES`を1としたままOpenGL ES 3.1を出す(Mesaのソフトウェアのマルチサンプリングの扱い)。ANGLEは、OpenGL ES 3.0の必須の形式が4サンプルを持たないとOpenGL ES 2.0に制限するので、そのままではsoftpipeでWebGL 2ができない。パッチ(`angle_es3_samples.patch`)で、システムのドライバ自身がOpenGL ES 3以上を出しているときはこの制限をしないようにした。v3dは4サンプルを持つので、この変更は効かない。softpipeのWebGL 2で`renderbufferStorageMultisample`に2以上のサンプル数を与えるとエラーになる。描画バッファのアンチエイリアスは使わない(`kAntialiasingModeNone`)。
@@ -539,6 +547,9 @@ ChromiumのWebGLは、普通はGPUプロセスの中で動く。レンダラのB
 | `tools/browser/labels_angle.txt`、`exclude_angle.txt` | コンパイルするANGLEのgnのラベルと、外すソース |
 | `tools/browser/patches/angle_intermnode.patch`、`angle_es3_samples.patch` | ANGLEへのパッチ |
 | `application/browser/port/compat/ts_linux.c` | システムのEGLを返す`dlopen`と`dlsym` |
+| `application/browser/port/compat/ts_libc.c` | Cライブラリの浮動小数点数と文字列の変換を一度に1つだけ動かすラッパ(下) |
+
+ワーカーとページのスレッドが同時にWebGLを使うと、両方のスレッドで数値と文字の変換(`printf`の`%g`や`strtod`。ANGLEのシェーダの変換もこれを使う)が同時に動く。プログラムのCライブラリ(newlib)は、スレッドごとの作業域を持たないビルドで、変換に使う大きな整数の空きリストとdtoaの直前の結果をプログラム全体で1つ持つので、2つのスレッドが同時に変換すると空きリストの中身がおかしくなり、`_Balloc`で落ちた。ブラウザは、変換の入口(`_dtoa_r`、`_ldtoa_r`、`_strtod_r`、`_strtod_l`、`strtod`、`strtod_l`、`strtof`、`strtof_l`、`_strtodg_l`)をリンカの`--wrap`で包んでリンクする(`tools/browser/build.sh`)。包んだ関数は1つのロックを取って本物を呼び、dtoaの結果は、ロックを放す前に呼んだスレッドの領域にコピーして返す(`printf`はその後ろに精度の分まで0を書き足すので、その分の大きさを取る)。包まないでリンクするプログラム(`v8prog`など)では、包んだ関数は呼ばれず、`--gc-sections`で捨てられる。
 
 ブラウザを起動してWebGLのコンテキストを最初に作ったとき、コンソールに次の行が出る。
 
@@ -550,6 +561,13 @@ ChromiumのWebGLは、普通はGPUプロセスの中で動く。レンダラのB
 | `browser: webgl: WebGL N not on ANGLE (理由)` | コンテキストができなかった。WebGL 1ならCPUの実装に戻る |
 | `browser: webgl: no WebGL 2 (it needs ANGLE: make GL=1)` | WebGL 2を求められたが、ANGLEがない |
 | `browser: webgl: <名前> is not given to ANGLE` | ANGLEに渡せない`GLES2Interface`のメソッドが呼ばれた(一度だけ) |
+| `browser: webgl: [.WebGL-N]GL_INVALID_OPERATION: <関数>: <理由>` | ANGLEがコンテキストNにエラーを記録した。説明ごとに最初の1回だけ出す |
+| `browser: webgl: context N (WebGL 2, worker) in 5 s: 509 calls, 0 draws, 410 clears, 1 frames, ...` | コンテキストNの5秒間の数(上)。`page`はページのスレッド、`worker`はワーカーのスレッドのコンテキスト |
+| `browser: webgl: limits of WebGL 2: texture 16384, ...` と `browser: webgl: extensions of WebGL 2: ...` | 最初のコンテキストの限界値と拡張の一覧 |
+
+ANGLEのディスプレイの前に、Mesaのプラットフォームが`egl:`の行でV3Dを使うかどうかを言う(第13章13.8.3)。`egl: the V3D (v3d), ...`なら、WebGLの行の括弧の中は`Broadcom, V3D 7.1.7.0, OpenGL ES 3.0`になる。V3Dの確認が通らなかったときと、V3Dのないマシンでは、softpipeで描き、ページは同じに表示される。起動の行`gpufake=<パス>`は、DRMシムに実機のV3Dを模擬させ(ジョブは描かずに終わる)、ローダからv3dドライバの画面までをQEMUで通してから確認の失敗でsoftpipeに戻す。終わりにプラットフォームの選んだドライバと進んだ段階(`driver=v3d step=6`)をそのパスに書く(`test_blink_v3dfall`)。
+
+`GLES2Interface`のANGLEへの呼出しは、どれも時間を測り(`gl_angle.cc`の`Timed`)、スレッドごとに足す。エンジンのスレッドの1回りの内訳(14.7)の`WebGL`がこの時間である。
 
 ### 14.6.2 メディア要素のプレーヤとMedia Source Extensions
 
@@ -580,7 +598,7 @@ Raspberry Pi 5の実機でYouTubeの動画を開くと、広告の1本目の映�
 
 ### 14.6.3 Encrypted Media Extensions
 
-`navigator.requestMediaKeySystemAccess`、`MediaKeys`、`MediaKeySession`、要素の`setMediaKeys`と`encrypted`イベントは、BlinkのEMEの部分(`modules/encryptedmedia`の12のソースと17のバインディング)と、`platform/media`のCDMの部分(`WebEncryptedMediaClientImpl`、`WebContentDecryptionModuleImpl`、`CdmSessionAdapter`、`KeySystemConfigSelector`など)をそのまま使う。BlinkはEMEのエントリポイント(`blink::WebEncryptedMediaClient`)をフレームのクライアントに求めるが、このブラウザのフレームはそれを持たないので、パッチ`encrypted_media.patch`で`port/media/eme_tessronos.cc`のものを返す。それは、キーシステムの一覧(`media::KeySystemsImpl`)、CDMのファクトリ、許可(暗号化されたメディアは許し、マシンを識別する値は渡さない)を持つ。キーシステムは、組み込みのClear Key(`org.w3.clearkey`)と、利用者がWidevineのCDMを導入したときのWidevine(`com.widevine.alpha`、下記)である。CDMのファクトリは、Clear Keyにはメディアのライブラリの`AesDecryptor`を作り(`media::DefaultCdmFactory`)、WidevineにはライブラリのCDMの受け口(`media::CdmAdapterFactory`)で`media::CdmAdapter`を作る。
+`navigator.requestMediaKeySystemAccess`、`MediaKeys`、`MediaKeySession`、要素の`setMediaKeys`と`encrypted`イベントは、BlinkのEMEの部分(`modules/encryptedmedia`の12のソースと17のバインディング)と、`platform/media`のCDMの部分(`WebEncryptedMediaClientImpl`、`WebContentDecryptionModuleImpl`、`CdmSessionAdapter`、`KeySystemConfigSelector`など)をそのまま使う。BlinkはEMEのエントリポイント(`blink::WebEncryptedMediaClient`)をフレームのクライアントに求めるが、このブラウザのフレームはそれを持たないので、パッチ`encrypted_media.patch`で`port/media/eme_tessronos.cc`のものを返す。それは、キーシステムの一覧(`media::KeySystemsImpl`)、CDMのファクトリ、許可(暗号化されたメディアは許し、マシンを識別する値は渡さない)を持つ。キーシステムは、組み込みのClear Key(`org.w3.clearkey`)と、利用者がWidevineのCDMを導入したときのWidevine(`com.widevine.alpha`、下記)である。CDMのファクトリは、Clear Keyにはメディアのライブラリの`AesDecryptor`を作り(`media::DefaultCdmFactory`)、WidevineにはライブラリのCDMのインタフェース(`media::CdmAdapterFactory`)で`media::CdmAdapter`を作る。
 
 `KeySystemsImpl`は、メディアのクライアント(`media::MediaClient`)があるときだけ、Clear Key以外のキーシステムを登録のコールバック(`GetSupportedKeySystemsCB`)で尋ねる。そのため`eme_tessronos.cc`はメディアのクライアント(`BrMediaClient`)を置く。キーシステムを答えるほかは、型の可否(`IsDefaultDecoderSupportedVideoType`など)をクライアントがないときと同じに答えるので、再生できる型は変わらない。登録のコールバックは覚えておき、WidevineのCDMを導入したときと外したときに、新しい一覧でもう一度呼ぶ。ブラウザを起動し直さなくても、次の`requestMediaKeySystemAccess`から答えが変わる。
 
@@ -590,20 +608,20 @@ EMEは安全なコンテキスト(`https`のページ)にだけある。YouTube�
 
 #### 14.6.3.1 利用者が導入するWidevine
 
-WidevineのCDM(`libwidevinecdm.so`)はGoogleの独自のソフトウェアで、TessronOSにもブラウザにも同梱しない。リポジトリにも入れない。利用者が自分で導入したときだけ使える。LinuxのディストリビューションがChromiumに対して行うのと同じく、Raspberry Piの公式リポジトリ(<https://archive.raspberrypi.com/debian>)がRaspberry Pi OSに配っているパッケージ`libwidevinecdm0`(arm64)を、その配布の形のまま使う。CDMの中身は書き換えず、調べもしない。Chromiumの正規の受け口で読み込んで使うだけである。導入していなければ、`requestMediaKeySystemAccess('com.widevine.alpha', ...)`は従来どおり`NotSupportedError`で拒否される。
+WidevineのCDM(`libwidevinecdm.so`)はGoogleの独自のソフトウェアで、TessronOSにもブラウザにも同梱しない。リポジトリにも入れない。利用者が自分で導入したときだけ使える。LinuxのディストリビューションがChromiumに対して行うのと同じく、Raspberry Piの公式リポジトリ(<https://archive.raspberrypi.com/debian>)がRaspberry Pi OSに配っているパッケージ`libwidevinecdm0`(arm64)を、その配布の形のまま使う。CDMの中身は書き換えず、調べもしない。Chromiumの正規のインタフェースで読み込んで使うだけである。導入していなければ、`requestMediaKeySystemAccess('com.widevine.alpha', ...)`は従来どおり`NotSupportedError`で拒否される。
 
 導入はメニューの〈Widevineを導入...〉で行う。ブラウザはまずデータボックスのパネル7「Widevineの導入」(14.8)を出す。パネルは、WidevineがGoogleの独自のソフトウェアでTessronOSに同梱していないこと、入手元(Raspberry Piの公式リポジトリ)、利用者の実身に入れること、利用の条件は導入する前に利用者が確かめることを示す。〈導入〉を選んだときだけ取りに行き、〈取消〉とEscでは何も取らない。取得と展開は別のスレッドで行い(`port/media/br_widevine.cc`)、その間はページを使える。手順は次のとおりである。
 
-1. リポジトリのインデックス`dists/<配布>/main/binary-arm64/Packages`をHTTPSで取る。配布は`trixie`、なければ`bookworm`の順に見る。インデックスのうち`Package: libwidevinecdm0`で`Architecture: arm64`のものから、Debianの版の順序(dpkgと同じ比べ方)で最も新しいものを選び、`Filename`、`Size`、`SHA256`を読む。`Filename`は`pool/`で始まり、`..`を含まないものに限る。
+1. リポジトリのインデックス`dists/<配布>/main/binary-arm64/Packages`をHTTPSで取る。配布は`trixie`、なければ`bookworm`の順に見る。インデックスのうち`Package: libwidevinecdm0`で`Architecture: arm64`のものから、Debianのバージョンの順序(dpkgと同じ比べ方)で最も新しいものを選び、`Filename`、`Size`、`SHA256`を読む。`Filename`は`pool/`で始まり、`..`を含まないものに限る。
 2. パッケージ(`.deb`)をHTTPSで取り、大きさとSHA-256(BoringSSL)をインデックスの値と照らす。合わなければ何も入れない。転送でHTTPSでない所へ移されたときも取りやめる。
 3. `.deb`(arのアーカイブ)の`debian-binary`が`2.x`であることを確かめ、`data.tar.xz`をLZMA SDKのXZのデコーダ(Chromiumのチェックアウトの`third_party/lzma_sdk`。`tools/browser/build.sh`の`xz_lib`)で展開する。tarのアーカイブ(ustar、GNUの長い名前とpaxのパスを読む)から、`opt/WidevineCdm/`の下の`libwidevinecdm.so`と`opt/WidevineCdm/manifest.json`を取り出す。
-4. `manifest.json`を、Chromiumの`components/cdm/common/cdm_manifest.cc`の`IsCdmManifestCompatibleWithChrome`と`ParseCdmManifest`で確かめる。このブラウザが話すCDMのモジュール、インタフェース、ホストの版(`x-cdm-module-versions`、`x-cdm-interface-versions`、`x-cdm-host-versions`)を名乗らないCDMは入れない。
-5. 利用者ごとの普通の実身「Widevine CDM」を「ブラウザの保存域」と同じボリュームに作る。所有者はブラウザが代理するユーザ(`ob_get_crd`)、モードは`rw-------`で、レコード0にこの実身が何かを書いた文章、レコード1にライブラリ、レコード2にマニフェスト、レコード3に版、入手元、SHA-256を持つ。新しい箱は作らない。「ブラウザの鍵」(14.4.7.1)と同じく、どの仮身からも指されないので固定(`ob_lnk_obj`)を1つ付ける。
+4. `manifest.json`を、Chromiumの`components/cdm/common/cdm_manifest.cc`の`IsCdmManifestCompatibleWithChrome`と`ParseCdmManifest`で確かめる。このブラウザが話すCDMのモジュール、インタフェース、ホストのバージョン(`x-cdm-module-versions`、`x-cdm-interface-versions`、`x-cdm-host-versions`)を名乗らないCDMは入れない。
+5. 利用者ごとの普通の実身「Widevine CDM」を「ブラウザの保存域」と同じボリュームに作る。所有者はブラウザが代理するユーザ(`ob_get_crd`)、モードは`rw-------`で、レコード0にこの実身が何かを書いた文章、レコード1にライブラリ、レコード2にマニフェスト、レコード3にバージョン、入手元、SHA-256を持つ。新しい箱は作らない。「ブラウザの鍵」(14.4.7.1)と同じく、どの仮身からも指されないので固定(`ob_lnk_obj`)を1つ付ける。
 6. エンジンのスレッドで、「ブラウザの保存域」のレコード10のそのユーザの行(`<ユーザのUUID> <実身のUUID>`)を新しい実身に向け、前に導入した実身があれば消す。続けてキーシステムの一覧を作り直す。結果はメッセージ行に出し、導入できなかったときは理由をパネル1で通知する。
 
 メニューの〈Widevineを外す〉(導入していないときは灰色)は、パネル2で確かめてから、そのユーザの行と実身「Widevine CDM」を消し、キーシステムの一覧からWidevineを除く。
 
-CDMの読み込みは、最初にページがEMEを使ってキーシステムの一覧を作るときに行う。レコード10からそのユーザの実身を引き、マニフェストを上と同じく確かめてから、ライブラリのレコードをメモリに読み、`port/compat/ts_so.c`でプロセスに読み込む。これはLinuxの動的リンカと同じく、aarch64のELFの共有オブジェクトのセグメントを置き、再配置(RELR、RELA、PLT)を当て、GNU Cライブラリの関数の名前を`port/compat/ts_glibc.c`の肩代わりの関数にリンクし(求める版はGNU Cライブラリの版でなければならないが、動的リンカと同じく、弱いとマークされた版の要求は満たせなくてもよく、文字列表の文字列は`DT_STRSZ`の外でもオブジェクトの中にあれば読む)、スレッドローカルストレージをTLSの記述子で与え、初期化の関数を呼ぶ。名前は`libwidevinecdm.so`で、`dlopen`(`port/compat/ts_linux.c`)はこの名前で読み込んだものを返す。そのうえでメディアのライブラリの`media::CdmModule`が`dlopen`で開いてエントリポイント(`InitializeCdmModule_4`、`CreateCdmInstance`、`GetCdmVersion`など)を引き、初期化する。コンソールには`browser: widevine: CDM <CDMの版> loaded (manifest <版>)`と出る。読み込みは1回の起動に1度で、外した後もプロセスが終わるまでメモリに残る(一覧には出さない)。
+CDMの読み込みは、最初にページがEMEを使ってキーシステムの一覧を作るときに行う。レコード10からそのユーザの実身を引き、マニフェストを上と同じく確かめてから、ライブラリのレコードをメモリに読み、`port/compat/ts_so.c`でプロセスに読み込む。これはLinuxの動的リンカと同じく、aarch64のELFの共有オブジェクトのセグメントを置き、再配置(RELR、RELA、PLT)を当て、GNU Cライブラリの関数の名前を`port/compat/ts_glibc.c`の肩代わりの関数にリンクし(求めるバージョンはGNU Cライブラリのバージョンでなければならないが、動的リンカと同じく、弱いとマークされたバージョンの要求は満たせなくてもよく、文字列表の文字列は`DT_STRSZ`の外でもオブジェクトの中にあれば読む)、スレッドローカルストレージをTLSの記述子で与え、初期化の関数を呼ぶ。名前は`libwidevinecdm.so`で、`dlopen`(`port/compat/ts_linux.c`)はこの名前で読み込んだものを返す。そのうえでメディアのライブラリの`media::CdmModule`が`dlopen`で開いてエントリポイント(`InitializeCdmModule_4`、`CreateCdmInstance`、`GetCdmVersion`など)を引き、初期化する。コンソールには`browser: widevine: CDM <CDMのバージョン> loaded (manifest <バージョン>)`と出る。読み込みは1回の起動に1度で、外した後もプロセスが終わるまでメモリに残る(一覧には出さない)。
 
 キーシステムの記述は、Chromiumの`components/cdm/renderer/widevine_key_system_info.cc`の`cdm::WidevineKeySystemInfo`をそのまま使う。エンジンはWidevineを同梱しない構成(`enable_widevine`が偽)でビルドしているので、このソースはそのままではコンパイルできない。`port/media/widevine_ks_tessronos.cc`がその翻訳単位の中だけ`ENABLE_WIDEVINE`を真にして取り込む。コーデックと暗号化の方式はマニフェストのもの(`x-cdm-codecs`)で、ロバストネスはソフトウェアのもの(L3)だけである。音声は`SW_SECURE_CRYPTO`まで、映像は`SW_SECURE_DECODE`まで、ハードウェアで守るデコーダと`HW_SECURE_*`はない。セッションは一時的なものだけで、永続するライセンスは、ホストの検証とストレージのIDがないので扱わない(LinuxのChromeと同じ)。マシンを識別する値は使わない。
 
@@ -651,9 +669,10 @@ ChromiumのWebGPUは、レンダラのBlinkがDawnのワイヤ(コマンドを�
 
 - ワイヤのクライアントがフラッシュすると、溜めたコマンドの列をその場でサーバに渡す。サーバの答えは、コンテキストをバインドしたスレッド(ページのスレッドかワーカーのスレッド)のタスクとしてクライアントに渡し、続けてクライアントのイベントを処理する。ページのコールバックが新しいスタックで走るようにするためである。後で終わるサーバの仕事(バッファのマッピング、キューの仕事の終わり)は、残っている間2ミリ秒ごとにDawnのイベントを処理して見る。
 - アダプタは、DawnのOpenGL ESのバックエンドに、Mesaの`eglGetProcAddress`を渡して作る(`RequestAdapterOptionsGetGLProc`)。ライブラリを開くことはしない。ディスプレイはEGLの既定のディスプレイ(プラットフォーム`tessronos`)である。DawnのOpenGL ESのバックエンドが出すアダプタは互換の水準(compatibility)だけなので、ページが求めた水準によらず、互換の水準のアダプタを返す。ChromiumがOpenGL ESの上でWebGPUを動かすときと同じ扱いで、アダプタは`core-features-and-limits`の機能を持たない。OpenGL ES 3.1と`GL_EXT_color_buffer_float`(3.2なら要らない)が要る。
+- Dawnにアダプタを求める前に、システムのEGLがOpenGL ES 3.1のコンテキストを作れるかを、プロセスで1度だけ、そのためだけのスレッドで確かめる(`SystemHasGles31`)。作れなければDawnには求めず、アダプタはないと答える(ページの`requestAdapter()`はnullになる)。V3Dのv3dドライバは、カーネルがコンピュートのジョブを受け付けるときだけOpenGL ES 3.1になる(第13章13.3.4)。受け付けないときは3.0で、この場合になる。Mesaは、ドライバが持たない版のコンテキストを断るとき、作りかけのコンテキストを呼んだスレッドで一度現在のものにしてから壊し、前のコンテキストはMesaのGLの層でだけ戻す。以前はDawnがページのスレッドで`eglCreateContext`を呼んで断られていた(`eglCreateContext failed with EGL_BAD_MATCH`)。ページのスレッドではANGLEのコンテキストが現在のものになっているので、その状態をWebGLの描画の途中で動かさないようにした。
 - Dawnは、デバイスのコンテキストをロバストなアクセス(`EGL_CONTEXT_OPENGL_ROBUST_ACCESS`)付きで作る。softpipeは拡張を出すが、リセットの状態を持たないので、このコンテキストを断る。パッチ`dawn_context_robustness.patch`で、断られたときはロバストなアクセスなしで作り直す。範囲外の参照は、Tintがシェーダに入れる検査で防がれる。DawnはGLのコンテキストを使うときに前のコンテキストを覚えて戻すので、同じプロセスのANGLE(WebGL)とSkiaのGPUのコンテキストとぶつからない。
 - canvasの`webgpu`のコンテキストは、描くテクスチャを共有イメージとして作る。共有イメージのインタフェースは画素をメモリに持ち、メールボックスをテクスチャに関連付ける(`AssociateMailbox`)と、Dawnのデバイスにその大きさと形式(`bgra8unorm`か`rgba8unorm`)のテクスチャを作り、クライアントが予約した番号でサーバに入れる。合成はCPUで行う(14.6.1)ので、ページを描くとき、canvasは今のテクスチャの画素を求める。パッチ`gpu_canvas_context.patch`がBlinkにそのインタフェース(`g_webgpu_canvas_snapshot`)を足し、`webgpu_tessronos.cc`がテクスチャをCPUの読めるバッファにコピーし、マップして読む。テクスチャの間(フレームが終わって次のテクスチャを求める前)に描くときは、最後に読んだ画素を使う。`drawImage`や`toDataURL`が読むcanvasの画像も同じインタフェースから得る。
-- Blinkの側はDawnのワイヤのクライアントの型で書かれ、`ui/gl/buildflags.h`の`USE_DAWN`がそれを選ぶ。エンジンのgnの構成は`use_dawn = false`のまま作り(Dawnを入れると多くのソースのコマンドが変わり、組み直しになる)、生成したこのヘッダの`USE_DAWN`だけを1にする(`tools/browser/blink.sh gen`)。DawnとTintのソースは、Dawnを入れた別のgnの出力(`out/tessronos_dawn`、`DAWN=1 tools/browser/gngen.sh`)から取る。そこではOpenGL ESのバックエンドとワイヤだけを入れ、TintのSPIR-V、HLSL、MSLの出力、Perfetto、X11を外す。Tintの生成するソースはGoのジェネレータ(`tools/src/cmd/gen`)で作るので、Go 1.25をDawnの`tools/golang`の場所に置く。DawnのOpenGLの読込みの生成にはKhronosの`gl.xml`(OpenGL-Registry)とEGLのヘッダ(EGL-Registry)が要るので、DawnのDEPSが指す版を取る。
+- Blinkの側はDawnのワイヤのクライアントの型で書かれ、`ui/gl/buildflags.h`の`USE_DAWN`がそれを選ぶ。エンジンのgnの構成は`use_dawn = false`のまま作り(Dawnを入れると多くのソースのコマンドが変わり、組み直しになる)、生成したこのヘッダの`USE_DAWN`だけを1にする(`tools/browser/blink.sh gen`)。DawnとTintのソースは、Dawnを入れた別のgnの出力(`out/tessronos_dawn`、`DAWN=1 tools/browser/gngen.sh`)から取る。そこではOpenGL ESのバックエンドとワイヤだけを入れ、TintのSPIR-V、HLSL、MSLの出力、Perfetto、X11を外す。Tintの生成するソースはGoのジェネレータ(`tools/src/cmd/gen`)で作るので、Go 1.25をDawnの`tools/golang`の場所に置く。DawnのOpenGLの読込みの生成にはKhronosの`gl.xml`(OpenGL-Registry)とEGLのヘッダ(EGL-Registry)が要るので、DawnのDEPSが指すバージョンを取る。
 - `GL=1`でないブラウザも、Blinkが使うワイヤのクライアントのために`libdawn.a`をリンクする(リンクされるのはクライアントと関数表だけ)。`webgpu_tessronos.cc`はリンクせず(弱い名前で参照する)、`requestAdapter()`はnullを返す。
 - WebGPUのコンテキストを作る前に、Blinkはブラウザのプロセスに3DのAPIが止められていないかを尋ねる(`GpuDataManager`)。プラットフォームのブローカがこれをブラウザの側のサービス(14.4.5)に渡し、止めていないと答える。
 
@@ -668,6 +687,7 @@ ChromiumのWebGPUは、レンダラのBlinkがDawnのワイヤ(コマンドを�
 | 行 | 意味 |
 | --- | --- |
 | `browser: webgpu: adapter softpipe (OpenGL version OpenGL ES 3.1 Mesa 26.2.3)` | アダプタができた。V3Dで描くときは`softpipe`の代わりにv3dのレンダラ名になる |
+| `browser: webgpu: the system's OpenGL ES makes no context of 3.1` | システムのEGLがOpenGL ES 3.1のコンテキストを作れない(V3Dなど)。Dawnには求めない |
 | `browser: webgpu: no adapter on OpenGL ES` | アダプタができなかった(OpenGL ES 3.1がないなど) |
 | `browser: webgpu: no WebGPU (it needs Dawn on OpenGL ES: make GL=1)` | `GL=1`でないブラウザでWebGPUが求められた |
 
@@ -675,7 +695,7 @@ WebGLとWebGPUは同じスレッドで同じMesaのEGLを使う(WebGLはANGLEの
 
 #### 14.6.5.1 WebGL on WebGPU
 
-WebGLのコンテキストをWebGPUのデバイスの上で作る機能(`WebGLOnWebGPU`、ChromeでもChromiumの試作で既定で切)は、Chromeと同じく既定では出さず、`make GL=1`の版で起動の行`features=WebGLOnWebGPU`で出す。canvasの`webgl`のコンテキストは`WebGLRenderingContextWebGPU`になり、ANGLEのWebGPUのバックエンド(`libANGLE/renderer/wgpu`、シェーダはWGSLに変換)がDawnのワイヤのクライアントの上でGLの呼出しを行う。Blinkの側はChromiumの`webgl_rendering_context_webgpu_base.cc`のままで、GLとEGLの関数表(`gl::DriverGL`、`gl::DriverEGL`)は`ui/gl`をリンクして作る。Chromiumの試作がまだ扱わない呼出し(`renderbufferStorage`など、Chromiumのソースで`NOTIMPLEMENTED`のもの)は、Chromeと同じく何もしない。
+WebGLのコンテキストをWebGPUのデバイスの上で作る機能(`WebGLOnWebGPU`、ChromeでもChromiumの試作で既定で切)は、Chromeと同じく既定では出さず、`make GL=1`のビルドで起動の行`features=WebGLOnWebGPU`で出す。canvasの`webgl`のコンテキストは`WebGLRenderingContextWebGPU`になり、ANGLEのWebGPUのバックエンド(`libANGLE/renderer/wgpu`、シェーダはWGSLに変換)がDawnのワイヤのクライアントの上でGLの呼出しを行う。Blinkの側はChromiumの`webgl_rendering_context_webgpu_base.cc`のままで、GLとEGLの関数表(`gl::DriverGL`、`gl::DriverEGL`)は`ui/gl`をリンクして作る。Chromiumの試作がまだ扱わない呼出し(`renderbufferStorage`など、Chromiumのソースで`NOTIMPLEMENTED`のもの)は、Chromeと同じく何もしない。
 
 - ANGLEはWebGPUのデバイスを求めると、答えが来るまで`WaitAny`で待つ。Chromeでは答えをGPUプロセスからIOのスレッドで受けるが、このブラウザのワイヤのサーバは同じプロセスにあり、答えをページのスレッドの次のタスクで渡すので、待っているスレッドには届かない。そこで同期で作るWebGPUのコンテキスト(`CreateWebGPUGraphicsContext3DProvider`)は、サーバの答えをフラッシュの中でその場でクライアントに渡し、サーバの遅れた仕事(アダプタとデバイスの用意など)もフラッシュの中で終わるまで回す。
 - `gn`の構成の`use_dawn = false`のため、Blinkのこのソースだけ`USE_DAWN`を1にして読む(`port/webgl/webgl_webgpu_flags.h`、`flags.txt`)。ANGLEの`FramebufferWgpu.cpp`がlibc++の内部のヘッダ(`<__config>`)を読む所はパッチ`angle_framebuffer_wgpu.patch`で除く。
@@ -707,7 +727,7 @@ QEMUの`test_blink_codecs`は、HEVCのMainとMain10を3つの問いのどれも
 
 ページはウインドウの作業領域の全体に描く。ウインドウのタイトルは、表示しているページのタイトル(タイトルがなければアドレス)である。状態は、システムのメッセージ行に表示する。
 
-アドレスの欄と操作のボタンは、ページのウインドウとは別の小さなウインドウ(ツールパネル、外寸560×48)にあり、ページのウインドウの8ドット上に置く。ツールパネルは、ページのウインドウの従属ウインドウで、ウインドウマネージャが常にページのウインドウのすぐ前に保ち、ページのウインドウを移動すると一緒に移動する(10.4)。
+アドレスの欄と操作のボタンは、ページのウインドウとは別の小さなウインドウ(ツールパネル、外寸560×48)にあり、ページのウインドウの8ドット上に置く。ツールパネルは、ページのウインドウの従属ウインドウで、ウインドウマネージャが常にページのウインドウのすぐ前に保ち、ページのウインドウを移動すると一緒に移動する。ほかのアプリのウインドウが最前面の間は隠れ、ページのウインドウが最前面に戻ると、そのすぐ前に出る(10.4)。
 
 | 部品 | 動作 |
 | --- | --- |
@@ -717,7 +737,7 @@ QEMUの`test_blink_codecs`は、HEVCのMainとMain10を3つの問いのどれも
 | × | 読込みの中止。それまでに届いたものでページを表示する |
 | アドレスの欄 | クリックで入力を始める。Ctrl+Aで全体を選び、Enterで開き、Escで元に戻す |
 
-右ボタンは、まずページに渡す(押下と`contextmenu`のイベント)。ページが`preventDefault`でそれを自分のものにしたときは何も出さず、そうでなければウインドウのメニュー(「ブラウザのメニュー」)を出す。戻る、進む、再読込、アドレス入力、最初のページ、〈印刷...〉(14.7.5)、〈メディア〉(14.7.7)、〈拡大〉〈縮小〉〈等倍で表示〉〈全画面表示〉、〈編集〉と、ウインドウの共通のメニューがある。押した所にあるものの項目、〈リンクを新しいウインドウで開く〉〈リンクのアドレスをトレーへ複写〉〈画像を保存〉〈画像のアドレスをトレーへ複写〉〈選んだ文字をトレーへ複写〉は、リンク、画像、選んだ文字があるときだけ出る(ほかのときは`MN_HIDE`で隠す)。行き先のない〈戻る〉〈進む〉は灰色にする。エンジンのスレッドが1秒近く戻らないとき(読込み中など)は、ウインドウのスレッドがその場でメニューを出し、ページには渡さない。〈編集〉には〈トレーへ複写〉〈トレーへ移動〉〈トレーから複写〉〈すべて選択〉(Blinkの編集の命令、`Copy`、`Cut`、`Paste`、`SelectAll`)と〈ホームページに設定〉がある。〈ホームページに設定〉は、表示しているページのアドレスをページの実身の本文に書き(14.8)、メッセージ行に「ホームページに設定しました」と出す。キーでは、Alt+←で戻り、Alt+→で進む。Chromeと同じく、Backspaceでは戻らない(入力の途中でページを失わないため。Chromeは52版でやめた)。Ctrl+L、F5とCtrl+R、Ctrl+N(新しいブラウザ)、Alt+Home(ホームページ)、Ctrl+＋(`=`、`;`、テンキーの`+`のキー)とCtrl+−とCtrl+0(拡大、縮小、等倍)、Ctrl+ホイール(拡大と縮小)、F11(全画面)がある。
+右ボタンは、まずページに渡す(押下と`contextmenu`のイベント)。ページが`preventDefault`でそれを自分のものにしたときは何も出さず、そうでなければウインドウのメニュー(「ブラウザのメニュー」)を出す。戻る、進む、再読込、アドレス入力、最初のページ、〈印刷...〉(14.7.5)、〈メディア〉(14.7.7)、〈拡大〉〈縮小〉〈等倍で表示〉〈全画面表示〉、〈編集〉と、ウインドウの共通のメニューがある。押した所にあるものの項目、〈リンクを新しいウインドウで開く〉〈リンクのアドレスをトレーへ複写〉〈画像を保存〉〈画像のアドレスをトレーへ複写〉〈選んだ文字をトレーへ複写〉は、リンク、画像、選んだ文字があるときだけ出る(ほかのときは`MN_HIDE`で隠す)。行き先のない〈戻る〉〈進む〉は灰色にする。エンジンのスレッドが1秒近く戻らないとき(読込み中など)は、ウインドウのスレッドがその場でメニューを出し、ページには渡さない。〈編集〉には〈トレーへ複写〉〈トレーへ移動〉〈トレーから複写〉〈すべて選択〉(Blinkの編集の命令、`Copy`、`Cut`、`Paste`、`SelectAll`)と〈ホームページに設定〉がある。〈ホームページに設定〉は、表示しているページのアドレスをページの実身の本文に書き(14.8)、メッセージ行に「ホームページに設定しました」と出す。キーでは、Alt+←で戻り、Alt+→で進む。Chromeと同じく、Backspaceでは戻らない(入力の途中でページを失わないため。Chromeはバージョン52でやめた)。Ctrl+L、F5とCtrl+R、Ctrl+N(新しいブラウザ)、Alt+Home(ホームページ)、Ctrl+＋(`=`、`;`、テンキーの`+`のキー)とCtrl+−とCtrl+0(拡大、縮小、等倍)、Ctrl+ホイール(拡大と縮小)、F11(全画面)がある。
 
 戻る履歴と進む履歴(セッション履歴)は、エンジンがページの文書ごとの`HistoryItem`の列として持つ(最大50)。ページの`history.pushState`と`replaceState`、フラグメントへの移動(`#`)も項目になる。メインフレームの文書が確定したとき(`DispatchDidCommitLoad`)と、同じ文書の中で移ったとき(`DidFinishSameDocumentNavigation`)に、列の項目を足すか(普通の移動)、今の項目を置き換えるか(再読込、`replaceState`、`location.replace()`、ページの読込み中のフラグメントへの移動)、行き先の項目に移る(戻る、進む)。`history.length`はその数で、ページの`history.back()`、`forward()`、`go()`と`navigation.back()`、`forward()`、`traverseTo()`は、ブラウザの〈戻る〉〈進む〉と同じ処理を通る(`NavigateBackForward`。Navigation APIの移動はブラウザに頼む形なので、パッチ`navigation_api.patch`でそこへ回す)。行き先が今の文書の項目(文書の番号が同じ)なら、その文書の中で移り(`CommitSameDocumentNavigation`、`popstate`、`hashchange`、`navigate`のイベントが出る)、ほかの文書の項目ならアドレスを取得し直して、その`HistoryItem`を渡して確定する(`kBackForward`)。そうすると、項目の状態のオブジェクト(`history.state`)とスクロール位置が戻り、`performance`の移動の種類は`back_forward`になる。新しい文書には、同じオリジンの前後の項目をNavigation APIの項目(`navigation.entries()`)として渡す。
 
@@ -731,7 +751,7 @@ iframeの文書の確定には、移動を始めたときの読込みの種類(�
 
 アドレスの欄に打ったものは、Chromeのアドレスバーと同じく扱う。スキームのあるものはそのまま、点を含む名前(と`localhost`、IPアドレス、ポート付きの名前)はアドレスとし、インターネットの名前はHTTPSを先に試して繋がらなければHTTPにする。空白を含むもの、点のない語は既定の検索エンジン(Google)で検索する。ページが読めないときは、Chromeのエラーのページと同じ文言と、ネットワークのエラーの名前(`ERR_NAME_NOT_RESOLVED`など、`br_net_fetch_error`)と〈再読み込み〉のボタンを持つページを出す。
 
-ページの中の検索は、Ctrl+Fかメニューの〈頁の中を検索...〉で、探す文字をブラウザのデータボックスの問い合わせのパネル(14.7.3)で尋ねる。Chromeの検索バーと同じく、メインフレームの表示している文字から大文字と小文字を区別せずに探し(Blinkの`FindBuffer`、1000件まで)、見つけたものすべてに検索のマーカー(`TextMatch`の文書のマーカー)を付け、行った先の一つを動いているマーカー(Chromeと同じ橙色)にして表示の中ほどに出す。メッセージ行に「「語」 2 / 3 件」と出す。F3とCtrl+Gで次、Shiftを足して前へ移り(端から反対の端へ回る)、Escでマーカーを消す。
+ページの中の検索は、Ctrl+Fかメニューの〈ページの中を検索...〉で、探す文字をブラウザのデータボックスの問い合わせのパネル(14.7.3)で尋ねる。Chromeの検索バーと同じく、メインフレームの表示している文字から大文字と小文字を区別せずに探し(Blinkの`FindBuffer`、1000件まで)、見つけたものすべてに検索のマーカー(`TextMatch`の文書のマーカー)を付け、行った先の一つを動いているマーカー(Chromeと同じ橙色)にして表示の中ほどに出す。メッセージ行に「「語」 2 / 3 件」と出す。F3とCtrl+Gで次、Shiftを足して前へ移り(端から反対の端へ回る)、Escでマーカーを消す。
 
 拡大と縮小は、Chromeの倍率の段(25%から500%)で、メインフレームの倍率(`LocalFrame::SetLayoutZoomFactor`)を変える。`devicePixelRatio`もそれに従う(110%で1.100000023841858、Chromeと同じ値)。倍率はホストごとに覚え、同じホストのページを開くとその倍率にする(ブラウザが動いている間)。
 
@@ -746,6 +766,22 @@ iframeの文書の確定には、移動を始めたときの読込みの種類(�
 | ツールパネルの×、読込み中のEsc | 中止。取得の待ちをやめ、エンジンのスレッドが1秒以上戻らなければ、走っているスクリプトを終わらせる(V8の`TerminateExecution`はどのスレッドからでも呼べる) |
 
 ほかのイベントは列に入れ、エンジンのスレッドが順に処理する。閉じるときは、ウインドウの位置をページの実身に書いてから、ページとツールパネルのウインドウをすぐに消し、エンジンのスレッドに終わるよう伝える(取得の待ちをやめ、スクリプトを終わらせる)。3秒たっても終わらなければプロセスを終える。中止で本文の取得をやめたときは、表示していたページをそのまま残し、メッセージ行に「読み込みを中止しました」と出す。本文の取得(`br_net_fetch_sync`)は0.1秒ずつ待ち、そのたびに中止を確かめる。エンジンのスレッドは回るたびに、時刻と何をしているか(ループ、ページの本文の取得、ページの読込み、部品の待ち)を残す。5秒より長く戻らないとき、ウインドウのスレッドはそれをコンソールに出し(`browser: the engine's thread has not come round`。続けて戻らないときは、10秒、20秒、40秒と間を倍にして出す)、V8に割込みを頼んで、スクリプトが走っていればそのスタック(関数、スクリプト、行、桁)をエンジンのスレッド自身に出させる。あわせて、エンジンのスレッドのタスクの状態(`tk_ref_tsk`の状態、待ちの要因、待ち対象)と、条件変数で待っているか、ほかのスレッドが持つロックを待っているかを出す。後者は、プログラムを`pthread_cond_wait`、`pthread_cond_timedwait`、`pthread_mutex_lock`を包んで(リンクの`--wrap`、`build.sh`)リンクし、エンジンのスレッドが条件で待つとき、または取られているロックを待つときに、フレームポインタをたどって呼出し元の戻りアドレスを12段まで記録しておく。出たアドレスは、Linuxの側に残すシンボル付きのプログラム(`$OBJ/tessronos/browser.elf.sym`)で`addr2line -f -C`に引く。
+
+この報告は止まっていた最中の一瞬を見るだけなので、エンジンのスレッドは、回ってから次に回るまで(1回り)の時間の内訳を自分で数える(`br_blink.cc`の`watch_time`)。1回りが1秒以上かかったとき、回り終えたところで次の行を出す。時間はプロセスがシステムを呼ばずに読めるプロセッサのカウンタ(`cntvct_el0`)で測る。
+
+| 行 | 意味 |
+| --- | --- |
+| `browser: slow: M ms while 何をしていたか: tasks T ms (N), frame callbacks F ms, style, layout and paint L ms, outside these O ms; in all script S ms, collector C ms, WebGL W ms` | 1回りの時間Mの内訳。`tasks`はタスク(Blinkとネットワークの層が投げたもの)を走らせた時間と数、`frame callbacks`は`requestAnimationFrame`のコールバック、`style, layout and paint`はライフサイクルの更新、`outside these`はそれ以外(本文の取得の待ち、ビューのラスタ化など)。`script`はV8への外側の呼出し(スクリプトの実行、関数とイベントハンドラの呼出し。V8が自分で走らせるPromiseのジョブは入らない)、`collector`はこのスレッドでのV8のごみ集め、`WebGL`はANGLEとその下のOpenGL ES(softpipeかV3D)の呼出しの時間、`console`はコンソールへの書出し(下のリングの空きの待ち)の時間で、どれもMの一部である。ページのスクリプトから呼ぶWebGLは`script`の中にも数える |
+| `browser: slow:   a task of T ms (script S, collector C, WebGL W, console K) posted from 関数 (ファイル:行)` | その1回りの長いタスクの上位3つと、それぞれを投げた場所 |
+| `browser: slow: a task of T ms ...` | 0.5秒以上かかったタスク。終わったときに出す |
+
+WebGLをGPUに移して縮むのは`WebGL`の時間だけで、`script`のうちの残り、`style, layout and paint`、`outside these`のラスタ化は変わらない(ページのラスタ化は14.7.2のGanesh)。
+
+プロセスの標準出力と標準エラーは、システムのコンソール(`tm_putstring`)に渡る。コンソールはシリアルの線に1文字ずつ、割込みを止めて送り終えるまで戻らないので、Raspberry Pi 5の115200ボーでは、どのスレッドが書いても毎秒約11.5KBしか進まない。2026年10月16日の実機で、起動後に最初のページ(`https://www.tron.org`)を開くたびに出た`the engine's thread has not come round for 5.0 s: the page's parts coming`(13時40分29秒と13時45分8秒)では、その前後の約7秒間、コンソールの行が毎秒11.0〜11.7KB(行頭の時刻を除いた文字数)出ており、線の速さに張り付いていた。出ていたのはページの部品ごとの`net fetch`、`fetched`の行、`console: Mixed Content`の行、名前の引けなかった取得の行などで、止まりの報告もエンジンのスレッドが`printf`の中でコンソールのロックを待つところを捉えていた(呼出し元を引くと`BrURLLoader::Deliver`の`printf`)。このページはWebGLを使わず、ページのラスタ化はこの間に走らないので、この止まりはWebGLをGPUにしても変わらない。10月8日のV3Dが使えていたときの実機でも、同じ`the page's parts coming`の止まりが出ていた。
+
+QEMU(TCG、4コア)で同じページを開くと(`KT_SITE=https://www.tron.org NET=user`、2026年10月16日)、QEMUのシリアルは速いのでコンソールの待ちはなく(`console` 2〜10ミリ秒)、部品を待つ1回りの7079ミリ秒と9547ミリ秒の内訳は、スクリプトが2221ミリ秒と6091ミリ秒(`googletagmanager.com/gtag/js`のタイマーの1タスクが4041ミリ秒、ページの中のスクリプトが2325ミリ秒など)、スタイルとレイアウトと描画の記録が2881ミリ秒と1177ミリ秒、WebGLは0ミリ秒だった。QEMUのプロセッサは実機よりずっと遅いので、実機でのスクリプトとレイアウトの割合はこの行を実機で出して確かめる。
+
+コンソールへの書出しでスレッドが待たないように、ブラウザは`_write`を包んでリンクし(`build.sh`の`--wrap=_write`)、記述子1と2への書込みを512KBのリングに入れて戻る。リングの中身は専用のスレッドが来た順にコンソールへ渡す。書く側が待つのはリングがいっぱいのときだけで、行を捨てることはない(あふれそうなら書く側が線の速さまで待つ)。プロセスを終えるとき(終わりの`_exit`、閉じた後の時間切れ、V8の`abort`と`ExitProcess`、`atexit`)はリングが空になるまで最大で数秒待つ。プロセスを終わらせるデータアボート(V8のトラップハンドラが受けないもの)では、`ts_signal.c`がプロセスを止める前に、そのスレッドがリングの残りを自分でコンソールに出す(`br_console_flush_now`)ので、カーネルの`!EL0 fault!`の行より前に出る。データアボート以外の例外(未定義命令など)でカーネルがプロセスを止めたときは、リングに残っていた行は出ない。
 
 ### 14.7.1 描画
 
@@ -765,7 +801,7 @@ QEMU(TCG、4コア、1280×800)で、作業領域800×560のウインドウに�
 | 入力欄のキャレットの点滅3秒(7コマ) | 12.2ミリ秒、2.9ミリ秒 | 448,000、19 | 3,136千、1千 |
 | ホイールを8目盛り回す(15コマ、9コマ) | 16.3ミリ秒、18.3ミリ秒 | 448,000、398,224 | 10,734千、7,598千 |
 
-前の1コマの内訳は、箱の場面で描画3.3、コピー1.6、`dp_put_argb`3.5、`wm_obj_flush`2.3ミリ秒、後は描画1.4、`wm_obj_put`0.5ミリ秒である。スクロールでは、後の`wm_obj_put`(15.0ミリ秒)が前の`dp_put_argb`と`wm_obj_flush`の和(11.1ミリ秒)より長い。面からのコピーはウインドウマネージャのロックの中で行うので、組み立ての最中に呼ばれると、その組み立てが終わるのを待ってからコピーし、さらに次の組み立てを待つためである。前の版は1目盛りの入力のあとと次の描画の要求とでビューを2度描くことがあり(後の版では2度目は変わった所がないので描かない。15コマのうち6コマ)、8目盛りの合計では、ブラウザの時間は245ミリ秒から165ミリ秒に、組み立てた画素は約3割減った。
+前の1コマの内訳は、箱の場面で描画3.3、コピー1.6、`dp_put_argb`3.5、`wm_obj_flush`2.3ミリ秒、後は描画1.4、`wm_obj_put`0.5ミリ秒である。スクロールでは、後の`wm_obj_put`(15.0ミリ秒)が前の`dp_put_argb`と`wm_obj_flush`の和(11.1ミリ秒)より長い。面からのコピーはウインドウマネージャのロックの中で行うので、組み立ての最中に呼ばれると、その組み立てが終わるのを待ってからコピーし、さらに次の組み立てを待つためである。前のバージョンは1目盛りの入力のあとと次の描画の要求とでビューを2度描くことがあり(後のバージョンでは2度目は変わった所がないので描かない。15コマのうち6コマ)、8目盛りの合計では、ブラウザの時間は245ミリ秒から165ミリ秒に、組み立てた画素は約3割減った。
 
 ### 14.7.2 GPUでのラスタ化
 
@@ -788,7 +824,7 @@ GPUで描くかどうかと、描く速さは、コンソールに次の行で�
 
 | 行 | 意味 |
 | --- | --- |
-| `browser: gpu: Skia's GPU raster (Ganesh) on V3D 7.1..., OpenGL ES 3.1 Mesa 26.2.3` | ページをGPUで描く。括弧の後はレンダラ名と版(softpipeで`gpu=on`のときは`softpipe (Mesa)`) |
+| `browser: gpu: Skia's GPU raster (Ganesh) on V3D 7.1..., OpenGL ES 3.1 Mesa 26.2.3` | ページをGPUで描く。括弧の後はレンダラ名とバージョン(softpipeで`gpu=on`のときは`softpipe (Mesa)`) |
 | `browser: gpu: the machine has no GPU, ...` | GPUのないマシン(QEMU)で、プロセッサで描く |
 | `browser: gpu: softpipe (Mesa) draws on the processor, ...` | OpenGL ESがsoftpipeになった(V3Dの確認が通らなかったなど、13.8.3)。プロセッサで描く |
 | `browser: gpu: none (理由), ...`、`browser: gpu: off (gpu=off), ...` | EGLかGaneshが起動しなかった、`gpu=off`。プロセッサで描く |
@@ -817,11 +853,11 @@ MSEの試験のページ(14.10、H.264の640×360と426×240)を`NET=user`と`gp
 
 | パネル | 番号 | 部品 |
 | --- | --- | --- |
-| 頁からの知らせ(`alert`) | 1 | メッセージ5行、了解 |
-| 頁からの確認(`confirm`) | 2 | メッセージ5行、取消、了解 |
-| 頁からの問い合わせ(`prompt`) | 3 | メッセージ4行、入力欄(既定の値を入れて出す)、取消、了解 |
+| ページからの知らせ(`alert`) | 1 | メッセージ5行、了解 |
+| ページからの確認(`confirm`) | 2 | メッセージ5行、取消、了解 |
+| ページからの問い合わせ(`prompt`) | 3 | メッセージ4行、入力欄(既定の値を入れて出す)、取消、了解 |
 | 選択(`<select>`) | 4 | 一覧(選んである項目に印、`<optgroup>`の名前は【】で囲み、その中の項目は字下げする)、取消、了解 |
-| 許可の確認 | 5 | メッセージ4行(「起源がトレーの内容の読み取りを求めています。」「許可しますか。」)、拒否、許可 |
+| 許可の確認 | 5 | メッセージ4行(「<オリジン>がトレーの内容の読み取りを求めています。」「許可しますか。」)、拒否、許可 |
 | ファイルの選択(`<input type="file">`) | 6 | メッセージ2行、一覧(トレーにある仮身と、パネルに入れた仮身の名前)、取消、了解 |
 
 メッセージは半角で52文字(全角は2文字に数える)ごとに折り返し、入りきらない分は「…」で終える。`alert`、`confirm`、`prompt`の間は、ページのスクリプトもエンジンのスレッドもパネルの答えを待つ(Chromiumと同じく、ページはその間止まる)。`<select>`の一覧は、押した操作が終わってからの仕事として出し、選んだ項目を`HTMLSelectElement`に渡して`change`イベントを起こす。許可の確認はサービスのスレッドとは別のスレッドで尋ねるので、その間もほかのサービスは答える。起動の引数の`quit=`で終える時刻が来ると、出ているパネルは答えのないまま閉じる。
@@ -849,13 +885,13 @@ Chromiumでは、ページの中で始まったドラッグはブラウザのプ
 
 - ページがドラッグを始めると(`draggable`の要素、選んだ文字、リンク、画像。Blinkが`ChromeClient::StartDragging`を呼ぶ)、ブラウザは運ぶもの(`DataObject`)を覚え、それからのポインタの動きと離すことをドラッグのものとする。動くたびに`DragController::DragEnteredOrUpdated`で、ポインタの下の場所が受け取る操作を求め(`dragover`)、離した場所が受け取るなら`PerformDrop`(`drop`)、受け取らなければ`DragExited`にし、運んだ元に終わりを伝える(`dragend`)。
 - ドラッグ中にポインタがウインドウの外へ出ると(`OB_E_LEAVE`)、運ぶもののアドレスか文字を、デスクトップに文字として運ばせる(`DT_RQ_CARRY`の`DT_F_TEXT`)。文章のウインドウや文字を受け取るウインドウの上で離すと、そこに文字が入る。ページのドラッグは、受け取られれば複写、そうでなければ受け取られなかったとして終わる。
-- ほかのウインドウからページの上に落とされた仮身(`OB_E_DROP`)は、14.7.4と同じくそれぞれの実身を1つのファイルにして、文章のウインドウから運ばれた文字(`OB_E_TEXT`)は`text/plain`にして、落とされた場所に外から運ばれたものとして落とす。ページが受け取らないときは、落とした側に「この頁はここでは受け取りません」と答える。
+- ほかのウインドウからページの上に落とされた仮身(`OB_E_DROP`)は、14.7.4と同じくそれぞれの実身を1つのファイルにして、文章のウインドウから運ばれた文字(`OB_E_TEXT`)は`text/plain`にして、落とされた場所に外から運ばれたものとして落とす。ページが受け取らないときは、落とした側に「このページはここでは受け取りません」と答える。
 - 落としたファイルには、File System Accessの受け渡しのトークン(`FileSystemAccessDataTransferToken`)を付ける。ページが`DataTransferItem.getAsFileSystemHandle()`を呼ぶと、トークンからそのファイルのバイト列を持つファイルのハンドルを返す(`port/blink/file_system_access_tessronos.cc`)。落としたファイルの隔離されたファイルシステムは持たないので、`webkitGetAsEntry()`はnullを返す。
 - ページが受け取らないファイルや文字を落としても、そのファイルのページに移ることはしない。
 
 ### 14.7.7 メディアセッション
 
-`navigator.mediaSession`は、Blinkのモジュール(`modules/mediasession`)をそのまま使い、ブラウザのプロセスが持つ`MediaSessionService`を`port/blink/services_tessronos.cc`が持つ。フレームごとに、再生しているもの(タイトル、演奏者)、再生の状態、受け付ける操作(`setActionHandler`)、操作を伝える先を覚える。システムにはメディアのキーがないので、操作はブラウザのメニューの〈メディア〉(〈再生/一時停止〉、〈前の曲〉、〈次の曲〉、〈停止〉)から与える。メニューで選ぶと、再生中のセッション、なければ最後に何かを通知してきたセッションに操作を伝え、メッセージ行に「「題」に伝えました」と出す。〈再生/一時停止〉は、セッションが再生中なら`pause`、そうでなければ`play`である。その操作を受け付けていないときは「この頁はその操作を受け付けていません」と出す。
+`navigator.mediaSession`は、Blinkのモジュール(`modules/mediasession`)をそのまま使い、ブラウザのプロセスが持つ`MediaSessionService`を`port/blink/services_tessronos.cc`が持つ。フレームごとに、再生しているもの(タイトル、演奏者)、再生の状態、受け付ける操作(`setActionHandler`)、操作を伝える先を覚える。システムにはメディアのキーがないので、操作はブラウザのメニューの〈メディア〉(〈再生/一時停止〉、〈前の曲〉、〈次の曲〉、〈停止〉)から与える。メニューで選ぶと、再生中のセッション、なければ最後に何かを通知してきたセッションに操作を伝え、メッセージ行に「「題」に伝えました」と出す。〈再生/一時停止〉は、セッションが再生中なら`pause`、そうでなければ`play`である。その操作を受け付けていないときは「このページはその操作を受け付けていません」と出す。
 
 ### 14.7.8 複数のウインドウとピクチャインピクチャ
 
@@ -863,7 +899,7 @@ Chromiumでは、ページの中で始まったドラッグはブラウザのプ
 
 - openerを持つウインドウ(`window.open`、文書のピクチャインピクチャ)は、同じエンジンの別のページにする(`br_blink.cc`の`br_open_window`)。BlinkがChromeClientの`CreateWindowDelegate`で新しいウインドウを求めると、開いた側の閲覧コンテキストのグループとエージェント(`AgentGroupScheduler`、ウインドウのエージェントのファクトリ)を受け継いだ`Page`とメインフレームを作る。フレームはopenerを開いた側にして初期化するので、最初の空の文書は開いた側のオリジンを持ち、開いた側のスクリプトがその文書を読み書きできる。新しいウインドウの`about:blank`への移動は、最初の空の文書のままにする。ほかのアドレスへの移動は、そのウインドウのページがアプリケーションに頼み、アプリケーションが取得して読み込む。
 - アプリケーション(`br_main.cc`)は、そういうページごとに、ツールパネルを持たない普通のウインドウを作る。ウインドウの大きさは、ページが求めたもの(`window.open`の`width`と`height`、ピクチャインピクチャの`width`と`height`)、なければ開いた側と同じである。ウインドウの通知はブラウザのポートにウインドウごとの番号で届き、キー、ボタン、ポインタの動き、ホイールはそのページに渡る。ページの入力欄にフォーカスがあるときのキーは、ページのウインドウと同じく、かな漢字変換を通る。変換は一つで、最後にキーを打ったウインドウのページに、確定した文字と組み立て中の文字を渡し、候補の一覧もそのウインドウに描く。ほかのウインドウで打ち始めたり押したりすると、組み立て中の文字はもとのウインドウのページで確定する。ピクチャインピクチャのウインドウ(文書のものと動画のもの)は浮かぶウインドウ(`WM_ATTR_FLOAT`、10章)で、ほかのウインドウを前に出しても、その前に出たままである。ページの描画は、ページのウインドウと同じく、変わったところだけを作業領域の面に描いてウインドウに出す。タイトルバーにはページのタイトルを出す。ウインドウを閉じるとページを外し(`Page::WillBeDestroyed`)、開いた側からは`closed`が真に見える。ページのスクリプトが`window.close()`を呼ぶと(スクリプトが開いたウインドウだけ、Blinkが許す)、ウインドウを閉じる。開いた側のページがほかへ移ると、そのピクチャインピクチャのウインドウを閉じる。
-- openerを持たないウインドウ(`target="_blank"`のリンクは既定でこれ、`window.open`の`noopener`)は、ブラウザのプログラム(`SYSDEF_PROG_BROWSER`)をそのアドレスで起動し、別のプロセスのブラウザのウインドウとして開く。そのブラウザはアドレスの欄、履歴、かな漢字変換を持つ普通のウインドウである。起動する前に、Cookie、ページの保存域、HTTPのキャッシュを書き出しておき、新しいブラウザが今の状態から始まるようにする。プロセスの間で保存したものを同時に書き戻すと後から書いたほうが残るのは、ページの実身を2つ開いたときと同じである。`window.open`はnullを返す。
+- openerを持たないウインドウ(`target="_blank"`のリンクは既定でこれ、`window.open`の`noopener`)は、ブラウザのプログラム(`SYSDEF_PROG_BROWSER`)をそのアドレスで起動し、別のプロセスのブラウザのウインドウとして開く。そのブラウザはアドレスの欄、履歴、かな漢字変換を持つ普通のウインドウである。起動する前に、Cookie、ページの保存域、HTTPのキャッシュを書き出しておき、新しいブラウザが今の状態から始まるようにする。エンジンのスレッドは変わった分を渡すだけで(`br_store_flush_async`)、書き込みはストアのスレッドが行い(14.8.1)、新しいブラウザを起動するスレッドがその終わりを10秒まで待つ(`br_store_wait`)。以前はエンジンのスレッドで全体を書き直しており、実機のSDカードではその間(数秒)ページが止まっていた。プロセスの生成(`ob_cre_obj`の`OB_T_PROCESS`)は、動いているブラウザのプログラムのページを共有するので、ヘッダのほかは読まない(5.1)。共有する前は約190MBのプログラムを新しい空間に読むのでQEMUで約3秒、実機のSDカードでは数十秒かかっていた。QEMUでシステムボリュームをSDカードに置いて測ると、リンクを押してから新しいブラウザのプロセスができるまでが、共有の前は235秒、共有の後は0.32秒(うちストアの書き込みを待つのが0.27秒、プロセスの生成が13ミリ秒)であった。生成は、そのために作るスレッド(`br_main.cc`の`apart_thread`)で行い、エンジンのスレッドはその間もページを動かし続ける。以前はエンジンのスレッドで生成を待ち、約7秒止まっていた。生成の途中でプロセスを終えると生成の呼出しが中断されるので、プロセスの終了(`apart_wait`)とウインドウを閉じたときの強制終了は、生成が終わるのを待つ。リンクを押してから新しいブラウザが最初のページを求めるまでは、QEMUで約5.5秒である(生成が約3.1秒、新しいブラウザの立ち上がりが約2.4秒)。プロセスの間で保存したものを同時に書き戻すと後から書いたほうが残るのは、ページの実身を2つ開いたときと同じである。`window.open`はnullを返す。
 - 利用者の操作(クリックやキー)の直後でない新しいウインドウの求めは、ポップアップとして開かない。文書のピクチャインピクチャは、Blinkが利用者の操作を確かめる。
 - 文書のピクチャインピクチャは、Blinkのモジュール(`modules/document_picture_in_picture`)の`PictureInPictureControllerImpl`をそのまま使い、そのウインドウのページを上のとおりに作る。
 
@@ -895,6 +931,30 @@ Chromiumでは、ページの中で始まったドラッグはブラウザのプ
 
 ページの実身のアドレスは、レコード0の文章の本文である。ブラウザは本文のうち、アドレスである最初の行(`://`を含む行か、`about:`か`www.`で始まる行。全角の英数字は半角として読み、前後の空白は除く)を開く。そのため、基本文章編集でアドレスを書き換えた実身や、URL仮身と同じように文章にアドレスを書いた実身は、書いたアドレスのページを開く。このアドレスが実身のホームページである。リンクでページを移っても、戻る、進む、再読込をしても、実身は書き換えない。メニューの〈編集〉〈ホームページに設定〉を選んだときだけ、本文を表示しているページのアドレスの1段落に書き直し、メタデータ`webBrowser`にそのページのタイトルを書く。メタデータの`window`には、ウインドウを閉じるときにウインドウの位置と大きさを書く。戻る履歴と進む履歴は実身に持たず、開くたびに空から始める(ホームページを開く実身に前の回の履歴を持ち越しても、つながりのない履歴になるため)。本文にアドレスがない以前の実身は、メタデータ`webBrowser`の`url`を開く。以前の実身が持っていた`url`、`back`、`forward`は読まず、ホームページを設定するときに取り除く。ページの実身の仮身を開くと、デスクトップがプログラム「ブラウザ」をその実身のUUIDを引数にして起動し、ブラウザは実身のアドレスのページを開く。原紙のアドレスは`https://www.tron.org`なので、原紙から作ったページの実身は最初にトロンフォーラムのページを開く。アドレスを持たない実身は空白のページ(`about:blank`)を開く。実身を指定せずに起動したときは、ブラウザの説明のページ(`about:home`)を開く。同じページの実身をもう一度開くと、表示しているウインドウを前面に出す。
 
+### 14.8.1 ストアの保存
+
+Cookie、`localStorage`、IndexedDB、HTTPキャッシュ、Cache Storageなど、ブラウザが次の起動に持ち越すもの(ストア)は、上の3つの実身のレコードに置く(`port/net/br_store.cc`)。ストアはキーとバイト列の組(エントリ)の集まりで、全体を1つとして保存するストアは空のキーの1エントリとして扱う。
+
+レコードはログの形(`BRS2`)である。先頭の32バイトがヘッダで、マジック、世代、有効なログの長さ、ヘッダのCRC-32を持つ。その後ろに、エントリの追加(put)と削除(del)が、種類、世代、キーと値の長さ、全体のCRC-32を持つ20バイトのヘッダとともに並ぶ。
+
+- 変わった分の保存は、ログの末尾にエントリを書き足してから、新しい長さのヘッダを書く。ヘッダを書く前に電源が切れても、前のヘッダの長さまでが前の保存のまま読める。
+- ログがエントリの中身の2倍(と1MB)を超えたとき、全体を1つとして保存するストアを保存するとき、前の形のレコードしかないときは、すべてのエントリを、ストアのもう1つのレコード(レコード番号に16を足したもの。「ブラウザの保存域」なら17〜24)に次の世代で書き直し、最後にそのヘッダを書いてから、元のレコードを空にする。読むときは、2つのレコードのうちヘッダの正しい、世代の大きいほうを使う。どの時点で電源が切れても、前の保存か新しい保存のどちらかが読める。
+- 以前のブラウザの形のレコード(`BRS1`。マジック、長さ、CRC-32、中身)は空のキーのエントリとして読み、次の保存で新しい形をもう1つのレコードに書く。パスワードとパスキー(レコード9)、Widevineの実身(レコード10)、CDMのファイル(レコード11)は、これまでどおり`BRS1`の形でその場に書く。
+
+保存はストアのスレッドが行う。エンジンのスレッドは保存するものを作って渡すだけである。
+
+| ストア | 保存の単位 | 保存するものを作る場所 |
+| --- | --- | --- |
+| Cache Storage(`caches`) | キャッシュ(キー`c`と番号)と項目(キー`e`と番号)。番号は作った順で、16桁の16進数のキーの順に読み戻すと元の順になる。前の保存から作られたもの、本文を読み終えたもの、消えたものだけを書く | サービスのスレッド(`MakeDelta`) |
+| HTTPキャッシュ(`cache`) | キャッシュのエントリ(キーはキャッシュのキー、値は`BRH2`と3つのストリーム)。ストリームの大きさと、ヘッダとメタデータのハッシュが前の保存と同じエントリは書かない。走査のほかにも開かれているエントリ(本文を受信中か、読んでいるところ)は書かずに次の保存に回し、ストアにある前の保存のエントリはそのまま残す | ネットワークのスレッド(`CacheDeltaOnNet`) |
+| そのほか(`cookie`、`storage`、`indexeddb`、`quic`など) | 全体 | エンジンのスレッド(登録した関数)。前の保存とCRC-32と長さが同じなら書かない |
+
+エントリ単位のストアは、変わってから決めた時間(Cache Storageは2秒、HTTPキャッシュは1分)の後に、エンジンのスレッドの`br_store_tick`が変わった分を求め(`br_store_register_keyed`の関数)、ストアはエントリのあるスレッドで変わった分を作って`br_store_answer`で渡す。エンジンのスレッドは待たない。終了時(`br_store_flush_all`)と別のプロセスのブラウザを起動するとき(`br_store_flush_async`と`br_store_wait`)は、すべてのストアの変わった分を求め、書き終わるのを待つ。このプロセスの中の実身の読み書きは1つのロックで順に行い、別のプロセスのブラウザが書き込みのために開いている実身は、開けるまで5秒まで繰り返す。
+
+保存のたびに、コンソールに`store <名前> saved`の行で、エントリ単位のストアは変わったエントリの数、書いたバイト数、書き直したかどうか(`afresh`)、かかった時間を出す。試験`test_blink_cachekeep`は、Cache Storageに512KBの応答を24個入れて保存した後に小さい応答を1つ足し、次に起動したブラウザが25個を本文ごと読み戻すことを確かめる。
+
+HTTPキャッシュのストアは、2026年10月16日まで、本文を受信中のエントリもそのとき届いていた分だけで保存していた。次の起動ではそれが完全な応答として返り、Googleマップでは、途中で切れたスクリプト(`Uncaught SyntaxError: Unexpected end of input`)、WebAssemblyのモジュール(`CompileError: ... extends past end of the module`)、アイコンの書体(`OTS parsing error`)になった。切れたスクリプトはメニューのボタンを使えるようにする部分を含み、ボタンは`disabled`のまま、押しても`pointerdown`と`pointerup`だけが届き(使えないフォームの部品には`mousedown`と`click`を送らない)、メニューは開かなかった。いまは、使用中のエントリを保存しない。読み戻すときは、値が`BRH2`で始まらないエントリ(前の形式のもので、途中で切れたものがどれか分からない)と、200の応答で本文の長さが`Content-Length`と違うエントリ(キャッシュ自身が途中で切れたと印を付けたものは除く。それは範囲の要求で残りを求める)を捨て、次の保存でストアからも消す。コンソールの`http cache: N entries read back, M dropped`の行にその数が出る。Cache Storageは、本文をBlobから読み終えた項目だけを本文ごと保存するので、この問題はない。試験`test_blink_cachecut`がこれを確かめる。QEMU(`NET=user KT_SITE=https://www.google.com/maps KT_SITE_CLICK=162,141`)では、修正の後、ボタンは使えるようになり、押すと`pointerdown`から`click`までがChromeと同じ順にボタンに届き、設定のモジュール(`exm=AlIQtb,...`)を読み込んでスタイルを足す。ただし、Chromeではその直後(3ミリ秒)に足されるメニューのパネル(`div.Gs6lwf`)が、60秒待っても足されない。例外やコンソールの出力はない。ページはまだHTTP/3で書体や部品を読み込んでいる最中で(1本あたり毎秒10〜20KB、応答のヘッダを30秒待つ要求もある)、そのことと関係があるかは分かっていない。その後、パネルが足されないのは、地図の部品が置いたWebGL 2のフェンスがいつまでも完了せず、ページの初期化が止まっていたためと分かった(14.6.1)。QEMUで、ページに差し込んだスクリプトから見ると、Chromeでは読み込みから約1.5秒で始まる入力ツールと残りのモジュールの読み込みが、クリックまで始まらず、マップは`ActionFlow error: hung`を報告していた。HTTP/3の遅さとは関係がなかった。修正の後、QEMU(`GL=1`、softpipe)では、入力ツールと残りのモジュールがクリックを待たずに読み込まれ、メニューのボタンを押すとパネル(`div.Gs6lwf`)が足された(softpipeで描くので遅く、押してから約58秒かかった)。このときマップは`invalid-render-detected timer; glError:1282`も報告していた。1282は`GL_INVALID_OPERATION`である。名前の`timer`はマップが描画の正しさをタイマで調べることを指し、時間の問合せ(`EXT_disjoint_timer_query`)とは関係がなかった。この拡張はページに出ていない(14.6.1)。ANGLEのエラーの説明をコンソールに出すようにして(14.6.1)見ると、エラーを残していたのはWebGL 2の`drawBuffers`で、ANGLEは`GL_INVALID_OPERATION: glDrawBuffersEXT: Command requires an extension.`と記録していた。それを直すと、次はインスタンス描画が`glDrawElementsInstancedANGLE`で同じエラーを残した。どちらも、`GLES2Interface`の拡張の名前のメソッドを、OpenGL ES 3のコンテキストでも拡張の関数に渡していたためである(14.6.1)。フェンスが完了しなかった間は、地図の部品が描画の確認まで進まず、このエラーも出なかった。フェンスを直した後は、マップがこのエラーを見て描画が壊れていると判断し、地図を描くのをやめた。実機では地図が黒くなった(2026年10月17日のイメージ)。コアの関数に渡すように直した後、QEMU(`GL=1`、softpipe)では`glError`も`invalid-render-detected`も出なくなった。ただしQEMUでは、DawnがsoftpipeのOpenGL ES 3.1でWebGPUのアダプタを作れるので、マップはWebGPUで地図を描こうとし、地図の部分は黒いままである。WebGPUを止める(`features=-WebGPU`)と、WebGLで地図が描かれる。実機のV3DはOpenGL ES 3.0なので、WebGPUのアダプタはなく、マップはWebGLで描く。ところが、`drawBuffers`などを直したイメージでも、実機では地図が消えた(`glError`も`invalid-render-detected`も出ない)。WindowsのChromeをヘッドレスで動かし、同じ注入スクリプトで調べると、マップは地図をページのスレッドではなくワーカー(`mc0`)で描いていた。地図のcanvasを`transferControlToOffscreen`でワーカーに渡し、ワーカーの`OffscreenCanvas`のWebGL(WebGPUのアダプタがあればWebGPU)で描く。ページのスレッドのWebGLは小さな試しのコンテキストだけである。このブラウザでは、こうしてワーカーが描いたフレームが、ページのcanvas(プレースホルダ)に一度も出ていなかった(14.6.1)。フェンスを直す前は、マップの初期化がフェンスの待ちで止まり、地図を画像のタイルで描いていた。直した後は、ワーカーのベクタの地図に進んで、そのフレームが出ないので地図が消えた。QEMUではsoftpipeが遅く、マップがタイルのまま描いていたので、地図は出ていた。ただしsoftpipeのOpenGL ES 3.1でWebGPUのアダプタができるときは、マップがワーカーのWebGPUを使い、地図は黒かった。プレースホルダにフレームを渡すようにした後、QEMUでは、ワーカーのWebGLとWebGPUで描いた試験のページのcanvasが表示された。
+
 ## 14.9 未対応のもの
 
 - 移植していないWebのインタフェースは、その機能を持たないブラウザと同じく、グローバルのプロパティが`undefined`になる。それらのインタフェースを返す`navigator`などの属性と操作の扱いは14.4.3にある。
@@ -916,7 +976,7 @@ Chromiumでは、ページの中で始まったドラッグはブラウザのプ
 | `test_script`、`test_skia` | V8でJavaScriptとWebAssemblyを実行する、Skiaで描いた図形と日本語をウインドウに出す |
 | `test_jit` | `tests/uprog/v8prog.cc`を引数`bench`で起動し、再帰、型付き配列のふるい、オブジェクト、文字列のループと、WebAssemblyのループを実行させる。値が正しく、再帰とふるいの関数がMaglevかTurbofanの機械語になったこと(`%GetOptimizationStatus`)を確かめる。続けて`bench --jitless`で同じループをインタプリタで実行させ、起動から終了までの時間が機械語の版の2倍を超えることを確かめる |
 | `test_browser`、`test_blink` | リンクと転送をたどり、ページを移ってもページの実身の本文とメタデータが変わらないこと、`sethome`の行(メニューの〈ホームページに設定〉と同じ処理)で本文がそのページのアドレスになり、次に開くとそのページから始まることを確かめる、Blinkでスタイルシートとスクリプトのあるページを組んで描く、画像4種類、Cookie、`localStorage`、canvasの2D |
-| `test_blink_input` | 入力欄への入力とフォームの送信、ホイールのスクロール、かな漢字変換、`target="_blank"`のリンクを別のプロセスのブラウザが開くこと。戻ったフォームの欄は打った文字を保つ(Chromeと同じ) |
+| `test_blink_input` | 入力欄への入力とフォームの送信、ホイールのスクロール、かな漢字変換、`target="_blank"`のリンクを別のプロセスのブラウザが開くこと(押してから新しいブラウザがページを求めるまでの時間をコンソールに出す。待つのは20秒まで)。戻ったフォームの欄は打った文字を保つ(Chromeと同じ) |
 | `test_blink_spa` | 単一ページのアプリケーションのセッション履歴。`replaceState`、`pushState`、フラグメントの項目、Alt+←と→、ページの`navigation.back()`と`history.go()`、`popstate`と`hashchange`、別の文書から戻ったときの状態のオブジェクトとスクロール位置とNavigation APIの項目、アドレスの欄が追いつくこと(`addr=`の行で欄が出したアドレスを書き出す) |
 | `test_blink_ui` | リンクの上のアドレスをメッセージ行に出す、右ボタンの`contextmenu`、Ctrl+＝とCtrl+0の拡大(`devicePixelRatio`)、Ctrl+A・Ctrl+C・Ctrl+Vのトレーを通した複写、`requestFullscreen`とEsc、Ctrl+クリックで別のプロセスのブラウザ、`beforeunload`の確認(取消と了解) |
 | `test_blink_face` | ページから見えるブラウザの姿(14.4.12の表)をコンソールに書き出す。ChromeのLinux版が出さない`navigator.share`、`CSS.animationWorklet`、Content Indexが既定で見えないこと。`serif`が`Noto Serif JP`と同じ幅で`sans-serif`と違い、`monospace`が`Noto Sans Mono CJK JP`と同じ幅でラテン文字がどれも同じ幅であること |
@@ -928,15 +988,16 @@ Chromiumでは、ページの中で始まったドラッグはブラウザのプ
 | `test_blink_speech` | マイクに半秒の無音、英語の文を話した音(`tests/ktest/data/speech_hello.raw`、Fliteで作った16kHzのモノラル)、無音を渡し、認識が`audiostart`、`soundstart`、`soundend`、`audioend`、`end`を順に通知して「hello」を含む確定した結果を答えること。続けて、声が`ja-JP`(既定)と`en-US`の2つで、日本語と英語の文がそれぞれ鳴る時間をかけて`end`で終わり、話している間に`cancel()`した発話が`interrupted`で終わり、その後に並べた発話が話されないこと |
 | `test_blink_wgw` | `make GL=1`のとき、起動の行`features=WebGLOnWebGPU`でWebGLのコンテキストができ、緑で消した色と、全体を覆う赤い三角形を`readPixels`で読み返せ、`getError`が0であること |
 | `test_blink_glgpu` | `make GL=1`のとき、緑で消したWebGLのcanvasを`copyExternalImageToTexture`でWebGPUのテクスチャにコピーして緑が読め、赤で消したWebGPUのcanvasをWebGLの`texImage2D`でテクスチャにしてフレームバッファから赤が読めること |
+| `test_blink_v3dfall` | `make GL=1`のとき、`/v3dfall`のページを`gpufake=`で開く。DRMシムが模擬したV3Dで、Mesaのプラットフォームがv3dドライバを選び、画面を作り、確認のフレームが合わずにsoftpipeに戻ること(`driver=v3d step=6`)、その後もWebGL 2のcanvasが赤で消えて読め、レンダラ名が`softpipe`で、2Dのcanvasも描けること |
 | `test_blink_webnn` | 起動の行`features=MachineLearningNeuralNetwork`で`navigator.ml`があり、コンテキストの限度にfloat32とint32があり、定数との行列積から3を引いて`relu`を通したもの、行ごとの`softmax`、3×3の画像の`conv2d`と`maxPool2d`、int32の和とfloat32への変換が、計算どおりの値になること |
-| `test_blink_aa` | WebGLの白い三角形を黒に描き、`antialias`が真のときは`getContextAttributes().antialias`が真で`SAMPLES`が4、縁に中間の色の画素があり、偽のときは縁が硬いこと。`make GL=1`の版(ANGLEがsoftpipeの上)では、softpipeがANGLEにマルチサンプルを出さないので、`antialias`が偽になってもよい |
+| `test_blink_aa` | WebGLの白い三角形を黒に描き、`antialias`が真のときは`getContextAttributes().antialias`が真で`SAMPLES`が4、縁に中間の色の画素があり、偽のときは縁が硬いこと。`make GL=1`のビルド(ANGLEがsoftpipeの上)では、softpipeがANGLEにマルチサンプルを出さないので、`antialias`が偽になってもよい |
 | `test_blink_ai` | `LanguageDetector`が使え(`available`)、日本語の文を`ja`、英語の文を`en`と確信度0.5より上で判定し、`Translator`、`Summarizer`、`LanguageModel`は`unavailable`で、`Summarizer.create()`が断られ、`Writer`、`Rewriter`、`Proofreader`が無いこと |
 | `test_blink_pad` | 試験のソフトウェアのUSBコントローラ(6.3.2、`device/usb/vhc.c`)に挿したLogitech Dual Action(DirectInputのモード)が、ボタンを押すまでは見えず、押すと標準の配置で現れ(ボタン16、軸4)、Aの押しと離し、スティック、十字キーが届き、`gamepadconnected`が1回来ること |
 | `test_blink_midi` | 同じコントローラに挿した、送られたものを返すUSBのMIDIの機器が、入力と出力1つずつとして機器の名前で見え、システムエクスクルーシブを許したアクセスで、ノートと`F0 7D 01 02 03 04 05 F7`を送ると同じものが入力に戻ること |
 | `test_blink_pdf` | PDF(PDFiumの試験の`hello_world.pdf`)のページが白く灰色の背景に描かれ、タイトルがファイルの名前になること。ページが`pdfViewerEnabled`の真、5つのプラグインと2つのMIMEの型を見て、iframeのPDFが画像の1枚のページになること |
 | `test_blink_pw` | 前の形のブラウザが平文で書いたレコード9(試験が書く)を読めること。パスキーと、`PasswordCredential`の`store()`とログインのフォームのパスワードをパネルで許して保存し、起動し直したブラウザで、そのパスキーで署名し、`get({password})`で選び、フォームの欄にフォーカスして入れること。終わった後、レコード9が暗号化の形で部分が1つ、その鍵の実身の所有者が部分のユーザでモードが`rw-------`、ACLがないこと。ボリュームを書き出してから、起動したディスク全体を読み、3つのパスワードがどこにもないこと(パスワードはページのスクリプトが組み立て、タイトルには合ったかどうかだけを出し、試験の中では逆さに持つので、蓄えやタイトルやカーネルのイメージには現れない) |
 | `test_blink_av1` | AV1を扱えると答えること(`canPlayType`、MSE、WebCodecs、MediaCapabilitiesの480pはなめらか、1080pはなめらかでない)と、WebMのAV1の480×360の動画がフレームを出して再生されること(Chromiumのメディアの試験のデータの`bear-av1-480x360.webm`)。キャンバスの1フレームを`VideoEncoder`でAV1のキーフレームに符号化し、MediaRecorderがAV1を受け付けること |
-| `test_blink_wv` | 導入していないとき、`/wv`のページの`com.widevine.alpha`が`NotSupportedError`、Clear Keyが使えること。メニューの〈Widevineを導入...〉のパネル7にEscで答えると何も取らないこと。`make ... WV_TEST=<ディレクトリ>`で、開発のマシンでリポジトリから取ったインデックスとパッケージ(`wv_Packages`、`wv.deb`)を試験のディスクの`/boot`にだけ載せたときは、起動の行`wvrepo=`で試験のサーバのコピーをリポジトリとし、パネル7にEnterで答えると、取得、SHA-256の照合、展開を経て、レコード10が指すモード`rw-------`の実身にライブラリが入り、同じページで`SW_SECURE_DECODE`のWidevineが使え、`HW_SECURE_ALL`は断られること。起動し直したブラウザが実身からCDMを読み込み(コンソールに版が出る)、〈Widevineを外す〉をパネル2の了解で選ぶと、行と実身が消え、Widevineが断られること。暗号化された動画の再生と、鍵の要求の生成は試さない |
+| `test_blink_wv` | 導入していないとき、`/wv`のページの`com.widevine.alpha`が`NotSupportedError`、Clear Keyが使えること。メニューの〈Widevineを導入...〉のパネル7にEscで答えると何も取らないこと。`make ... WV_TEST=<ディレクトリ>`で、開発のマシンでリポジトリから取ったインデックスとパッケージ(`wv_Packages`、`wv.deb`)を試験のディスクの`/boot`にだけ載せたときは、起動の行`wvrepo=`で試験のサーバのコピーをリポジトリとし、パネル7にEnterで答えると、取得、SHA-256の照合、展開を経て、レコード10が指すモード`rw-------`の実身にライブラリが入り、同じページで`SW_SECURE_DECODE`のWidevineが使え、`HW_SECURE_ALL`は断られること。起動し直したブラウザが実身からCDMを読み込み(コンソールにバージョンが出る)、〈Widevineを外す〉をパネル2の了解で選ぶと、行と実身が消え、Widevineが断られること。暗号化された動画の再生と、鍵の要求の生成は試さない |
 | `test_blink_find` | ページの中の検索。Ctrl+Fのパネルに「apple」、3つの一致のうち次、次、前へ移り、表示がその中ほどへ動くこと、動いている一致の橙色 |
 | `test_blink_keep` | フォームの`POST`、次に起動したブラウザがCookieと`localStorage`を読み戻す |
 | `test_blink_media` | WebGL(三角形の描画と画面の画素、`readPixels`、2×2のテクスチャを最近傍で貼ったフレームバッファオブジェクトの画素、WebGL 2のコンテキストでGLSL ES 3.00の頂点配列オブジェクトと整数のユニフォームで描いた色)、音声の長さ、`crypto`、`preload`のない動画を取得しないこと。`GL=1`でないときはWebGL 2がないことを確かめる |
@@ -953,6 +1014,8 @@ Chromiumでは、ページの中で始まったドラッグはブラウザのプ
 | `test_blink_sw` | `/swr`のページがService Workerを登録し、ワーカーが`clients.claim()`でページを制御する。ページの`/swr-data`の取得と、ページが移るアドレスにワーカーが答え(サーバは`/swr`とワーカーのスクリプトしか求められない)、ページとワーカーが`postMessage`でメッセージを交わす |
 | `test_blink_swframe` | `/swf`のページがService Workerを登録して制御された後、`/swf-frame`のiframeを置く。ワーカーはその移動の`fetch`イベントに`/swf-inner`を取得して答え、iframeの文書は制御され、その`/swf-data`の取得にもワーカーが答える。ワーカーはiframeからのメッセージに、クライアントが2つ(`top-level`と`nested`)と答える。サーバは`/swf-frame`と`/swf-data`を求められない |
 | `test_blink_owl` | 専用ワーカーが`OffscreenCanvas`のWebGLで赤く消した画素を読み戻すと`255,0,0,255`(`make GL=1`)。ページの`requestAnimationFrame`のコールバックとタイマーがそれぞれ120ミリ秒かかり、`long-animation-frame`の項目(50ミリ秒以上、スクリプトの記録あり)が届く |
+| `test_blink_glw` | `/glw`の2つの専用ワーカーが`OffscreenCanvas`のWebGL 1と2で、ページがWebGLのコンテキストを次々に(4秒の間、少なくとも5つ)作って、数値を含むシェーダをコンパイルしながら描き続け、読み戻した画素が赤(ワーカー)と緑(ページ)で、プログラムのリンクがすべて成功し、ブラウザが落ちない(`GL=1`でないときワーカーのWebGL 2は`none`)。描いた後、WebGL 2のワーカーは画素を`PIXEL_PACK_BUFFER`に読み出してフェンスを置き、`clientWaitSync(sync, 0, 0)`をタイマから3秒まで繰り返して待ってから`getBufferSubData`で読む。どちらのワーカーも、リンクを`KHR_parallel_shader_compile`の`COMPLETION_STATUS_KHR`で同じく待つ。`GL=1`では、フェンスが信号状態になって読んだ画素が赤で、リンクが完了し、`getError`が0であること。ページの`@font-face`のフォントは、HTTPキャッシュだけからの読込みが`ERR_CACHE_MISS`になった後、サーバに求められる。ページの実身の本文の`trace=exceptions`の段落で、例外がコンソールに出る |
+| `test_blink_csp` | `/csa`(CSPでnonce`aaa`を求める)のスクリプトが`/csb`(nonce`bbb`)へ移り、`/csb`のnonce付きのインラインと外部のスクリプトが動く(前の文書のCSPに縛られない)。nonceは属性から隠れ、プロパティには残る。ほかのオリジン(`localhost`)への`redirect: 'manual'`の`fetch`は、CORSのヘッダの付いたリダイレクトで止まって`opaqueredirect`になり、その先(`/cst`)は求められない。同じオリジンへの`POST`の`fetch`とXMLHttpRequestは`Sec-Fetch-Site: same-origin`と`Origin`を付けて送られ、CORSで断られない。続けて`http://localhost:18172/csc`を開くと、ほかのサイト(`127.0.0.1`)へリダイレクトされ、そのリダイレクトの応答が付けた`SameSite`のないCookieが残り、移った先のページの同じオリジンへの要求で送られる |
 | `test_blink_hist` | iframeの別の文書への移動とフラグメントで`history.length`が1つずつ増え、`history.back()`でフラグメント(`hashchange`)、続いて前の文書(`back_forward`)に戻る。iframeの再読込は`reload`、リダイレクトで来た文書は`redirectCount`が1。同期のXMLHttpRequestの`statusText`が`Funky Reason`。箱の`behavior: 'smooth'`のスクロールはすぐには動かず、2.5秒後に行き先にある。専用ワーカーの`requestAnimationFrame`が時刻を受ける。1.5秒空けて2回に分けて送る本文を、`fetch()`が届いた分ずつ読む |
 | `test_blink_api2` | `/api2`のページで、試験のサーバの`/ws`との`WebSocketStream`の往復、支払いの手段がないことを答える`PaymentRequest`、パスキーを作って署名で入る(2つのパネルにEnterで答え、署名を返された公開鍵で`crypto.subtle`が確かめる)、試験のサーバをIDプロバイダとするFedCM(アカウントをEnterで選び、トークンを受け取る) |
 | `test_blink_fsa` | `/fsa`の1つめのボタンで`showSaveFilePicker()`の名前のパネルにEnterで答え、ブラウザの保存箱に実身ができて仮身がトレーに入る。2つめのボタンの`showOpenFilePicker()`でその仮身をパネル6で選び、書いた文字を読み戻す |
@@ -983,9 +1046,11 @@ Chromiumでは、ページの中で始まったドラッグはブラウザのプ
 | `test_blink_dialog` | `alert`、`confirm`2回、`prompt`のパネルにキー(Enter、Esc、`12`とEnter)で答え、`<select>`を押して出た一覧のパネルで2番目を押してEnterで選ぶ。タイトルがそれぞれの答えと`change`の値になる |
 | `test_blink_clip` | `navigator.clipboard.writeText`で2行の文字列をトレーに入れ、`readText`で読み戻す。読み取りの許可のパネルにEnter(許可)で答え、その後の問い合わせが`granted`になる |
 | `test_blink_cache` | `caches`のキャッシュに応答を入れて読み戻し、`ignoreSearch`の照合、キャッシュの名前、キー、項目の削除、キャッシュの削除と`has`を確かめる |
+| `test_blink_cachekeep` | `caches`のキャッシュに512KBの応答を24個入れ、保存された後に小さい応答を1つ足す。2度目の保存は足した1つだけを書く(コンソールの`store caches saved`の行)。次に起動したブラウザが25個を読み戻し、小さい応答の本文と大きい応答のバイト列が元のとおりであることを確かめ、キャッシュを消す(14.8.1) |
+| `test_blink_cachecut` | 1日キャッシュしてよい`/ccut.js`の最初の応答を半分で止め(接続は開いたまま)、その間にブラウザを終える。次に起動したブラウザが`/ccut.js`をもう一度サーバに求め、全体を実行する(タイトル`ccut whole`)。半分をキャッシュに残すと、それが応答の全体として返り、構文の誤りでタイトルが変わらない(14.8.1) |
 | `test_blink_jit` | `/j`のページが、再帰と型付き配列のふるいのループと、WebAssemblyのループにかかった時間をタイトルに書く。ブラウザをそのままと、`v8=--jitless`の行を与えて2回開き、値が正しいこと、機械語にしたJavaScriptの時間がインタプリタの半分より短いこと、`--jitless`ではWebAssemblyがないことを確かめる |
 | `test_blink_socket` | 試験のサーバの`/ws`との`WebSocket`でテキスト、Blob、バイナリのメッセージを往復させ(Blobの後に送ったものが追い越さない)、1000で閉じる。`/ev`の`EventSource`で、名前の付いたイベントと2つのメッセージを、ストリームが開いたままのうちに受け取り、閉じると接続が切れる |
-| `test_blink_idb` | `indexedDB`でデータベースを作り、キー、件数、インデックス、逆向きのカーソルで読み戻す。Blob、File、大きな文字列を含む値を入れ、Blobをすぐ読み戻す。次に起動したブラウザが、版、レコード、ストアが作ったキー、BlobとFileの中身(Fileの名前と時刻も)、大きな文字列の長さを読み戻す |
+| `test_blink_idb` | `indexedDB`でデータベースを作り、キー、件数、インデックス、逆向きのカーソルで読み戻す。Blob、File、大きな文字列を含む値を入れ、Blobをすぐ読み戻す。次に起動したブラウザが、バージョン、レコード、ストアが作ったキー、BlobとFileの中身(Fileの名前と時刻も)、大きな文字列の長さを読み戻す |
 | `test_blink_audio` | `AudioContext`の発振器を鳴らし、コンテキストが48kHzで動き、時刻が進み、アナライザに波形が出ること、サウンドデバイスに渡したフレーム数(`sound=`の行で書かせる)が1.5秒分以上あることを確かめる |
 | `test_blink_menu`、`test_blink_tool` | ウインドウのメニューの再読込、ツールパネルでの移動とボタン、ツールパネルがページのウインドウのすぐ前にあること |
 | `test_blink_mem` | 大きなページを読んだ後のメモリの使用量 |
@@ -1004,7 +1069,7 @@ Chromiumでは、ページの中で始まったドラッグはブラウザのプ
 
 2026年10月8日、Service Worker、WebSocketStream、Payment Request、資格情報、File System Access、機器のないもの(14.4.8)、カメラとマイクと音声、MediaRecorder、Web Serial、WebHIDとWebUSBとゲームパッド、`cookieStore`、画面の向き、`navigator.connection`などを入れて、`test_blink_sw`、`test_blink_api2`、`test_blink_fsa`、`test_blink_devices`、`test_blink_capture`、`test_blink_serial`、`test_blink_cookie`が通った。続けてWebRTC(14.5.2)を入れて`test_blink_rtc`が、XR、画面、マシンのフォント、CSS Paint APIなどを入れて`test_blink_api3`が通った。ストレージのバケット、古いFile System API、落としたファイルのハンドルを足して、`test_blink_api3`と`test_blink_drag`が通った。WebGPU(14.6.5)を入れて、`make GL=1`で`test_blink_webgpu`が通った(softpipe)。ブラウザが複数のウインドウを持てるようにし(14.7.8)、`test_blink_windows`が通った。デスクトップに通知を加え(11.28、14.4.10)、`test_blink_notify`が通った。Web Push(14.4.11)を入れ、Service Workerの登録をブラウザを終えても残すようにして、`test_blink_push`が通った。バックグラウンドの同期と定期の同期、バックグラウンドの取得、Content Index、振動を入れて、`test_blink_sync`が通った(`requestVideoFrameCallback`と、`srcObject`に与えた`MediaStream`も同じ試験で確かめる)。Cache Storageと許可の答えを残し、WebSocketでBlobを送り、IndexedDBにBlobとFileを入れられるようにして、`test_blink_socket`と`test_blink_idb`が通った。マイクを`getUserMedia`につないで、`test_blink_mic`が通った。`navigator.plugins`、Storage Access、`setSinkId`、DeviceOrientation、Compute Pressure、`MediaStreamTrackProcessor`、`EyeDropper`のモジュール、オリジンごとのファイルシステム、ワーカーの`MediaSource`、モジュールの型の直列化(`postMessage`やIndexedDBで`CryptoKey`、`VideoFrame`、`MediaSourceHandle`などを送る)を入れて、`test_blink_api4`が通った。メディア要素のコントロールをBlinkの標準のものにし、ピクチャインピクチャのウインドウを浮かぶウインドウにして、`test_blink_media`と`test_blink_windows`が通った。カメラ(6.6)を`getUserMedia`と`ImageCapture`につないで`test_blink_cam`が、WebAssemblyのトラップハンドラを有効にして(5.5.2)`test_blink_wasm`が、印刷で文字を文字のまま残し`webkitdirectory`に答えて`test_blink_print`と`test_blink_dir`が、綴りの検査を入れて`test_blink_spell`が、プログラムのUSBデバイス(6.3.1)をWebUSBにつないで`test_blink_webusb`が通った。続けて、WebHID、WebUSBのリセットとアイソクロナスの転送、カメラのMJPEGを入れて、`test_blink_webhid`、`test_blink_webusb_iso`、`test_blink_cam_mjpeg`が通った。
 
-`make ... KT_V8=test_blink_media,test_blink_tool`で、`v8`のうち指定した試験だけを実行する。`make ... GL=1 KT_BR_GPU=1`では、試験が起動するすべてのブラウザに`gpu=on`の行を足し、ほかの試験もGPUの経路(QEMUではsoftpipe)で実行する。`make ... NET=user KT_SITE=<URL>`では、そのサイトだけを開き、読み終えて1秒後と3秒後の画面のスクリーンショットを`/boot/SITE.PPM`、`/boot/SITE2.PPM`に保存する。読み終えてからもスクリプトがページを組み立てるサイトでは、`KT_SITE_WAIT=<ミリ秒>`を加えると、2枚目のスクリーンショットを1枚目からその時間の後に撮り、ブラウザをその7秒後まで動かしておく。`KT_SITE`のアドレスの後には、`\n`で区切ってブラウザの起動の引数の行を足せる。`script=<アドレス>`は、ページが表示されたところでそのアドレスのスクリプトを取得してページの中で実行し(シーク、一時停止、画質の切り替えなどの操作を試験から行う)、`secure=<起源>`は、そのオリジンのページを安全なコンテキストとして扱う(EMEは安全なコンテキストにだけあるので、試験のサーバの`http`のページでEMEを試すときに使う)。
+`make ... KT_V8=test_blink_media,test_blink_tool`で、`v8`のうち指定した試験だけを実行する。`make ... GL=1 KT_BR_GPU=1`では、試験が起動するすべてのブラウザに`gpu=on`の行を足し、ほかの試験もGPUの経路(QEMUではsoftpipe)で実行する。`make ... NET=user KT_SITE=<URL>`では、そのサイトだけを開き、読み終えて1秒後と3秒後の画面のスクリーンショットを`/boot/SITE.PPM`、`/boot/SITE2.PPM`に保存する。読み終えてからもスクリプトがページを組み立てるサイトでは、`KT_SITE_WAIT=<ミリ秒>`を加えると、2枚目のスクリーンショットを1枚目からその時間の後に撮り、ブラウザをその7秒後まで動かしておく。`KT_SITE`のアドレスの後には、`\n`で区切ってブラウザの起動の引数の行を足せる。`script=<アドレス>`は、ページが表示されたところでそのアドレスのスクリプトを取得してページの中で実行し(シーク、一時停止、画質の切り替えなどの操作を試験から行う)、`secure=<オリジン>`は、そのオリジンのページを安全なコンテキストとして扱う(EMEは安全なコンテキストにだけあるので、試験のサーバの`http`のページでEMEを試すときに使う)。`gles=<版>`(`gles=3.0`など)は、Mesaのコンテキストが出すOpenGL ESの版をその版までにする(`MESA_GLES_VERSION_OVERRIDE`)。QEMUのsoftpipeを実機のV3Dと同じOpenGL ES 3.0にして、ANGLEとWebGPUのアダプタの扱いを実機と同じ道で試す。`KT_SITE_CLICK=<x>,<y>[,<x>,<y>…]`を加えると、2枚目のスクリーンショットの後、デスクトップを起動して、画面のその座標へポインタを動かして左のボタンを押して放すことを1点ずつ行い、4秒後の画面を`/boot/SITEC1.PPM`、`SITEC2.PPM`…に保存する(ページのボタンがクリックで動くかを、入力の経路を通して見る)。ブラウザが動いている間はスクリーンショットを1枚書くのに十数秒かかるので(QEMUでGoogleマップを開いたとき)、クリックがあるときは、ブラウザを終える時間(`quit=`)を、クリック1つにつき25秒と、さらに30秒延ばす。コンソールの`click N at x,y (T ms after the start)`の行に、押した時刻が出る。`KT_SITE_WAIT`の間は、ブラウザのプロセスが割り付けているメモリの量を10秒ごとにコンソールに出す。
 
 2026年10月6日、GPUでのラスタ化(14.7.2)を入れて、`GL=1`のブラウザで`v8`、`gl`、`gpu`の試験グループを実行し、`NET=user`のときだけの2つを除く38の試験が通った(QEMUにはGPUがないので、`test_blink_gpu`のほかはプロセッサで描く)。`KT_BR_GPU=1`で、`test_blink`、`test_blink_input`、`test_blink_keep`、`test_blink_media`、`test_blink_menu`、`test_blink_tool`、`test_blink_frame`をsoftpipeの上のGPUの経路で実行し、すべて通った。`test_blink_frame`の`check=`では、変わった所だけをGPUで描いた47の表示が、ビュー全体をGPUで描き直したものと1画素も違わなかった。
 

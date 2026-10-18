@@ -429,17 +429,17 @@ EXPORT ER bpk_parse( BPKARC *a, const UB *raw, UINT rawlen, char *err, INT errma
 	}
 	if ( a->head.checksum != bpk_ghead_sum(g) || a->nfiles == 0 || a->compsize > flen - DF_DATA - BPK_GLOBALHEAD
 	  || a->origsize < a->extsize + a->nfiles * BPK_LOCALHEAD || a->origsize > 256 * 1024 * 1024 ) {
-		return fail(err, errmax, "書庫の見出しが壊れています", E_OBJ);
+		return fail(err, errmax, "書庫のヘッダが壊れています", E_OBJ);
 	}
 
 	/* the stream inflated */
 	a->plain = malloc(a->origsize);
-	if ( a->plain == NULL ) return fail(err, errmax, "展開する場所がありません", E_NOMEM);
+	if ( a->plain == NULL ) return fail(err, errmax, "展開するメモリが足りません", E_NOMEM);
 	if ( a->method == BPK_LH5 ) {
 		BPKLH5	*z = malloc(sizeof(BPKLH5));
 		INT	n;
 
-		if ( z == NULL ) return fail(err, errmax, "展開する場所がありません", E_NOMEM);
+		if ( z == NULL ) return fail(err, errmax, "展開するメモリが足りません", E_NOMEM);
 		n = lh5_decode(z, g + BPK_GLOBALHEAD, a->compsize, a->plain, a->origsize);
 		free(z);
 		if ( n != (INT)a->origsize ) return fail(err, errmax, "圧縮データが壊れています", E_OBJ);
@@ -453,14 +453,14 @@ EXPORT ER bpk_parse( BPKARC *a, const UB *raw, UINT rawlen, char *err, INT errma
 
 	/* the local headers */
 	a->file = calloc(a->nfiles, sizeof(BPKFILE));
-	if ( a->file == NULL ) return fail(err, errmax, "展開する場所がありません", E_NOMEM);
+	if ( a->file == NULL ) return fail(err, errmax, "展開するメモリが足りません", E_NOMEM);
 	pos = a->extsize;
 	for ( i = 0; i < a->nfiles; i++, pos += BPK_LOCALHEAD ) {
 		BPKFILE	*f = &a->file[i];
 
 		bpk_lhead_get(a->plain + pos, &f->head);
 		bpk_tron_utf8(f->head.name, 20, f->name, sizeof(f->name));
-		if ( f->head.f_nrec > 65536 ) return fail(err, errmax, "書庫の実身の見出しが壊れています", E_OBJ);
+		if ( f->head.f_nrec > 65536 ) return fail(err, errmax, "書庫の実身のヘッダが壊れています", E_OBJ);
 		f->nrec = (INT)f->head.f_nrec;
 	}
 
@@ -470,7 +470,7 @@ EXPORT ER bpk_parse( BPKARC *a, const UB *raw, UINT rawlen, char *err, INT errma
 
 		f->rec = calloc(f->nrec ? (size_t)f->nrec : 1, sizeof(BPKREC));
 		f->link = calloc(f->nrec ? (size_t)f->nrec : 1, sizeof(INT));
-		if ( f->rec == NULL || f->link == NULL ) return fail(err, errmax, "展開する場所がありません", E_NOMEM);
+		if ( f->rec == NULL || f->link == NULL ) return fail(err, errmax, "展開するメモリが足りません", E_NOMEM);
 		for ( j = 0; j < f->nrec; j++ ) {
 			BPKREC	*r = &f->rec[j];
 

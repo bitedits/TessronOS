@@ -14,7 +14,9 @@
  *	the controller moves data -- through the data port, the single
  *	address mode and the descriptor tables -- each checked through
  *	another way and through the whole card, with the sectors on either
- *	side of every write checked to be untouched.
+ *	side of every write checked to be untouched; the same with multiple
+ *	block transfers ended by CMD12, CMD23 and Auto-CMD23; and the ways
+ *	back to 3.3V from a switch to 1.8V that fails.
  *
  *	Only the scratch partition of the card is written (the type the
  *	tests own, mksd.py --scratch-mb). Under QEMU the card is an image
@@ -164,6 +166,77 @@ LOCAL void test_card( void )
 	KT_ASSERT(tbl->gpt);
 }
 
+/* the fastest clock of each bus speed (SD_SPEED_*) */
+LOCAL CONST UW	speed_hz[] = { 25000000, 50000000, 25000000, 50000000, 100000000, 50000000, 208000000 };
+LOCAL CONST char *speed_name[] = { "default speed", "High Speed", "UHS-I SDR12", "UHS-I SDR25",
+				   "UHS-I SDR50", "UHS-I DDR50", "UHS-I SDR104" };
+
+/*
+ * The bus speed: an SD card that has the High Speed function (QEMU's
+ * sd-card has it, and the sdhci-pci host the High Speed mode) is
+ * switched to it, its clock above the default speed's; the reads and
+ * writes of the tests after this one run in that mode. On the Raspberry
+ * Pi 5 a UHS-I card may be at a UHS-I bus speed. An eMMC keeps its own
+ * timing.
+ */
+LOCAL void test_speed( void )
+{
+	UW	hz = 0;
+	INT	sp;
+
+	if ( dd_whole <= 0 ) KT_SKIP("no SD card");
+	sp = knl_sd_speed(&hz);
+	KT_ASSERT(sp >= SD_SPEED_DEFAULT && sp <= SD_SPEED_SDR104);
+	if ( sp < SD_SPEED_DEFAULT || sp > SD_SPEED_SDR104 ) return;
+	tm_printf((UB *)"  %s: %s, clock %d kHz, ended by %s\n", SD_DISK, speed_name[sp], (INT)( hz / 1000 ),
+		  ( knl_sd_cmd23(-1) == SD_CMD23_AUTO ) ? "Auto-CMD23"
+		  : ( knl_sd_cmd23(-1) == SD_CMD23_MANUAL ) ? "CMD23" : "CMD12");
+#if defined(QEMU_VIRT) && defined(KT_SD_EMMC)
+	if ( !KT_SD_EMMC ) {
+		KT_ASSERT_EQ(sp, SD_SPEED_HS);
+		KT_ASSERT(hz > 25000000 && hz <= 50000000);
+		/* QEMU's sd-card does not say it takes CMD23: CMD12 */
+		KT_ASSERT_EQ(knl_sd_cmd23(-1), SD_CMD23_NONE);
+	}
+	KT_ASSERT(hz <= speed_hz[sp]);
+#else
+	KT_ASSERT(hz <= speed_hz[sp]);
+#endif
+}
+
+/*
+ * How long 8MB from the start of the card takes, read in requests of
+ * 128KB, 512KB and 1MB (design 7.3, the amount read at once): printed
+ * only, the reads checked to succeed.
+ */
+LOCAL void test_read_size( void )
+{
+	static CONST UD	sizes_kb[] = { 128, 512, 1024 };
+	PFRAME		*pf;
+	UB		*buf;
+	SYSTIM		t0, t1;
+	SZ		asz;
+	UD		at, k, n;
+
+	if ( dd_whole <= 0 ) KT_SKIP("no SD card");
+	pf = knl_alloc_pages(BUF_ORDER, ZONE_DMA32, KAF_DMA32);
+	KT_ASSERT(pf != NULL);
+	if ( pf == NULL ) return;
+	buf = (UB *)knl_pf_to_va(pf);
+	for ( k = 0; k < sizeof(sizes_kb) / sizeof(sizes_kb[0]); k++ ) {
+		n = sizes_kb[k] * 1024 / BLK_SECTOR_SIZE;
+		tk_get_tim(&t0);
+		for ( at = 0; at < 8 * 2048; at += n ) {
+			asz = 0;
+			KT_ASSERT_ER(tk_srea_dev(dd_whole, (W)at, buf, (SZ)( n * BLK_SECTOR_SIZE ), &asz), E_OK);
+		}
+		tk_get_tim(&t1);
+		tm_printf((UB *)"  %s: 8MB in requests of %d KB: %d ms\n", SD_DISK, (INT)sizes_kb[k],
+			  (INT)( t1.lo - t0.lo ));
+	}
+	knl_free_pages(pf, BUF_ORDER);
+}
+
 /* each partition's first and last sectors are the card's sectors at its offset */
 LOCAL void test_parts( void )
 {
@@ -306,14 +379,154 @@ LOCAL void test_modes( void )
 	tk_cls_dev(dd, 0);
 }
 
+/* the scratch partition, opened for update; its entry in *p_pt */
+LOCAL ID open_scratch( T_PARTITION **p_pt )
+{
+	UB	name[8];
+	INT	i, k;
+
+	for ( i = 0; i < nparts && i <= 9; i++ ) {
+		for ( k = 0; k < 16 && tbl->part[i].type_guid[k] == sd_scratch_type[k]; k++ ) ;
+		if ( k == 16 && tbl->part[i].valid ) {
+			*p_pt = &tbl->part[i];
+			part_name(name, i);
+			return tk_opn_dev(name, TD_UPDATE);
+		}
+	}
+	return E_NOEXS;
+}
+
+/*
+ * Multiple block transfers ended by CMD12, by CMD23 sent as a command of
+ * its own and, where the controller has it, by Auto-CMD23 (not QEMU's
+ * sdhci-pci, which lacks it): each written and read back through the
+ * way of moving data in use and through the data port. QEMU's sd-card
+ * takes CMD23 although its configuration register does not say so.
+ */
+LOCAL void test_cmd23( void )
+{
+	static CONST INT	ways[] = { SD_CMD23_NONE, SD_CMD23_MANUAL, SD_CMD23_AUTO };
+	static CONST char	*way_name[] = { "CMD12", "CMD23", "Auto-CMD23" };
+	T_PARTITION	*pt = NULL;
+	PFRAME		*pf;
+	UB		*buf;
+	INT		mode, w, i;
+	UW		tag = 500;
+	UD		base;
+	ID		dd;
+
+	if ( dd_whole <= 0 || tbl == NULL || nparts <= 0 ) KT_SKIP("no SD card");
+#if defined(KT_SD_EMMC)
+	if ( KT_SD_EMMC ) KT_SKIP("an eMMC ends its transfers with CMD12");
+#endif
+	dd = open_scratch(&pt);
+	if ( dd <= 0 ) KT_SKIP("no scratch partition on the SD card (mksd.py --scratch-mb)");
+	if ( pt->nsect < 4 * (MAX_SECT + 2) ) { tk_cls_dev(dd, 0); KT_SKIP("the scratch partition is too small"); }
+	pf = knl_alloc_pages(BUF_ORDER, ZONE_DMA32, KAF_DMA32);
+	KT_ASSERT(pf != NULL);
+	if ( pf == NULL ) { tk_cls_dev(dd, 0); return; }
+	buf = (UB *)PA2VA(knl_pf_to_pa(pf));
+	mode = knl_sd_dma_mode(-1);
+
+	for ( w = 0; w < 3; w++ ) {
+#ifdef QEMU_VIRT
+		if ( ways[w] == SD_CMD23_AUTO ) continue;
+#endif
+		if ( knl_sd_cmd23(ways[w]) < E_OK ) {
+			tm_printf((UB *)"  %s: the controller does not offer it\n", way_name[w]);
+			continue;
+		}
+		for ( i = 1; i < (INT)NSIZES; i++ ) {
+			base = 1 + (UD)i * (MAX_SECT + 2);
+			one_pass(dd, pt->start, mode, buf, base, sizes[i], tag++);
+		}
+		KT_ASSERT(knl_sd_cmd23(-1) == ways[w] || ( ways[w] == SD_CMD23_AUTO && mode == 1 ));
+		tm_printf((UB *)"  %s: %d sizes through %s\n", way_name[w], (INT)NSIZES - 1, mode_name[mode & 3]);
+	}
+	(void)knl_sd_cmd23(SD_CMD23_DECIDE);
+	(void)knl_sd_dma_mode(mode);
+	knl_free_pages(pf, BUF_ORDER);
+	tk_cls_dev(dd, 0);
+}
+
+/*
+ * The ways back from a switch to 1.8V that fails, each ending with a
+ * card that reads the same 32KB from its start as before:
+ *
+ *	QEMU's sd-card cannot switch: it does not answer S18A, and has no
+ *	CMD11. Offered UHS-I, it stays at 3.3V in the High Speed mode;
+ *	taken to have accepted 1.8V, CMD11 goes unanswered, its power is
+ *	cycled and it comes up at 3.3V; taken to have switched without
+ *	CMD11, it reaches SDR25 (QEMU's card has nothing faster), and with
+ *	the check after the switch spoiled, its power is cycled and it
+ *	comes up at 3.3V again.
+ *
+ *	On the Raspberry Pi 5 the card really switches: with the check
+ *	spoiled, back to 3.3V; then as at start-up again.
+ */
+LOCAL void test_uhs_back( void )
+{
+	PFRAME	*pf;
+	UB	*ref, *now;
+	SZ	asz;
+	INT	sp, first, k;
+#ifdef QEMU_VIRT
+	static CONST UW	how[] = { SD_TEST_UHS, SD_TEST_UHS | SD_TEST_S18A,
+				  SD_TEST_UHS | SD_TEST_S18A | SD_TEST_NO_CMD11,
+				  SD_TEST_UHS | SD_TEST_S18A | SD_TEST_NO_CMD11 | SD_TEST_BAD_READ, 0 };
+	static CONST INT	want[] = { SD_SPEED_HS, SD_SPEED_HS, SD_SPEED_SDR25, SD_SPEED_HS, SD_SPEED_HS };
+#else
+	static CONST UW	how[] = { SD_TEST_BAD_READ, 0 };
+#endif
+	INT	nhow = (INT)( sizeof(how) / sizeof(how[0]) );
+
+	if ( dd_whole <= 0 ) KT_SKIP("no SD card");
+#if defined(KT_SD_EMMC)
+	if ( KT_SD_EMMC ) KT_SKIP("an eMMC has no UHS-I");
+#endif
+	pf = knl_alloc_pages(4, ZONE_DMA32, KAF_DMA32);
+	KT_ASSERT(pf != NULL);
+	if ( pf == NULL ) return;
+	ref = (UB *)PA2VA(knl_pf_to_pa(pf));
+	now = ref + 32 * 1024;
+	KT_ASSERT_ER(tk_srea_dev(dd_whole, 0, ref, 32 * 1024, &asz), E_OK);
+	first = knl_sd_speed(NULL);
+
+	for ( k = 0; k < nhow; k++ ) {
+		UW	hz = 0;
+
+		sp = knl_sd_reinit(how[k]);
+		(void)knl_sd_speed(&hz);
+		tm_printf((UB *)"  test %x: %s, %d kHz\n", how[k],
+			  ( sp >= 0 && sp <= SD_SPEED_SDR104 ) ? speed_name[sp] : "failed", (INT)( hz / 1000 ));
+#ifdef QEMU_VIRT
+		KT_ASSERT_EQ(sp, want[k]);
+#else
+		/* spoiled: at 3.3V, whatever it was before; then as at start-up */
+		KT_ASSERT(sp >= SD_SPEED_DEFAULT);
+		if ( how[k] != 0 ) KT_ASSERT(sp <= SD_SPEED_HS);
+		else KT_ASSERT_EQ(sp, first);
+#endif
+		wipe(now, 32 * 1024);
+		KT_ASSERT_ER(tk_srea_dev(dd_whole, 0, now, 32 * 1024, &asz), E_OK);
+		KT_ASSERT(same(ref, now, 32 * 1024));
+	}
+	KT_ASSERT_EQ(knl_sd_speed(NULL), first);
+	knl_free_pages(pf, 4);
+}
+
 EXPORT void ktest_sd( void )
 {
 	dd_whole = 0;
 	tbl = NULL;
 	nparts = 0;
 	KT_RUN(test_card);
+	KT_RUN(test_speed);
+	KT_RUN(test_read_size);
 	KT_RUN(test_parts);
 	KT_RUN(test_modes);
+	KT_RUN(test_cmd23);
+	KT_RUN(test_uhs_back);
 	if ( dd_whole > 0 ) tk_cls_dev(dd_whole, 0);
 	if ( tbl != NULL ) Kfree(tbl);
 }

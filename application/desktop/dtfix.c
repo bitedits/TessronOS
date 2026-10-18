@@ -331,7 +331,7 @@ LOCAL INT ev_text( CONST T_TSFSCKEV *e, UB *b, INT max )
 		case TSFSCK_K_SUPER:
 			return put(b, n, max, ( e->b == 1 ) ? "ボリュームの異常の記録を消しました"
 							   : "スーパーブロックの写しを書き直しました");
-		case TSFSCK_K_GROUP:	return put(b, n, max, "割当て群の見出しを書き直しました");
+		case TSFSCK_K_GROUP:	return put(b, n, max, "割当て群のヘッダを書き直しました");
 		case TSFSCK_K_FREECNT:	return put(b, n, max, "空きブロック数を数え直しました");
 		case TSFSCK_K_XREF:
 			n = put(b, n, max, "ほかのボリュームからの参照の記録を、接続中のボリュームの仮身に合わせました(");
@@ -352,7 +352,7 @@ LOCAL INT ev_text( CONST T_TSFSCKEV *e, UB *b, INT max )
 		n = put_blk(b, n, max, e->blk);
 		return put(b, n, max, ")");
 	case TSFSCK_K_GROUP:
-		n = put(b, n, max, ( e->b == 1 ) ? "空きビットマップが壊れています(" : "割当て群の見出しが壊れています(");
+		n = put(b, n, max, ( e->b == 1 ) ? "空きビットマップが壊れています(" : "割当て群のヘッダが壊れています(");
 		n = put_blk(b, n, max, e->blk);
 		return put(b, n, max, ")");
 	case TSFSCK_K_FREECNT:

@@ -1,0 +1,11 @@
+<tad version="1.0" encoding="UTF-8" filename="フォント設定のメニュー">
+<document>
+<p>フォント設定のメニュー</p>
+<p>システム環境設定の書体の詳細情報と登録で開くフォント設定のウインドウのメニュー。閉じると、登録するかどうかを尋ねる。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2078-7001-9a10-c1d2e3f47801"/></include>
+<item>表示<link id="01a0d889-4781-7a12-8b23-3c4d5e6f4781_0.xtad" vobjid="01a0d8c3-2078-7002-9a10-c1d2e3f47802"/></item>
+<include><link id="01a0d889-46bd-7f9c-8bad-e3f4a5b6c789_0.xtad" vobjid="01a0d8c3-2078-7003-9a10-c1d2e3f47803"/></include>
+</menu>
+</tad>

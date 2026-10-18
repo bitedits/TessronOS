@@ -192,13 +192,13 @@ C ライブラリの不足分は `peripheral_kernel/libc/` にある(`qsort`・`
 | `dom_websocket.patch` | `WebSocket`のチャネルを、プロセスの中のネットワークスタックで動くもの(`port/blink/websocket_tessronos.cc`)にする |
 | `html_canvas_painter.patch` | canvasのレイヤーを合成に回さず、ページの描画の記録に描く |
 | `html_media_element.patch`、`video_painter.patch` | メディアの操作部品がなくても動く。動画を常にソフトウェアで描く |
-| `isolated_context.patch` | 窓が隔離された文脈か、クロスオリジン分離されているかを、ブラウザが許した起源で答えさせる(第14章14.4.14) |
+| `isolated_context.patch` | ウインドウが隔離されたコンテキストか、クロスオリジン分離されているかを、ブラウザが許したオリジンで答えさせる(第14章14.4.14) |
 | `language_detection_model.patch` | 組み込みのAIの`LanguageDetector`の言語の推定を、ブラウザのCLD3の呼出しに向ける(第14章14.4.13) |
 | `interface_object.patch` | コンパイルしていないWebのインタフェースを、グローバルのプロパティとして`undefined`と読ませる |
 | `skia-png-frameinfo.patch` | libpngのコーデックが、1枚の画像の枠の情報を答える |
 | `viewport_scrollbars.patch` | スクロールバーを隠す設定を、メインフレームのビューポートだけに効かせる(ページ全体はウインドウのスクロールバーで動かす) |
 | `shared_memory_region.patch`、`shared_memory_tracker.patch` | 共有メモリの領域を、`/dev/shm`の一時ファイルではなくプロセスのメモリの物(`memfd_create`、`lib/libcxxrt/ts_mman.c`)で作る。同じ領域の写像がどれも同じアドレスになることを許す(Mojoのデータパイプ、`fetch()`の応答の本文) |
-| `webnn_context_provider.patch` | 頁のプロセスで動かすWebNNのサービスに、LiteRTのない版の計算の文脈を作る口を足す(第14章14.4.16) |
+| `webnn_context_provider.patch` | ページのプロセスで動かすWebNNのサービスに、LiteRTを使わない計算のコンテキストを作る関数を足す(第14章14.4.16) |
 | `default_decoder_factory.patch` | 埋め込む側が渡す機械の映像の復号器(Raspberry Pi 5のHEVC)を、ソフトウェアの復号器より先に並べる口を足す(第14章14.6.7) |
 | `web_printing_manager.patch` | ChromeOSだけで使うWeb Printingの口を、このブラウザでも使う(第14章14.4.14) |
 | `wasm_interpreter.patch`、`wasm_interpreter_h.patch` | WebAssemblyのインタプリタ(DrumBrake)の命令の処理から次の処理への呼出しを、gccでも必ず分岐にする(命令ごとにスタックを使わない)。gccが受け付けないクラスの中での明示的特殊化を、`if constexpr`で型を選ぶテンプレートにする。DrumBrakeはJITを入れてから作っていない(`v8_enable_drumbrake = false`、第14章14.3)が、作り直すときのために残す |
@@ -217,7 +217,7 @@ GPUのユーザ空間(docs/tessronos/13-gpu.md 13.6)のOpenGL ESはMesaである
 | `hud-signal.patch` | `src/gallium/auxiliary/hud/hud_context.c` | シグナルを持たないので、HUDの表示を切り替えるシグナルの処理を入れない |
 | `egl-tessronos.patch` | `src/egl/main/egldisplay.h`、`egldisplay.c`、`eglapi.c`、`src/egl/drivers/dri2/egl_dri2.c`、`egl_dri2.h`、`src/egl/meson.build` | EGLのプラットフォーム`tessronos`(`EGL_PLATFORM_TESSRONOS`、既定のプラットフォーム、初期化と後始末の振り分け、ソースの追加) |
 
-足すファイルは`tools/mesa/src/egl/drivers/dri2/platform_tessronos.c`(EGLのプラットフォーム)だけで、TessronOSのファイルである。libdrmなどMesaがLinuxで使うライブラリのヘッダの代わりは`tools/mesa/shim`にあり、その実体はTessronOSの`lib/libgl`(DRMシム`gl_drm.c`、OSの層`gl_os.c`、窓とGPUの問い合わせ`gl_win.c`)である。Mesaの版を上げるときは、`MESA_VER`と`MESA_SHA256`を変え、パッチが当たることを確かめ(`patch`が失敗すればビルドが止まる)、`tools/mesa/build.sh all`で建て直し、`ktest`の`gl`の群を走らせる。
+足すファイルは`tools/mesa/src/egl/drivers/dri2/platform_tessronos.c`(EGLのプラットフォーム)だけで、TessronOSのファイルである。libdrmなどMesaがLinuxで使うライブラリのヘッダの代わりは`tools/mesa/shim`にあり、その実体はTessronOSの`lib/libgl`(DRMシム`gl_drm.c`、OSの層`gl_os.c`、ウインドウとGPUの問い合わせ`gl_win.c`)である。Mesaのバージョンを上げるときは、`MESA_VER`と`MESA_SHA256`を変え、パッチが当たることを確かめ(`patch`が失敗すればビルドが止まる)、`tools/mesa/build.sh all`でビルドし直し、`ktest`の`gl`の群を走らせる。
 
 現時点でリポジトリにあるMesa由来のものは、V3D 7.1の制御リストのパケットを詰めるヘッダ(`device/gpu/v3d/mesa/v3d_packet_v71_pack.h`)と、ウインドウの合成のシェーダのヘッダ(`device/gpu/v3d/mesa/v3d_cp_shaders.h`)の2つである。これはMesaの`src/broadcom/cle/v3d_packet.xml`を`gen_pack_header.py`で変換したもので、`tools/mesa/probe.sh pack`が生成し、先頭にMITライセンスの著作権表示と許諾文(`tools/mesa/pack_notice.txt`)を付けて書き出す。手で編集せず、Mesaの版を上げるときは`MESA_VER`と`MESA_SHA256`を変えて作り直す。生成したヘッダが呼ぶ補助の関数(`device/gpu/v3d/mesa/cle/v3d_packet_helpers.h`)は、カーネルが浮動小数点のレジスタを使わずに済むように書いたTessronOSのファイルで、Mesaの同名のファイルの写しではない。合成のシェーダのヘッダは、`tools/mesa/shaders.sh`がMesaを`~/mesa`に取得し、NIR、V3Dのシェーダコンパイラ、QPU、`src/util`をホスト向けの静的ライブラリにして`tools/mesa/gen_cp_shaders.c`とリンクし、その出力(QPUのコード、ユニフォームの内容、詰めたレコードとパケット)に先頭のMITライセンスの表示を付けて書き出す。これも手で編集せず、作り直す。`tools/mesa/test_cp_shaders.c`は同じライブラリにリンクしてシェーダをホストで確かめる(13-gpu.md 13.10.4)。それ以外は、`tools/mesa/probe.sh`が取得し、作業ディレクトリ(既定は`/tmp/tsmesa`)で生成とコンパイルを試すだけである。
 

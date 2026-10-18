@@ -263,3 +263,35 @@ EXPORT INT knl_read_parttbl( BLK_READFN readfn, void *exinf, UD nsect_total, T_P
 
 	return n;
 }
+
+EXPORT INT knl_part_rescan( BLK_READFN readfn, void *exinf, UD nsect_total, T_PARTTBL *tbl )
+{
+	T_PARTTBL	*t;
+	INT		n, i;
+
+	t = (T_PARTTBL *)Kmalloc(sizeof(T_PARTTBL));
+	if ( t == NULL ) {
+		return E_NOMEM;
+	}
+	n = knl_read_parttbl(readfn, exinf, nsect_total, t);
+	if ( n < tbl->n ) {
+		Kfree(t);
+		return ( n < 0 ) ? n : E_OBJ;
+	}
+	for ( i = 0; i < tbl->n; i++ ) {
+		if ( t->part[i].start != tbl->part[i].start ) {
+			Kfree(t);
+			return E_OBJ;		/* a partition in use would be another */
+		}
+	}
+	for ( i = 0; i < tbl->n; i++ ) {
+		__atomic_store_n(&tbl->part[i].nsect, t->part[i].nsect, __ATOMIC_RELEASE);
+	}
+	for ( ; i < n; i++ ) {
+		tbl->part[i] = t->part[i];
+	}
+	tbl->gpt = t->gpt;
+	__atomic_store_n(&tbl->n, n, __ATOMIC_RELEASE);
+	Kfree(t);
+	return n;
+}

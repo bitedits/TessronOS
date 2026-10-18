@@ -93,7 +93,7 @@
  * too, and told of on the console the first time it comes, so that a
  * bit placed differently in this generation shows itself.
  */
-#define CORE_INTS_KNOWN		( V3D_INT_FRDONE | V3D_INT_FLDONE | V3D_INT_OUTOMEM )
+#define CORE_INTS_KNOWN		( V3D_INT_FRDONE | V3D_INT_FLDONE | V3D_INT_OUTOMEM | V3D_INT_CSDDONE_71 )
 
 /* The binner's and the renderer's ends are also seen in their counters */
 #define POLL_CYC_MS		1
@@ -153,9 +153,13 @@ typedef struct {
 	UD		t_bin;			/* the binner started */
 	UD		t_binend;		/* its end seen */
 	UD		t_render;		/* the renderer started */
+	T_GPUCSD	csd;			/* the running compute dispatch */
+	BOOL		csd_running;
+	UINT		csd_done_at;		/* dispatches completed before it started */
 } V3D;
 
 LOCAL V3D	v3d;
+LOCAL T_GPUOPS	v3d_ops;			/* below; its features change once the checks at start pass */
 
 /* ---------------------------------------------------------------- the firmware */
 
@@ -418,6 +422,29 @@ LOCAL void kick_tell( CONST char *when )
 }
 
 /*
+ * A compute dispatch starts. The code, its uniforms and the buffers it
+ * reads may have been written by the processor or by the job before:
+ * the GPU's caches drop what they hold first. The configuration is
+ * written from CFG1 on, CFG7 cleared (the dispatch takes no eighth
+ * word), and CFG0 last, since writing it queues the dispatch. The count
+ * of completed dispatches is taken before, so that the watch sees the
+ * end without the interrupt. Called with the lock held.
+ */
+LOCAL void start_csd( void )
+{
+	INT	i;
+
+	caches_invalidate();
+	poll_clear(CORE(V3D_CTL_L2TCACTL), V3D_L2TCACTL_L2TFLS);
+	v3d.csd_done_at = ( in_w(CORE(V3D_CSD_STATUS)) >> V3D_CSD_STATUS_DONE_SHIFT ) & 0xFF;
+	for ( i = 1; i <= 6; i++ ) {
+		out_w(CORE(V3D_CSD_QUEUED_CFG0_71 + 4 * i), v3d.csd.cfg[i]);
+	}
+	out_w(CORE(V3D_CSD_QUEUED_CFG7_71), 0);
+	out_w(CORE(V3D_CSD_QUEUED_CFG0_71), v3d.csd.cfg[0]);	/* starts it */
+}
+
+/*
  * The MMU given the table of the job about to run, when it is not the
  * one there: what the caches hold of the job before is written out
  * first, through the table it was made with, and then the cached
@@ -456,7 +483,7 @@ LOCAL ER v3d_kick( void *priv, CONST T_GPUJOB *job, void *as )
 	if ( as != NULL && !v3d.as_allowed ) {
 		return E_NOSPT;			/* never in the kernel's table instead */
 	}
-	if ( job->kind == GPU_JOB_CL || job->kind == GPU_JOB_CACHE ) {
+	if ( job->kind == GPU_JOB_CL || job->kind == GPU_JOB_CACHE || job->kind == GPU_JOB_CSD ) {
 		table_for((V3DAS *)as);
 	}
 	switch ( job->kind ) {
@@ -504,8 +531,25 @@ LOCAL ER v3d_kick( void *priv, CONST T_GPUJOB *job, void *as )
 		knl_gpu_job_end(E_OK);
 		return E_OK;
 
+	case GPU_JOB_CSD: {
+		UINT	imask;
+
+		/* no end of a dispatch before left set */
+		out_w(CORE(V3D_CTL_INT_CLR), V3D_INT_CSDDONE_71);
+		ISpinLock(&v3d_lock, &imask);
+		v3d.t_kick = ticks();
+		v3d.csd = job->u.csd;
+		v3d.csd_running = TRUE;
+		v3d.faulted = FALSE;
+		v3d.job_ints = 0;
+		v3d.job_faults = 0;
+		start_csd();
+		ISpinUnlock(&v3d_lock, &imask);
+		return E_OK;
+	}
+
 	default:
-		return E_NOSPT;				/* TFU and CSD wait for their registers (13.8) */
+		return E_NOSPT;				/* TFU waits for its registers (13.8) */
 	}
 }
 
@@ -540,8 +584,14 @@ LOCAL void v3d_reset( void *priv )
 			  v3d.cl.bcl_start, v3d.cl.bcl_end, v3d.cl.rcl_start, v3d.cl.rcl_end,
 			  v3d.cl.qma, v3d.cl.qms, v3d.cl.qts, pa, w[0], w[1], w[2], w[3]);
 	}
+	if ( v3d.csd_running ) {
+		tm_printf((UB *)"v3d: the dispatch at the reset: status %08x, cfg %08x %08x %08x %08x %08x %08x %08x\n",
+			  in_w(CORE(V3D_CSD_STATUS)), v3d.csd.cfg[0], v3d.csd.cfg[1], v3d.csd.cfg[2],
+			  v3d.csd.cfg[3], v3d.csd.cfg[4], v3d.csd.cfg[5], v3d.csd.cfg[6]);
+	}
 	ISpinLock(&v3d_lock, &imask);
 	v3d.cl_running = FALSE;
+	v3d.csd_running = FALSE;
 	v3d.phase = PH_IDLE;
 	ISpinUnlock(&v3d_lock, &imask);
 	out_w(CORE(V3D_CLE_CT0CS), V3D_CLE_CTCS_CTRSTA);
@@ -583,6 +633,28 @@ LOCAL void frame_done( void )
 }
 
 /*
+ * The compute dispatch is done: what its shaders wrote through the TMU
+ * is written out of the write combiner and the L2T to memory, for the
+ * processor and the jobs after it to read, and the job ends. Called
+ * with the lock held
+ */
+LOCAL void csd_done( void )
+{
+	UD	t_done = ticks();
+
+	v3d.csd_running = FALSE;
+	caches_clean();
+	v3d.st.csd_jobs++;
+	v3d.jt.njob++;
+	if ( v3d.jt.first_kick == 0 ) {
+		v3d.jt.first_kick = v3d.t_kick;
+	}
+	v3d.jt.last_end = ticks();
+	v3d.jt.render += t_done - v3d.t_kick;
+	knl_gpu_job_end(v3d.faulted ? E_IO : E_OK);
+}
+
+/*
  * The counters of flushes and frames tell the ends too, whatever the
  * interrupt bits are. Called with the lock held
  */
@@ -611,6 +683,11 @@ LOCAL BOOL give_overflow( void )
 
 LOCAL void counters_check( void )
 {
+	if ( v3d.csd_running &&
+	     ( ( in_w(CORE(V3D_CSD_STATUS)) >> V3D_CSD_STATUS_DONE_SHIFT ) & 0xFF ) != v3d.csd_done_at ) {
+		csd_done();
+		return;
+	}
 	if ( !v3d.cl_running ) {
 		return;
 	}
@@ -650,8 +727,9 @@ LOCAL BOOL storm( UINT intno )
 	DisableInt(intno);
 	v3d.st.storms++;
 	tm_printf((UB *)"v3d: interrupt %d keeps coming; turned off\n", (INT)intno);
-	if ( v3d.cl_running ) {
+	if ( v3d.cl_running || v3d.csd_running ) {
 		v3d.cl_running = FALSE;
+		v3d.csd_running = FALSE;
 		knl_gpu_job_end(E_IO);
 	}
 	return TRUE;
@@ -694,6 +772,12 @@ LOCAL void v3d_core_inthdr( UINT intno )
 		v3d.st.frdone++;
 		if ( v3d.cl_running && v3d.phase == PH_RENDER ) {
 			frame_done();
+		}
+	}
+	if ( ( sts & V3D_INT_CSDDONE_71 ) != 0 ) {
+		v3d.st.csddone++;
+		if ( v3d.csd_running ) {
+			csd_done();
 		}
 	}
 	counters_check();
@@ -782,7 +866,7 @@ LOCAL ER v3d_info( void *priv, T_GPUINFO *info )
 	info->rev = v3d.rev;
 	info->ncores = v3d.ncores;
 	info->nqpu = v3d.nqpu;
-	info->feature = GPU_FEAT_CL | GPU_FEAT_CACHE | GPU_FEAT_MMU;
+	info->feature = v3d_ops.feature;
 	info->va_size = v3d.mmu.va_size;
 	for ( i = 0; i < 4; i++ ) info->hub_ident[i] = v3d.hub_ident[i];
 	for ( i = 0; i < 3; i++ ) info->core_ident[i] = v3d.core_ident[i];
@@ -902,6 +986,20 @@ LOCAL T_GPUOPS	v3d_ops = {
 	v3d_as_unbind
 };
 
+/* Compute dispatches offered to the jobs, or not */
+EXPORT void v3d_csd_offer( BOOL on )
+{
+	UINT	imask;
+
+	ISpinLock(&v3d_lock, &imask);
+	if ( on ) {
+		v3d_ops.feature |= GPU_FEAT_CSD;
+	} else {
+		v3d_ops.feature &= ~GPU_FEAT_CSD;
+	}
+	ISpinUnlock(&v3d_lock, &imask);
+}
+
 /* A BO in the MMU and a job that runs without a list */
 LOCAL void v3d_selftest( void )
 {
@@ -979,7 +1077,12 @@ EXPORT ER knl_v3d_init( void )
 	v3d.as_allowed = TRUE;			/* for the check's own space */
 	v3d.as_allowed = v3d_as_check();
 	V3D_STEP("compositing");
-	if ( v3d_compose_init() >= E_OK && CNF_V3D != 2 ) {
+	er = v3d_compose_init();
+	if ( er >= E_OK ) {
+		V3D_STEP("compute dispatch");
+		v3d_csd_offer(v3d_csd_check());
+	}
+	if ( er >= E_OK && CNF_V3D != 2 ) {
 		v3d_compose_start();		/* with the tests, they check it after theirs */
 	}
 	v3d_test_start();

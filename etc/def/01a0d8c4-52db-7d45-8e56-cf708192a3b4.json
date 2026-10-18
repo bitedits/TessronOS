@@ -18,7 +18,7 @@
       "id": "basic-player",
       "kind": "app",
       "name": "基本動画再生",
-      "version": "R1.100",
+      "version": "R1.110",
       "builtin": true,
       "base": [
         "019bc56c-5692-774c-84fe-7911f25adabf"

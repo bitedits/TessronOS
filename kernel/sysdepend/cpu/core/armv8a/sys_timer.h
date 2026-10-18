@@ -120,6 +120,22 @@ Inline void knl_end_of_hw_timer_interrupt( void )
 }
 
 /*
+ * The comparator is per processor and PRC 1's serves the queue: another
+ * processor that changed the head of the queue asks PRC 1 to program it
+ * again (SGI_TIMER), and PRC 1's handler ends that interrupt with what
+ * its acknowledge returned
+ */
+Inline void knl_timer_ipi_request( void )
+{
+	knl_send_ipi(1U << 0, SGI_TIMER);
+}
+
+Inline void knl_end_of_timer_ipi( UW iar )
+{
+	out_w(GICC_EOIR, iar);
+}
+
+/*
  * Stop the system timer
  */
 Inline void knl_terminate_hw_timer( void )

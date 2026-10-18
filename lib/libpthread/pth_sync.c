@@ -116,7 +116,7 @@ int pth_mutex_lock_dl( pthread_mutex_t *m, uint64_t dl )
 	}
 	if ( !cas(&m->__state, 0, 1) ) {
 		for ( i = 0; i < SPINS; i++ ) {
-			__asm__ volatile ( "yield" );
+			pth_relax();
 			if ( m->__state == 0 && cas(&m->__state, 0, 1) ) goto got;
 		}
 		for ( ;; ) {

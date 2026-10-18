@@ -2,7 +2,7 @@
 
 ## 15.1 概要
 
-実時間制御TADは、時間に沿って進むデータ(音楽の演奏、アニメーション、映像と音声の再生、字幕)をxmlTADで書いたものである。仕様はTADjs Desktopの「実時間TAD仕様」(`realtimeDataTAD.md`、版1.7)に従う。実身のレコードの中の`<realtime>`要素が1つのプログラムで、その下の`<realData>`が順に実行される実時間データ、`<realGroup>`が時間を共有するイベントの組である。`<realtime>`はレコードの根(`<tad><realtime>`)にも、文章の中(`<tad><document><realtime>`)にも、図形の中(`<tad><figure><realtime>`)にも置ける。`<realtime>`の直下の`<figure>`は、プログラムが動かす図形、文字枠、画像を置く場面である。
+実時間制御TADは、時間に沿って進むデータ(音楽の演奏、アニメーション、映像と音声の再生、字幕)をxmlTADで書いたものである。仕様はTADjs Desktopの「実時間TAD仕様」(`realtimeDataTAD.md`、バージョン1.7)に従う。実身のレコードの中の`<realtime>`要素が1つのプログラムで、その下の`<realData>`が順に実行される実時間データ、`<realGroup>`が時間を共有するイベントの組である。`<realtime>`はレコードの根(`<tad><realtime>`)にも、文章の中(`<tad><document><realtime>`)にも、図形の中(`<tad><figure><realtime>`)にも置ける。`<realtime>`の直下の`<figure>`は、プログラムが動かす図形、文字枠、画像を置く場面である。
 
 TessronOSでは、実時間制御TADを次の3つの方法で再生する。
 

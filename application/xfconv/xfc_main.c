@@ -699,7 +699,7 @@ static XWIN *files_new( CONST char *title )
 	INT	x, y;
 
 	if ( w == NULL ) {
-		say(media, "これ以上窓を開けません", TRUE);
+		say(media, "これ以上ウインドウを開けません", TRUE);
 		return NULL;
 	}
 	memset(w, 0, sizeof(*w));
@@ -712,7 +712,7 @@ static XWIN *files_new( CONST char *title )
 		free(w->hist);
 		free(w->ent);
 		memset(w, 0, sizeof(*w));
-		say(media, "窓を開けません", TRUE);
+		say(media, "ウインドウを開けません", TRUE);
 		return NULL;
 	}
 	w->anchor = -1;
@@ -1338,7 +1338,7 @@ static void do_import( XWIN *w )
 	ER		er = E_OK, e;
 
 	if ( w->kind != W_FILES ) {
-		say(w, "実身にするファイルのある窓で選んでください", TRUE);
+		say(w, "実身にするファイルのあるウインドウで選んでください", TRUE);
 		return;
 	}
 	n = marked(w);
@@ -1627,7 +1627,7 @@ static void do_export( XWIN *w )
 	char	s[80];
 
 	if ( w->kind != W_FILES ) {
-		say(w, "書き出す先の窓で選んでください", TRUE);
+		say(w, "書き出す先のウインドウで選んでください", TRUE);
 		return;
 	}
 	if ( w->bt != NULL ) {
@@ -1637,7 +1637,7 @@ static void do_export( XWIN *w )
 	if ( hasarg ) src = &argobj;
 	else if ( haslast ) src = &lasttop;
 	else {
-		say(w, "書き出す実身がありません（仮身をこの窓に置くと、その実身をファイルにします）", TRUE);
+		say(w, "書き出す実身がありません（仮身をこのウインドウに置くと、その実身をファイルにします）", TRUE);
 		return;
 	}
 	if ( !xfc_ask_export(w, 1, (CONST UB *)( hasarg ? argname : lastname ), w->dir, &how, o_tadjs, o_layout,
@@ -1721,7 +1721,7 @@ static void dropped( XWIN *w )
 		return;
 	}
 	if ( w->kind != W_FILES ) {
-		drop_answer(w, d, OB_DR_REFUSE, "ディスクを開き、ファイル一覧の窓に置いてください");
+		drop_answer(w, d, OB_DR_REFUSE, "ディスクを開き、ファイル一覧のウインドウに置いてください");
 		free(d);
 		return;
 	}
@@ -1827,8 +1827,8 @@ static void open_entry( XWIN *w, INT i )
 		go_to(w, d);
 		break;
 	default:
-		say(w, ( w->bt != NULL && !e->iso ) ? "仮身を TessronOS の窓へ運ぶと、結ばれた実身ごと取り込みます"
-			 : "ファイルは、仮身を TessronOS の窓へ運ぶと実身になります", FALSE);
+		say(w, ( w->bt != NULL && !e->iso ) ? "仮身を TessronOS のウインドウへ運ぶと、結ばれた実身ごと取り込みます"
+			 : "ファイルは、仮身を TessronOS のウインドウへ運ぶと実身になります", FALSE);
 		break;
 	}
 }
@@ -1842,7 +1842,7 @@ static void command( XWIN *w, CONST char *code, INT index )
 	else if ( strcmp(code, "export") == 0 ) do_export(w);
 	else if ( strcmp(code, "mount") == 0 ) {
 		if ( w == media ) mount_toggle();
-		else say(w, "マウント・取外しは、ファイル変換の窓でディスクを選んで行います", TRUE);
+		else say(w, "マウント・取外しは、ファイル変換のウインドウでディスクを選んで行います", TRUE);
 	} else if ( strcmp(code, "ftp") == 0 ) open_ftp(NULL);
 	else if ( strcmp(code, "up") == 0 ) go_up(w);
 	else if ( strcmp(code, "root") == 0 && w->kind == W_FILES ) go_to(w, (CONST UB *)"");

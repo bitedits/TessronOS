@@ -23,6 +23,7 @@
  */
 
 #include "ktest.h"
+#include "tstdlib.h"
 #include <ts/fn.h>
 #include <ts/wm.h>
 #include <ts/dp.h>
@@ -189,7 +190,8 @@ LOCAL void test_draw( void )
 	w1 = fn_width(fid, (CONST UB *)"AV");
 	KT_ASSERT(w1 > 0);
 	w2 = fn_width(fid, (CONST UB *)"AVAV");
-	KT_ASSERT_EQ(w2, w1 * 2);		/* twice the text, twice the width */
+	/* twice the text, twice the width -- to the pixel the halves round to */
+	KT_ASSERT(w2 >= w1 * 2 - 1 && w2 <= w1 * 2 + 1);
 	KT_ASSERT_EQ(fn_width(fid, (CONST UB *)""), 0);
 
 	/* the pen moves as far as the measurement said it would */
@@ -217,6 +219,92 @@ LOCAL void test_draw( void )
 
 	/* above the line: the work area's own colour, untouched */
 	KT_ASSERT_EQ((INT)at(o.left + x, o.top + 2), (INT)wm_look(WM_LOOK_WORK));
+}
+
+/*
+ * Letters are mixed into what is under them as light (dp_put_gray): half
+ * a pixel of black on white is half the light of white, the value 187 or
+ * so, not the value 128 that mixing the values gives; white letters are
+ * mixed as values, half a pixel of white on black being 128. A pixel the
+ * letter does not touch, or touches in the colour already there, is left
+ * as it was, and one it covers whole is the letter's colour.
+ */
+LOCAL INT blend_one( INT gid, UW ground, UW ink, UB cover )
+{
+	T_DPRECT	r;
+
+	r.left = 300;  r.top = 20;  r.right = 304;  r.bottom = 24;
+	(void)dp_fill_rect(gid, &r, ground);
+	(void)dp_put_gray(gid, 301, 21, &cover, 1, 1, 1, ink);
+
+	return dp_get_pixel(gid, 301, 21);
+}
+
+LOCAL void test_blend( void )
+{
+	INT	gid, v;
+
+	if ( wid <= 0 ) KT_SKIP("no window");
+	gid = wm_gid(wid);
+	if ( gid < 0 ) KT_SKIP("no window");
+
+	v = blend_one(gid, 0x00FFFFFFU, 0x00000000U, 128);
+	tm_printf((UB *)"  half black on white: %06x\n", v);
+	KT_ASSERT(( v & 0xFF ) >= 185 && ( v & 0xFF ) <= 190);
+	KT_ASSERT_EQ(( v >> 16 ) & 0xFF, v & 0xFF);
+	v = blend_one(gid, 0x00000000U, 0x00FFFFFFU, 128);
+	tm_printf((UB *)"  half white on black: %06x\n", v);
+	KT_ASSERT(( v & 0xFF ) >= 127 && ( v & 0xFF ) <= 129);
+	KT_ASSERT_EQ(blend_one(gid, 0x00FFFFFFU, 0x00000000U, 255), 0);
+	KT_ASSERT_EQ(blend_one(gid, 0x00FFFFFFU, 0x00000000U, 0), 0x00FFFFFF);
+	KT_ASSERT_EQ(blend_one(gid, 0x00808080U, 0x00808080U, 100), 0x00808080);
+	KT_ASSERT_EQ(blend_one(gid, 0x00123456U, 0x00000000U, 0), 0x00123456);
+	/* a coloured letter on white: each value between the two, nearer white */
+	v = blend_one(gid, 0x00FFFFFFU, 0x000000C0U, 128);
+	tm_printf((UB *)"  half blue on white: %06x\n", v);
+	KT_ASSERT(( v & 0xFF ) > 0xC0 && ( v & 0xFF ) < 0xFF);
+	KT_ASSERT(( ( v >> 16 ) & 0xFF ) > 128 && ( ( v >> 16 ) & 0xFF ) < 0xFF);
+}
+
+/*
+ * Letters stand where the face's own advances put them, a fraction of a
+ * pixel and all, and what is said of a string agrees with itself: the
+ * width of a longer start of a string is never less than of a shorter
+ * one, a start fits in its own width, and the whole of a string is
+ * within a pixel of its letters' widths summed without rounding --
+ * which the letters measured one by one, each rounded, need not be.
+ */
+LOCAL void test_subpixel( void )
+{
+	CONST UB	*s = (CONST UB *)"Willing minimal illumination, typography.";
+	UB		cut[64];
+	INT		n, k, w, last = 0, each = 0, whole;
+
+	if ( !ready ) KT_SKIP("no font");
+	KT_ASSERT_ER(fn_set_size(fid, 13), E_OK);
+	for ( n = 0; s[n] != 0; n++ ) ;
+	for ( k = 1; k <= n; k++ ) {
+		knl_memcpy(cut, s, (SZ)k);
+		cut[k] = 0;
+		w = fn_width(fid, cut);
+		KT_ASSERT(w >= last);
+		KT_ASSERT(fn_fit(fid, s, w) >= k);
+		last = w;
+		cut[0] = s[k - 1];
+		cut[1] = 0;
+		each += fn_width(fid, cut);
+	}
+	whole = fn_width(fid, s);
+	tm_printf((UB *)"  13 px: whole %d, letters one by one %d\n", whole, each);
+	KT_ASSERT_EQ(whole, last);
+	KT_ASSERT_EQ(fn_fit(fid, s, whole), n);
+	KT_ASSERT_EQ(fn_fit(fid, s, whole - 1) < n, TRUE);
+
+	/* drawn, the pen comes to the width measured */
+	if ( wid > 0 && wm_gid(wid) >= 0 ) {
+		KT_ASSERT_EQ(fn_draw(wm_gid(wid), fid, 10, 120, s, 0x00000000U), whole);
+	}
+	KT_ASSERT_ER(fn_set_size(fid, PX), E_OK);
 }
 
 /* a string cut to a width fits in that width */
@@ -411,14 +499,118 @@ LOCAL void test_japanese( void )
 	KT_ASSERT_EQ(n, 9);			/* not 10: that is half a character */
 }
 
+/*
+ * What a face is registered as (design 10.3): found by the family it is
+ * registered under, of the faces of a family the one most nearly the
+ * look asked for taken and what look it has said, a face not in use
+ * found by nothing and not counted, one opened to be looked at found by
+ * its name alone, and the letters a face has none of drawn from the
+ * face of its base family -- that face set back as it was afterwards.
+ */
+LOCAL void reg_named( T_FNREG *r, CONST char *family, UINT attr, UINT use )
+{
+	knl_memset(r, 0, sizeof(*r));
+	knl_strncpy((char *)r->family, family, FN_NAME_MAX - 1);
+	r->attr = attr;
+	r->use = use;
+}
+
+LOCAL void test_reg( void )
+{
+	T_FNREG		r, g;
+	T_FNSTATE	st;
+	ID		a = 0, b = 0;
+	UINT		has = 99;
+	INT		n0;
+
+	if ( !ready ) KT_SKIP("no font");
+	KT_ASSERT_ER(fn_open_mem(blob, blobsz, 0, &a), E_OK);
+	KT_ASSERT_ER(fn_open_mem(blob, blobsz, 0, &b), E_OK);
+	if ( a <= 0 || b <= 0 ) return;
+
+	/* a plain face and a bold one of the same family */
+	reg_named(&r, "KT Family", 0, FN_USE_ON);
+	KT_ASSERT_ER(fn_set_reg(a, &r), E_OK);
+	reg_named(&r, "KT Family", FN_FA_BOLD | FN_FA_PROP, FN_USE_ON);
+	KT_ASSERT_ER(fn_set_reg(b, &r), E_OK);
+	KT_ASSERT_ER(fn_get_reg(b, &g), E_OK);
+	KT_ASSERT_EQ((INT)g.attr, (INT)( FN_FA_BOLD | FN_FA_PROP ));
+	KT_ASSERT_ER(fn_set_reg(99, &r), E_ID);
+	KT_ASSERT_EQ((INT)fn_find_style((CONST UB *)"KT Family", FN_FA_BOLD, &has), (INT)b);
+	KT_ASSERT_EQ((INT)has, FN_FA_BOLD);
+	KT_ASSERT_EQ((INT)fn_find_style((CONST UB *)"kt family", 0, &has), (INT)a);
+	KT_ASSERT_EQ((INT)has, 0);
+	KT_ASSERT_EQ((INT)fn_find((CONST UB *)"\"KT Family\", serif"), (INT)a);
+	{
+		UB	fam[FN_NAME_MAX];
+
+		KT_ASSERT(fn_family(a, fam, sizeof(fam)) > 0 && knl_strcmp((char *)fam, "KT Family") == 0);
+	}
+
+	/* not in use: neither found nor counted */
+	n0 = fn_nface();
+	reg_named(&r, "KT Family", 0, FN_USE_OFF);
+	KT_ASSERT_ER(fn_set_reg(a, &r), E_OK);
+	KT_ASSERT_EQ(fn_nface(), n0 - 1);
+	KT_ASSERT_EQ((INT)fn_find_style((CONST UB *)"KT Family", 0, &has), (INT)b);
+	reg_named(&r, "KT Family", FN_FA_BOLD, FN_USE_OFF);
+	KT_ASSERT_ER(fn_set_reg(b, &r), E_OK);
+	KT_ASSERT_EQ((INT)fn_find((CONST UB *)"KT Family"), (INT)fn_system());
+
+	/* looked at only: by its own name, and by nothing else */
+	reg_named(&r, "見本:kt:0", 0, FN_USE_TRIAL);
+	KT_ASSERT_ER(fn_set_reg(a, &r), E_OK);
+	KT_ASSERT_EQ((INT)fn_find((CONST UB *)"見本:kt:0"), (INT)a);
+	KT_ASSERT_EQ(fn_nface(), n0 - 2);
+
+	/*
+	 * The base: the TrueType face of the tests has some forty letters
+	 * of ASCII only, and the letters it has not come from the system's
+	 * face when that is its base, as wide as there; those it has are
+	 * still its own.
+	 */
+	if ( from_file && fn_system() > 0 && fn_system() != a ) {
+		UB	sysfam[FN_NAME_MAX];
+		INT	w0, w1, ws, pxs, lat;
+
+		(void)fn_family(fn_system(), sysfam, sizeof(sysfam));
+		reg_named(&r, "KT Base", 0, FN_USE_ON);
+		KT_ASSERT_ER(fn_set_reg(a, &r), E_OK);
+		KT_ASSERT_ER(fn_set_size(a, 20), E_OK);
+		w0 = fn_width(a, (CONST UB *)"漢字");
+		lat = fn_width(a, (CONST UB *)"AB");
+		KT_ASSERT_ER(fn_state_get(fn_system(), &st), E_OK);
+		pxs = st.px;
+		knl_memcpy(r.base, sysfam, sizeof(r.base));
+		KT_ASSERT_ER(fn_set_reg(a, &r), E_OK);
+		w1 = fn_width(a, (CONST UB *)"漢字");
+		KT_ASSERT_ER(fn_state_get(fn_system(), &st), E_OK);
+		KT_ASSERT_EQ(st.px, pxs);		/* the base set back as it was */
+		KT_ASSERT_ER(fn_set_size(fn_system(), 20), E_OK);
+		ws = fn_width(fn_system(), (CONST UB *)"漢字");
+		KT_ASSERT_ER(fn_set_size(fn_system(), pxs > 0 ? pxs : PX), E_OK);
+		tm_printf((UB *)"  base: without %d, with %d, the base itself %d\n", w0, w1, ws);
+		KT_ASSERT_EQ(w1, ws);
+		/* the Latin letters are still the face's own */
+		KT_ASSERT(lat > 0);
+		KT_ASSERT_EQ(fn_width(a, (CONST UB *)"AB"), lat);
+	}
+
+	KT_ASSERT_ER(fn_close(a), E_OK);
+	KT_ASSERT_ER(fn_close(b), E_OK);
+}
+
 EXPORT void ktest_fn( void )
 {
 	KT_RUN(test_open);
 	KT_RUN(test_metrics);
 	KT_RUN(test_draw);
+	KT_RUN(test_blend);
+	KT_RUN(test_subpixel);
 	KT_RUN(test_fit);
 	KT_RUN(test_opentype);
 	KT_RUN(test_stream);
 	KT_RUN(test_japanese);
+	KT_RUN(test_reg);
 	KT_RUN(test_close);
 }

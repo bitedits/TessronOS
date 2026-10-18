@@ -587,7 +587,7 @@ LOCAL void lk_lock( RU_LOCK *l )
 			if ( !l->held && lk_try(l) ) {
 				return;
 			}
-			Asm("yield");
+			CpuRelax();
 		}
 		w.semid = sem_get();
 		w.woken = FALSE;

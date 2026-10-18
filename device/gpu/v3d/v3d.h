@@ -78,6 +78,8 @@ typedef struct {
 	UW	core_bits;	/* every core interrupt bit seen */
 	UW	fldone_count;	/* binner ends seen in the flush counter first */
 	UW	frdone_count;	/* renderer ends seen in the frame counter first */
+	UW	csddone;	/* compute dispatches the core told the end of */
+	UW	csd_jobs;	/* compute dispatch jobs ended */
 	UW	fault_sts;	/* the last fault: hub status, address, client */
 	UW	fault_addr;
 	UW	fault_id;
@@ -130,5 +132,13 @@ IMPORT BOOL	v3d_as_check( void );
 IMPORT ER	v3d_compose_init( void );
 IMPORT BOOL	v3d_compose_check( void );
 IMPORT void	v3d_compose_start( void );
+
+/*
+ * Compute dispatch: the check at start (v3d_compose.c) runs a small
+ * compute shader through the queue and compares what it wrote; the
+ * backend offers dispatches (GPU_FEAT_CSD) only while 'on' (v3d.c).
+ */
+IMPORT BOOL	v3d_csd_check( void );
+IMPORT void	v3d_csd_offer( BOOL on );
 
 #endif /* _DEVICE_GPU_V3D_V3D_H_ */

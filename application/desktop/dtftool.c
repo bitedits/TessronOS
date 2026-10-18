@@ -2572,9 +2572,49 @@ EXPORT void df_panel_show( DTWIN *d )
 		return;
 	}
 	panel_draw();
+	/*
+	 * A subordinate window of the figure's: kept just in front of it,
+	 * carried with it, and out of sight while a window of something
+	 * else is the one in use (design 10.4).
+	 */
+	(void)wm_set_parent(df_panel, d->wid);
 	wm_raise(d->wid);
-	wm_raise(df_panel);
 	wm_focus(d->wid);
+}
+
+/*
+ * The panel kept subordinate to the figure in use: the window with the
+ * keys when that is a figure's; while another window has them, the
+ * figure it is subordinate to, or, when that has closed, any figure's
+ * window. There is one panel for all of them, and it works the figure
+ * whose window has the keys (panel_target).
+ */
+EXPORT void df_panel_poll( void )
+{
+	DTWIN	*d = dt_win_of(wm_focused()), *p;
+	T_WMWIN	w;
+	INT	i;
+
+	if ( df_panel <= 0 || wm_ref(df_panel, &w) < E_OK ) {
+		return;
+	}
+	if ( d == NULL || !d->used || !d->figed ) {
+		p = ( w.parent > 0 ) ? dt_win_of(w.parent) : NULL;
+		if ( p != NULL && p->used && p->figed ) {
+			return;
+		}
+		d = NULL;
+		for ( i = 0; i < DT_MAX_WIN && d == NULL; i++ ) {
+			p = dt_win_at(i);
+			if ( p != NULL && p->used && p->figed && p->wid > 0 ) {
+				d = p;
+			}
+		}
+	}
+	if ( d != NULL && d->wid != w.parent ) {
+		(void)wm_set_parent(df_panel, d->wid);
+		wm_update();
+	}
 }
 
 EXPORT void df_panel_hide( void )
@@ -3189,7 +3229,8 @@ EXPORT void df_realsize_toggle( DTWIN *d )
 	}
 	rs_of = d;
 	rs_draw(d);
-	wm_raise(rs_wid);
+	(void)wm_set_parent(rs_wid, d->wid);	/* the panel of this figure's window */
+	wm_raise(d->wid);
 	wm_focus(d->wid);
 	wm_update();
 }

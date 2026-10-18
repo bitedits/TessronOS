@@ -638,18 +638,54 @@ LOCAL INT two_pages( CONST T_DISPHW *node, T_DISPHW *hw )
  * list for its framebuffer; showing another page is writing another
  * address there. Before anything is written, how the list holds the
  * framebuffer's address is looked for and written out: every word of
- * the scaler's registers that holds it in one of the forms an address
- * may take, with the words round it. Only read.
+ * the lists' memory that holds it in one of the forms an address may
+ * take, with the words round it. Only read.
+ *
+ * Only words the scaler has are read. Its registers come first, then
+ * the lists' memory at HVS_DL_START, as many words as the register at
+ * 4 says; the rest of the range the device tree gives has holes that
+ * answer a read with an SError. Which registers there are depends on
+ * the chip's stepping, told by the low byte of the first: 0x53 for C0
+ * (the Raspberry Pi 5 of 4 and 8 GB), 0x54 for D0 (the 2 GB one, the
+ * Raspberry Pi 500), whose registers lie elsewhere with gaps between.
  */
 #define HVS_PATH	"/hvs@107c580000"
 #define HVS_FORMS	6
 #define HVS_PTRS	4		/* the lists' words found holding the address */
+#define HVS_DL_START	0x4000		/* the lists' memory, from the registers' start */
+#define HVS_DL_SIZE	1		/* the register that holds its size in words */
+#define HVS_VER_C0	0x53
 
 IMPORT UD	knl_fb_page2;		/* pfalloc.c */
 
 LOCAL volatile UW	*hvs_ptr[HVS_PTRS];	/* the words of the lists that hold the address */
 LOCAL INT		hvs_nptr = 0;
 LOCAL UBINT		hvs_regs = 0;		/* the scaler's registers, virtually */
+LOCAL UW		hvs_ver = 0;		/* the stepping, the first register's low byte */
+
+/*
+ * The registers of a D0 scaler (and of one not known), as byte ranges
+ * [from, to): the only ones read at that stepping when the word that
+ * changes each frame is looked for
+ */
+LOCAL CONST UH hvs_d0_regs[][2] = {
+	{ 0x000, 0x018 }, { 0x020, 0x040 }, { 0x0d0, 0x0f4 }, { 0x0fc, 0x12c },
+	{ 0x140, 0x16c }, { 0x180, 0x1ac }
+};
+
+/* Whether the register at a byte offset may be read */
+LOCAL BOOL hvs_reg_ok( UW off )
+{
+	INT	i;
+
+	if ( hvs_ver == HVS_VER_C0 ) {
+		return (BOOL)( off < 0x200 );
+	}
+	for ( i = 0; i < (INT)( sizeof(hvs_d0_regs) / sizeof(hvs_d0_regs[0]) ); i++ ) {
+		if ( off >= hvs_d0_regs[i][0] && off < hvs_d0_regs[i][1] ) return TRUE;
+	}
+	return FALSE;
+}
 
 LOCAL void hvs_probe( UD fb_pa )
 {
@@ -657,7 +693,7 @@ LOCAL void hvs_probe( UD fb_pa )
 						     "with the bus's top bits", "its top word" };
 	CONST UB	*reg;
 	INT		len, k, found = 0;
-	UD		pa, size, i;
+	UD		pa, size, i, from, to;
 	UW		want[HVS_FORMS];
 	volatile UW	*w;
 
@@ -680,10 +716,17 @@ LOCAL void hvs_probe( UD fb_pa )
 	w = (volatile UW *)DEV_BASE(pa);
 	hvs_regs = (UBINT)w;
 	tm_printf((UB *)"hvs: at %lx, %lx bytes; looking for the framebuffer %lx\n", pa, size, fb_pa);
+	hvs_ver = w[0] & 0xFF;
 	tm_printf((UB *)"hvs: first words");
-	for ( i = 0; i < 32; i++ ) tm_printf((UB *)" %08x", w[i]);
+	for ( i = 0; i < 6; i++ ) tm_printf((UB *)" %08x", w[i]);
 	tm_printf((UB *)"\n");
-	for ( i = 0; i < size / 4 && found < 12; i++ ) {
+	from = HVS_DL_START / 4;
+	to = from + w[HVS_DL_SIZE];
+	if ( to > size / 4 ) to = size / 4;
+	tm_printf((UB *)"hvs: stepping %s (%02x), lists at %lx..%lx\n",
+		  ( hvs_ver == HVS_VER_C0 ) ? "C0" : ( hvs_ver == 0x54 ) ? "D0" : "not known",
+		  hvs_ver, from * 4, to * 4);
+	for ( i = from; i < to && found < 12; i++ ) {
 		UW	v = w[i];
 
 		for ( k = 0; k < HVS_FORMS - 1; k++ ) {
@@ -693,7 +736,7 @@ LOCAL void hvs_probe( UD fb_pa )
 				found++;
 				if ( k == 0 && hvs_nptr < HVS_PTRS ) hvs_ptr[hvs_nptr++] = &w[i];
 				tm_printf((UB *)"hvs: word %lx holds it %s:", i * 4, form[k]);
-				for ( j = ( i >= 8 ) ? i - 8 : 0; j < i + 8 && j < size / 4; j++ ) {
+				for ( j = ( i >= from + 8 ) ? i - 8 : from; j < i + 8 && j < to; j++ ) {
 					tm_printf((UB *)"%s%08x", ( j == i ) ? " [" : " ", w[j]);
 					if ( j == i ) tm_printf((UB *)"]");
 				}
@@ -832,13 +875,16 @@ LOCAL void hvs_frame_find( void )
 
 	if ( hvs_regs == 0 ) return;
 	for ( i = 0; i < HVS_FC_WORDS; i++ ) {
-		last[i] = w[i];
+		last[i] = hvs_reg_ok((UW)i * 4) ? w[i] : 0;
 		changes[i] = 0;
 	}
 	(void)ts_get_mono(&t0);
 	do {
 		for ( i = 0; i < HVS_FC_WORDS; i++ ) {
-			UW	v = w[i];
+			UW	v;
+
+			if ( !hvs_reg_ok((UW)i * 4) ) continue;
+			v = w[i];
 
 			if ( v != last[i] ) {
 				last[i] = v;
@@ -939,7 +985,7 @@ LOCAL ER hvs_flip( UINT page )
 	for ( k = 0; k < hvs_nptr; k++ ) {
 		*hvs_ptr[k] = hvs_addr[page];
 	}
-	__asm__ volatile ( "dsb sy" ::: "memory" );
+	DeviceBarrier();
 	return E_OK;
 }
 

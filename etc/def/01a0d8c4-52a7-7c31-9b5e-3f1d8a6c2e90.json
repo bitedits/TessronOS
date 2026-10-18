@@ -18,7 +18,7 @@
       "id": "unpack-file",
       "kind": "app",
       "name": "書庫解凍",
-      "version": "R1.100",
+      "version": "R1.110",
       "menu": false,
       "builtin": false,
       "base": [

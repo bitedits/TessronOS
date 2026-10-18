@@ -1,0 +1,34 @@
+--- a/src/gallium/drivers/v3d/v3d_screen.h
++++ b/src/gallium/drivers/v3d/v3d_screen.h
+@@ -85,5 +85,6 @@
+         bool has_csd;
+         bool has_cache_flush;
++        bool has_tfu;
+         bool has_perfmon;
+         bool nonmsaa_texture_size_limit;
+         bool has_cpu_queue;
+--- a/src/gallium/drivers/v3d/v3d_screen.c
++++ b/src/gallium/drivers/v3d/v3d_screen.c
+@@ -826,6 +826,7 @@
+         screen->has_csd = v3d_has_feature(screen, DRM_V3D_PARAM_SUPPORTS_CSD);
+         screen->has_cache_flush =
+                 v3d_has_feature(screen, DRM_V3D_PARAM_SUPPORTS_CACHE_FLUSH);
++        screen->has_tfu = v3d_has_feature(screen, DRM_V3D_PARAM_SUPPORTS_TFU);
+         screen->has_perfmon = v3d_has_feature(screen, DRM_V3D_PARAM_SUPPORTS_PERFMON);
+         screen->has_cpu_queue = v3d_has_feature(screen, DRM_V3D_PARAM_SUPPORTS_CPU_QUEUE);
+         screen->has_multisync = v3d_has_feature(screen, DRM_V3D_PARAM_SUPPORTS_MULTISYNC_EXT);
+--- a/src/gallium/drivers/v3d/v3dx_tfu.c
++++ b/src/gallium/drivers/v3d/v3dx_tfu.c
+@@ -52,6 +52,12 @@
+                 return false;
+         if (psrc->nr_samples != pdst->nr_samples)
+                 return false;
++        /* Without the texture formatting unit (the kernel's GET_PARAM
++         * says so) a blit is done by the other ways and mipmaps are
++         * drawn, before any job is flushed for it
++         */
++        if (!screen->has_tfu)
++                return false;
+ 
+         assert(!for_mipmap || pdst->target != PIPE_TEXTURE_3D);
+ 

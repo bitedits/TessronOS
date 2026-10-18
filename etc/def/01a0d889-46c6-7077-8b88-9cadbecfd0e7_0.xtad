@@ -1,7 +1,7 @@
 <tad version="1.0" encoding="UTF-8" filename="予定表の編集">
 <document>
 <p>予定表の編集</p>
-<p>予定表の窓の編集。トレーの履歴、取消、トレーとの複写と移動、仮身の削除。メニューの定義。</p>
+<p>予定表のウインドウの編集。トレーの履歴、取消、トレーとの複写と移動、仮身の削除。メニューの定義。</p>
 </document>
 <menu>
 <item code="tray">トレー<link id="01a0d889-460c-7eda-8b47-5745d175681c_0.xtad" vobjid="01a0d8c3-2002-7fd1-9a10-c1d2e3f40a13"/></item>

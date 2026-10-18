@@ -41,7 +41,7 @@ extern "C" {
 
 #include <ts/dp.h>
 
-#define FN_MAX_FONT	8		/* faces open at once */
+#define FN_MAX_FONT	16		/* faces open at once */
 
 /*
  * What the letters are drawn as, on top of the face: thickened, leaned,
@@ -91,7 +91,8 @@ IMPORT ER  fn_open_file( CONST char *path, INT index, ID *p_fid );
 /*
  * The same, from a record of a real object: a face kept as an object
  * (design 18.18). The record is read whole into pages of the face's
- * own, as a file is.
+ * own, as a file is. The face remembers the object and the index it
+ * came from (fn_of_obj).
  */
 IMPORT ER  fn_open_obj( CONST TS_UUID *uuid, INT recno, INT index, ID *p_fid );
 
@@ -120,8 +121,9 @@ IMPORT ER  fn_extent( ID fid, CONST UB *utf8, INT *p_above, INT *p_below );
 
 /*
  * The faces there are. fn_open_dir opens every font file in a directory
- * that is not open already; fn_nface and fn_face_at go through them;
- * fn_family says what one is called. fn_find answers the face a list of
+ * that is not open already; fn_nface and fn_face_at go through those in
+ * use; fn_family says what one is called (the family it is registered
+ * as, else its own). fn_find answers the face a list of
  * names asks for -- '"Noto Serif JP", serif' -- the first name that is
  * a face that is open, a general name (serif, sans-serif, monospace,
  * 明朝, ゴシック) the first face of that kind, and the system's face when
@@ -133,6 +135,63 @@ IMPORT ID  fn_face_at( INT i );
 IMPORT INT fn_family( ID fid, UB *buf, INT max );
 IMPORT ID  fn_find( CONST UB *names );
 IMPORT ER  fn_metrics( ID fid, T_FNMET *met );
+
+/*
+ * What a face is registered as (the 書体 of システム環境設定, design
+ * 10.3): the family documents name it by ("" the face's own), its class
+ * (the 16 bits that say what its letters look like: ornamented ends,
+ * strokes that swell, Japanese in feeling...; 0 none said), what its
+ * letters are (FN_FA_*), the family that draws the letters it has none
+ * of ("" none), and whether it is used.
+ *
+ * A face in use is found by its family and drawn with. A face not in
+ * use (FN_USE_OFF) stays open -- a window may still be drawing with it
+ * -- but is never found again, by name or by kind, and is not among
+ * fn_nface's. A face opened only to be looked at (FN_USE_TRIAL) is found
+ * by its family alone, which is then a name nothing else has.
+ *
+ * FN_FA_BOLD, FN_FA_ITALIC, FN_FA_BAG and FN_FA_SHADOW say the face's
+ * letters are drawn so already: asked for a family in one of these
+ * looks, the face of the family that has it is taken, and the look is
+ * not added to it again (fn_find_style). FN_FA_PROP and FN_FA_VERT are
+ * what the face's data says -- its letters of different widths, its
+ * forms for vertical writing -- and are not set by hand.
+ */
+#define FN_NAME_MAX	64
+
+#define FN_FA_BOLD	0x0001		/* 太字 */
+#define FN_FA_ITALIC	0x0002		/* 斜体 */
+#define FN_FA_BAG	0x0004		/* 袋文字 */
+#define FN_FA_SHADOW	0x0008		/* 影付文字 */
+#define FN_FA_PROP	0x0010		/* 比例: of the data */
+#define FN_FA_VERT	0x0020		/* 縦書き: of the data */
+#define FN_FA_LOOK	( FN_FA_BOLD | FN_FA_ITALIC | FN_FA_BAG | FN_FA_SHADOW )
+
+#define FN_USE_ON	0
+#define FN_USE_OFF	1
+#define FN_USE_TRIAL	2
+
+typedef struct {
+	UB	family[FN_NAME_MAX];
+	UINT	cls;
+	UINT	attr;			/* FN_FA_* */
+	UB	base[FN_NAME_MAX];
+	UINT	use;			/* FN_USE_* */
+} T_FNREG;
+
+IMPORT ER  fn_set_reg( ID fid, CONST T_FNREG *reg );
+IMPORT ER  fn_get_reg( ID fid, T_FNREG *reg );
+
+/* The face open from an object's face 'index' (fn_open_obj), in use or not, but not one opened to be looked at; 0 none */
+IMPORT ID  fn_of_obj( CONST TS_UUID *uuid, INT index );
+
+/*
+ * fn_find for letters in a look (FN_FA_LOOK bits wanted): of the faces
+ * of the family found, the one that is most nearly that look; *p_has
+ * says which of the bits the face has of itself, which the caller then
+ * does not add.
+ */
+IMPORT ID  fn_find_style( CONST UB *names, UINT want, UINT *p_has );
 
 /*
  * Draw UTF-8 text with the left end of its baseline at (x, y), in the

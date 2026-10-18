@@ -314,6 +314,162 @@ LOCAL void test_float( void )
 	KT_ASSERT_EQ(wm_self_check(), 0);
 }
 
+/* Whether wid is among the windows shown with a name (the ウインドウ menu's list) */
+LOCAL BOOL listed( INT wid )
+{
+	INT	wids[64], n = wm_list(wids, 64), i;
+
+	for ( i = 0; i < n; i++ ) {
+		if ( wids[i] == wid ) return TRUE;
+	}
+	return FALSE;
+}
+
+/*
+ * A subordinate window (a tool panel) is out of sight while a window of
+ * another group is in front, and comes back just in front of its window
+ * when that is in front again; a pop-up, a screen keyboard or a floating
+ * window over it does not put it away, a window a program opens does,
+ * what its program hid stays hidden,
+ * and when its window closes it is its own window, shown again.
+ */
+LOCAL void test_subs_away( void )
+{
+	T_DPRECT	o, r;
+	T_WMWIN		ws, wa;
+	INT		a, s, other, pop, kb, fl, nw;
+
+	if ( !have_wm ) KT_SKIP("no windows");
+
+	ts_disp_clear(0x00000000);
+	rect(&r, 0, 0, 400, 300);
+	rect(&o, 100, 100, 500, 400);
+	a = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "subs owner");
+	rect(&o, 520, 100, 900, 400);
+	other = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "subs other");
+	rect(&o, 150, 420, 350, 520);
+	s = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "subs tool");
+	KT_ASSERT(a >= 1 && other >= 1 && s >= 1);
+	if ( a < 1 || other < 1 || s < 1 ) return;
+	KT_ASSERT_ER(dp_fill_rect(wm_gid(s), &r, 0x00666666), E_OK);
+	KT_ASSERT_ER(wm_set_parent(s, a), E_OK);
+
+	/* its window in use: shown, just in front of it, the two in front */
+	KT_ASSERT_ER(wm_raise(a), E_OK);
+	KT_ASSERT_ER(wm_focus(a), E_OK);
+	KT_ASSERT_ER(wm_ref(s, &ws), E_OK);
+	KT_ASSERT_ER(wm_ref(a, &wa), E_OK);
+	KT_ASSERT_EQ(ws.away, 0);
+	KT_ASSERT_EQ(ws.z, 0);
+	KT_ASSERT_EQ(wa.z, 1);
+	KT_ASSERT(listed(s));
+	KT_ASSERT_ER(wm_composite(), E_OK);
+	KT_ASSERT_EQ(at(250, 480), 0x666666);
+
+	/* another window in use: out of sight, though its program still has it shown */
+	KT_ASSERT_ER(wm_raise(other), E_OK);
+	KT_ASSERT_ER(wm_focus(other), E_OK);
+	KT_ASSERT_ER(wm_ref(s, &ws), E_OK);
+	KT_ASSERT_EQ(ws.away, 1);
+	KT_ASSERT_EQ(ws.visible, 1);
+	KT_ASSERT(!listed(s));
+	KT_ASSERT_EQ(wm_self_check(), 0);
+	KT_ASSERT_ER(wm_composite(), E_OK);
+	KT_ASSERT(at(250, 480) != 0x666666);
+	KT_ASSERT(wm_at(250, 480) != s);
+
+	/* its window in use again: back, just in front of it, the two in front */
+	KT_ASSERT_ER(wm_raise(a), E_OK);
+	KT_ASSERT_ER(wm_focus(a), E_OK);
+	KT_ASSERT_ER(wm_ref(s, &ws), E_OK);
+	KT_ASSERT_ER(wm_ref(a, &wa), E_OK);
+	KT_ASSERT_EQ(ws.away, 0);
+	KT_ASSERT_EQ(ws.z, 0);
+	KT_ASSERT_EQ(wa.z, 1);
+	KT_ASSERT(listed(s));
+	KT_ASSERT_ER(wm_composite(), E_OK);
+	KT_ASSERT_EQ(at(250, 480), 0x666666);
+
+	/* the tool window itself pressed and given the keys: its group is the one in use */
+	KT_ASSERT_ER(wm_raise(s), E_OK);
+	KT_ASSERT_ER(wm_focus(s), E_OK);
+	KT_ASSERT_ER(wm_ref(s, &ws), E_OK);
+	KT_ASSERT_EQ(ws.away, 0);
+	KT_ASSERT_ER(wm_focus(a), E_OK);
+
+	/* a pop-up with the keys, or a screen keyboard pressed: it stays */
+	rect(&o, 600, 500, 700, 560);
+	pop = wm_open(&o, WM_ATTR_POPUP, NULL);
+	KT_ASSERT(pop >= 1);
+	if ( pop >= 1 ) {
+		KT_ASSERT_ER(wm_focus(pop), E_OK);
+		KT_ASSERT_ER(wm_ref(s, &ws), E_OK);
+		KT_ASSERT_EQ(ws.away, 0);
+		KT_ASSERT_ER(wm_close(pop), E_OK);
+	}
+	KT_ASSERT_ER(wm_focus(a), E_OK);
+	rect(&o, 600, 600, 800, 700);
+	kb = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_NOFOCUS, "subs keyboard");
+	KT_ASSERT(kb >= 1);
+	if ( kb >= 1 ) {
+		KT_ASSERT_ER(wm_raise(kb), E_OK);
+		KT_ASSERT_ER(wm_ref(s, &ws), E_OK);
+		KT_ASSERT_EQ(ws.away, 0);
+		KT_ASSERT_ER(wm_close(kb), E_OK);
+	}
+
+	/* a floating window without the keys stays in front of all: it stays */
+	rect(&o, 600, 600, 800, 700);
+	fl = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_FLOAT, "subs float");
+	KT_ASSERT(fl >= 1);
+	if ( fl >= 1 ) {
+		KT_ASSERT_ER(wm_ref(s, &ws), E_OK);
+		KT_ASSERT_EQ(ws.away, 0);
+		KT_ASSERT_ER(wm_close(fl), E_OK);
+	}
+
+	/* a window a program opens comes up in front: out of sight; closed: back */
+	rect(&o, 560, 450, 760, 560);
+	nw = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "subs new");
+	KT_ASSERT(nw >= 1);
+	if ( nw >= 1 ) {
+		KT_ASSERT_ER(wm_ref(s, &ws), E_OK);
+		KT_ASSERT_EQ(ws.away, 1);
+		KT_ASSERT_ER(wm_close(nw), E_OK);
+		KT_ASSERT_ER(wm_ref(s, &ws), E_OK);
+		KT_ASSERT_EQ(ws.away, 0);
+	}
+
+	/* hidden by its program: hidden whichever group is in use */
+	KT_ASSERT_ER(wm_show(s, FALSE), E_OK);
+	KT_ASSERT_ER(wm_raise(other), E_OK);
+	KT_ASSERT_ER(wm_raise(a), E_OK);
+	KT_ASSERT_ER(wm_ref(s, &ws), E_OK);
+	KT_ASSERT_EQ(ws.visible, 0);
+	KT_ASSERT_EQ(ws.away, 0);
+	/* shown by its program while another group is in use: it waits out of sight */
+	KT_ASSERT_ER(wm_raise(other), E_OK);
+	KT_ASSERT_ER(wm_focus(other), E_OK);
+	KT_ASSERT_ER(wm_show(s, TRUE), E_OK);
+	KT_ASSERT_ER(wm_ref(s, &ws), E_OK);
+	KT_ASSERT_EQ(ws.away, 1);
+	KT_ASSERT_EQ(wm_self_check(), 0);
+
+	/* its window closed while it is out of sight: its own window, shown */
+	KT_ASSERT_ER(wm_close(a), E_OK);
+	KT_ASSERT_ER(wm_ref(s, &ws), E_OK);
+	KT_ASSERT_EQ(ws.parent, 0);
+	KT_ASSERT_EQ(ws.away, 0);
+	KT_ASSERT_EQ(ws.visible, 1);
+	KT_ASSERT(listed(s));
+	KT_ASSERT_EQ(wm_self_check(), 0);
+
+	KT_ASSERT_ER(wm_close(s), E_OK);
+	KT_ASSERT_ER(wm_close(other), E_OK);
+	(void)wm_focus(0);
+	KT_ASSERT_EQ(wm_self_check(), 0);
+}
+
 /* a window wholly behind another is not laid down */
 LOCAL void test_skip( void )
 {
@@ -3287,6 +3443,7 @@ EXPORT void ktest_wm( void )
 	KT_RUN(test_draw);
 	KT_RUN(test_order);
 	KT_RUN(test_float);
+	KT_RUN(test_subs_away);
 	KT_RUN(test_skip);
 	KT_RUN(test_damage);
 	KT_RUN(test_many);

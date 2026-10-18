@@ -58,19 +58,19 @@ size_t pth_tls_align( void )
 	return ( a < 16 ) ? 16 : a;
 }
 
-/* Bytes from the control block to the end of the thread's copy */
+/* Bytes of the control block and the thread's copy together (pth_cpu.h) */
 size_t pth_tls_size( void )
 {
-	return up(16, pth_tls_align()) + (size_t)__tls_memsz;
+	return pth_tls_bytes(pth_tls_align(), (size_t)__tls_memsz);
 }
 
 void *pth_tls_make( void *at, PTH *owner )
 {
-	char	*tp = (char *)at;
-	char	*data = tp + up(16, pth_tls_align());
+	char	*tp = (char *)at + pth_tls_tp_off(pth_tls_align(), (size_t)__tls_memsz);
+	char	*data = (char *)at + pth_tls_data_off(pth_tls_align(), (size_t)__tls_memsz);
 
-	((PTH **)tp)[0] = owner;
-	((PTH **)tp)[1] = NULL;
+	((PTH **)tp)[PTH_TCB_OWNER] = owner;
+	((PTH **)tp)[PTH_TCB_EXIT] = NULL;
 	memcpy(data, __tls_start, (size_t)__tls_filesz);
 	memset(data + (size_t)__tls_filesz, 0, (size_t)__tls_memsz - (size_t)__tls_filesz);
 	return tp;
@@ -78,7 +78,7 @@ void *pth_tls_make( void *at, PTH *owner )
 
 static inline void set_tp( void *tp )
 {
-	__asm__ volatile ( "msr tpidr_el0, %0" :: "r"(tp) : "memory" );
+	pth_tp_set(tp);
 }
 
 /* ---------------------------------------------------------------- the main thread */
@@ -260,7 +260,7 @@ static void thread_entry( INT stacd, void *exinf )
 
 	(void)stacd;
 	set_tp(t->tls);
-	((void **)t->tls)[1] = &ex;		/* the second word of the control block */
+	((void **)t->tls)[PTH_TCB_EXIT] = &ex;	/* the control block's word for it */
 	if ( setjmp(ex.jb) == 0 ) {
 		(void)__ts_call_on_stack(t->stk_hi, thread_body, t);
 	}

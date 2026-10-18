@@ -18,7 +18,7 @@
       "id": "base-calendar",
       "kind": "app",
       "name": "予定表",
-      "version": "R1.100",
+      "version": "R1.110",
       "menu": false,
       "builtin": false,
       "base": [

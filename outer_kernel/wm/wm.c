@@ -86,8 +86,14 @@ typedef struct {
 	T_DPPOINT	scroll;
 	INT		gid;
 	INT		z;		/* 0 is nearest the viewer */
-	INT		parent;		/* a subordinate window's window, kept just behind it; 0 none */
+	INT		parent;		/* a subordinate window's window, kept just in front of it; 0 none */
 	BOOL		visible;
+	/*
+	 * A subordinate window put out of sight because its group is not the
+	 * one in use (subs_away): shown as far as its program knows, and
+	 * shown again when its group is. visible is FALSE while it is.
+	 */
+	BOOL		away;
 	char		title[WM_TITLE_MAX];
 	INT		pict;		/* the picture in the band, by number */
 	ID		owner;		/* whose pictures and panels are looked in */
@@ -117,6 +123,34 @@ LOCAL UW		wm_win_serial = 0;	/* counted up as windows open */
 /* The outlines of what is being carried, on the screen */
 LOCAL T_DPRECT		wm_drag[WM_DRAG_MAX];
 LOCAL INT		wm_ndrag = 0;
+/*
+ * What each carried thing looks like (wm_set_drag_from), taken off the
+ * screen where it lay when the carry began; NULL draws its outline. A
+ * picture is laid only where the outline given is of its size.
+ */
+#define WM_DRAG_PX_MAX	( 4 * 1024 * 1024 )	/* pixels of all of them together */
+LOCAL UW		*wm_dpx[WM_DRAG_MAX];
+LOCAL INT		wm_dpw[WM_DRAG_MAX], wm_dph[WM_DRAG_MAX];
+
+/* The pictures of the carried things let go (under the lock) */
+LOCAL void drag_pict_free( void )
+{
+	INT	i;
+
+	for ( i = 0; i < WM_DRAG_MAX; i++ ) {
+		if ( wm_dpx[i] != NULL ) {
+			Kfree(wm_dpx[i]);
+			wm_dpx[i] = NULL;
+		}
+	}
+}
+
+/* Whether carried thing k is laid as its picture (under the lock) */
+LOCAL BOOL drag_pict( INT k )
+{
+	return (BOOL)( wm_dpx[k] != NULL && wm_drag[k].right - wm_drag[k].left == wm_dpw[k]
+		    && wm_drag[k].bottom - wm_drag[k].top == wm_dph[k] );
+}
 /* A picture laid over every window (wm_set_loupe), NULL none */
 LOCAL UW		*wm_loupe = NULL;
 LOCAL T_DPRECT		wm_loupe_at;
@@ -993,6 +1027,7 @@ LOCAL void surf_tell( CONST WMSURF *s, T_WMSURF *out )
 /* ---------------------------------------------------------------- windows */
 
 LOCAL void floats_front( void );
+LOCAL void subs_away( void );
 
 EXPORT INT wm_open( CONST T_DPRECT *outer, UINT attr, CONST char *title )
 {
@@ -1071,6 +1106,7 @@ EXPORT INT wm_open( CONST T_DPRECT *outer, UINT attr, CONST char *title )
 	if ( ( attr & ( WM_ATTR_POPUP | WM_ATTR_FLOAT ) ) == 0 ) {
 		floats_front();
 	}
+	subs_away();			/* it is in front: another group may be in use now */
 
 	/*
 	 * The environment that draws into this window. Its origin is the
@@ -1241,8 +1277,24 @@ EXPORT ER wm_close( INT wid )
 	}
 	w->own = NULL;
 	w->used = FALSE;
+	w->away = FALSE;
 	wm_nwin--;
 	z_close_gap(z);
+	{
+		/*
+		 * Its subordinate windows are on their own now: a later window
+		 * given the same number must not take them as its own. One put
+		 * out of sight comes back (subs_away below), so that what its
+		 * program has not closed can still be seen and closed.
+		 */
+		INT	i;
+
+		for ( i = 0; i < WM_MAX_WIN; i++ ) {
+			if ( wm_win[i].used && wm_win[i].parent == wid ) {
+				wm_win[i].parent = 0;
+			}
+		}
+	}
 	if ( wm_focus_wid == wid ) {
 		/*
 		 * The input goes on to the window that was behind: the one in
@@ -1258,6 +1310,7 @@ EXPORT ER wm_close( INT wid )
 			gone_add(&n->outer);
 		}
 	}
+	subs_away();
 	tk_unl_mtx(wm_mtxid);
 	surf_drop(&surf);
 	knl_wmobj_close(wid);
@@ -1306,8 +1359,9 @@ EXPORT ER wm_ref( INT wid, T_WMWIN *out )
 		out->scroll  = w->scroll;
 		out->gid     = w->gid;
 		out->z       = w->z;
-		out->visible = ( w->visible ) ? 1 : 0;
+		out->visible = ( w->visible || w->away ) ? 1 : 0;
 		out->parent  = w->parent;
+		out->away    = ( w->away ) ? 1 : 0;
 	}
 	tk_unl_mtx(wm_mtxid);
 
@@ -1656,9 +1710,22 @@ EXPORT INT wm_title( INT wid, char *buf, INT max )
 LOCAL void sub_place( WMWIN *s, WMWIN *p )
 {
 	INT	i, old = s->z, pz;
+	BOOL	between = FALSE;
 
 	if ( s->z == p->z - 1 ) {
 		return;
+	}
+	if ( s->z < p->z ) {
+		/* in front of it with only others of its window between: it stays */
+		for ( i = 0; i < WM_MAX_WIN && !between; i++ ) {
+			if ( wm_win[i].used && wm_win[i].z > s->z && wm_win[i].z < p->z
+			  && wm_win[i].parent != s->parent ) {
+				between = TRUE;
+			}
+		}
+		if ( !between ) {
+			return;
+		}
 	}
 	for ( i = 0; i < WM_MAX_WIN; i++ ) {
 		if ( wm_win[i].used && &wm_win[i] != s && wm_win[i].z > old ) {
@@ -1697,6 +1764,98 @@ LOCAL void subs_front( void )
 	}
 }
 
+/*
+ * The window a window belongs with in the end: its window's window and
+ * so on, up to one that is subordinate to none. Called with the lock held.
+ */
+LOCAL INT root_of( INT wid )
+{
+	WMWIN	*w;
+	INT	guard;
+
+	for ( guard = 0; guard < WM_MAX_WIN; guard++ ) {
+		w = win_of(wid);
+		if ( w == NULL || w->parent <= 0 || w->parent == wid
+		  || win_of(w->parent) == NULL ) {
+			break;
+		}
+		wid = w->parent;
+	}
+	return wid;
+}
+
+/*
+ * The group in use, by the window it is rooted at: that of the window
+ * nearest the viewer that a person works in -- shown, with a name band
+ * or subordinate to a window, and not a pop-up (a menu, a panel asking
+ * something, which stands over the window it was opened from) nor a
+ * window that never has the keys (a screen keyboard). A floating window
+ * counts only while it has the keys: it stays in front of the others
+ * whichever is worked in. A window a program opens comes up in front,
+ * so its group is the one in use from then on, as it is when a window
+ * is pressed and brought forward. 0 when there is none. Called with the
+ * lock held.
+ */
+LOCAL INT active_root( void )
+{
+	INT	i, best = 0, bz = 0;
+
+	for ( i = 1; i <= WM_MAX_WIN; i++ ) {
+		WMWIN	*w = win_of(i);
+
+		if ( w == NULL || !w->visible
+		  || ( w->attr & ( WM_ATTR_POPUP | WM_ATTR_NOFOCUS ) ) != 0
+		  || ( ( w->attr & WM_ATTR_TITLE ) == 0 && w->parent <= 0 )
+		  || ( ( w->attr & WM_ATTR_FLOAT ) != 0 && i != wm_focus_wid ) ) {
+			continue;
+		}
+		if ( best == 0 || w->z < bz ) {
+			best = i;
+			bz = w->z;
+		}
+	}
+	return ( best > 0 ) ? root_of(best) : 0;
+}
+
+/*
+ * The subordinate windows of every group but the one in use put out of
+ * sight, and those of the one in use shown again. A tool panel works
+ * the window it belongs to and nothing else: over another program's
+ * window it would only be in the way, and pressed there it would bring
+ * its own window forward unasked. Its place among the others stays as
+ * it is (sub_place), so it comes back just in front of its window. A
+ * pop-up is left as it is: it is up only while it is answered. Called
+ * with the lock held, after anything that changes which group is in use.
+ */
+LOCAL void subs_away( void )
+{
+	INT	i, act = active_root();
+	BOOL	out;
+
+	for ( i = 0; i < WM_MAX_WIN; i++ ) {
+		WMWIN	*s = &wm_win[i];
+
+		if ( !s->used ) {
+			continue;
+		}
+		if ( s->parent <= 0 || win_of(s->parent) == NULL
+		  || ( s->attr & WM_ATTR_POPUP ) != 0 ) {
+			out = FALSE;
+		} else {
+			out = (BOOL)( act != 0 && root_of(i + 1) != act );
+		}
+		if ( out && s->visible ) {
+			gone_win(s);
+			s->visible = FALSE;
+			s->away = TRUE;
+		} else if ( !out && s->away ) {
+			s->away = FALSE;
+			s->visible = TRUE;
+			gone_win(s);
+		}
+	}
+}
+
 /* wid made a subordinate window of parent (0: its own again) */
 EXPORT ER wm_set_parent( INT wid, INT parent )
 {
@@ -1711,6 +1870,7 @@ EXPORT ER wm_set_parent( INT wid, INT parent )
 	w->parent = parent;
 	subs_front();
 	floats_front();
+	subs_away();
 	tk_unl_mtx(wm_mtxid);
 
 	return E_OK;
@@ -1749,6 +1909,7 @@ EXPORT ER wm_raise( INT wid )
 	if ( old != w->z && w->visible ) {
 		gone_win(w);		/* it now covers what covered it */
 	}
+	subs_away();
 	tk_unl_mtx(wm_mtxid);
 
 	return E_OK;
@@ -1776,6 +1937,7 @@ EXPORT ER wm_lower( INT wid )
 	if ( old != w->z && w->visible ) {
 		gone_win(w);		/* what it covered shows now */
 	}
+	subs_away();
 	tk_unl_mtx(wm_mtxid);
 
 	return E_OK;
@@ -1792,6 +1954,9 @@ EXPORT ER wm_show( INT wid, BOOL on )
 			gone_win(w);		/* it shows, or what it covered does */
 		}
 		w->visible = on;
+		/* shown while its group is not in use: it waits out of sight */
+		w->away = FALSE;
+		subs_away();
 	}
 	tk_unl_mtx(wm_mtxid);
 
@@ -3218,6 +3383,7 @@ EXPORT ER wm_focus( INT wid )
 		draw_frame(w);
 		if ( w->visible ) gone_add(&w->outer);
 	}
+	subs_away();			/* another group may be in use now */
 	tk_unl_mtx(wm_mtxid);
 
 	return E_OK;
@@ -3395,6 +3561,7 @@ EXPORT ER wm_read_event( T_WMEV *ev, TMO tmout )
 	if ( !wm_ready ) {
 		return E_NOEXS;
 	}
+again:
 	/* a row waiting for its list: not waited past when it is due */
 	{
 		INT	left = knl_menu_wait(), blink = knl_pn_wait();
@@ -3489,6 +3656,10 @@ EXPORT ER wm_read_event( T_WMEV *ev, TMO tmout )
 			ev->y -= w->work.top;
 		}
 		tk_unl_mtx(wm_mtxid);
+	}
+	/* while a pop-up's list is open, every input is the list's and goes no further */
+	if ( knl_pn_list_event(ev) ) {
+		goto again;
 	}
 	/* to whoever asked to be told; a press on the ground too, which puts
 	   a program's menu away */
@@ -3856,6 +4027,21 @@ LOCAL void build_part( CONST PLAN *pl, UB *back, CONST LOOKNOW *look, UD now )
 			T_DPRECT	e[4], d = wm_drag[k];
 			INT		j;
 
+			if ( drag_pict(k) ) {
+				/* the thing itself, as it looked where it was taken */
+				e[0] = d;
+				if ( rect_cut(&e[0], &box) ) {
+					for ( y = e[0].top; y < e[0].bottom; y++ ) {
+						UW	*p = (UW *)(back + (UBINT)y * wm_spec.pitch);
+						CONST UW *s = wm_dpx[k] + (UBINT)( y - d.top ) * (UBINT)wm_dpw[k] - d.left;
+
+						for ( x = e[0].left; x < e[0].right; x++ ) {
+							p[x] = s[x];
+						}
+					}
+				}
+				continue;
+			}
 			e[0].left = d.left;  e[0].right = d.right;
 			e[0].top = d.top;    e[0].bottom = d.top + 1;
 			e[1].left = d.left;  e[1].right = d.right;
@@ -4757,6 +4943,10 @@ LOCAL void drag_parts( PARTS *p, CONST T_DPRECT *r, INT n )
 	INT		i;
 
 	for ( i = 0; i < n; i++ ) {
+		if ( drag_pict(i) ) {
+			parts_add(p, &r[i]);	/* a picture covers all of it */
+			continue;
+		}
 		e = r[i];
 		e.bottom = e.top + 1;
 		parts_add(p, &e);
@@ -4797,12 +4987,67 @@ EXPORT ER wm_set_drag( CONST T_DPRECT *r, INT n )
 	}
 	wm_ndrag = n;
 	drag_parts(&p, wm_drag, wm_ndrag);
+	if ( n == 0 ) {
+		drag_pict_free();	/* the carry is over */
+	}
 	tk_unl_mtx(wm_mtxid);
 
 	if ( p.n == 0 ) {
 		return E_OK;
 	}
 	wait_built(ask(0, &p));
+
+	return E_OK;
+}
+
+/*
+ * What the things about to be carried look like: each rectangle of the
+ * screen (where the thing lies now, in screen coordinates) copied as it
+ * is shown, without the pointer, to be laid in place of the outline
+ * wm_set_drag gives for it at the same place in the list. A rectangle
+ * not wholly on the screen, or past WM_DRAG_PX_MAX pixels in all, keeps
+ * its outline. They are let go with the outlines (wm_set_drag n 0).
+ */
+EXPORT ER wm_set_drag_from( CONST T_DPRECT *r, INT n )
+{
+	UW	*px[WM_DRAG_MAX];
+	INT	i, w, h;
+	SZ	total = 0;
+
+	if ( !wm_ready ) {
+		return E_NOEXS;
+	}
+	if ( n < 0 || n > WM_DRAG_MAX || ( n > 0 && r == NULL ) ) {
+		return E_PAR;
+	}
+	for ( i = 0; i < n; i++ ) {
+		px[i] = NULL;
+		w = r[i].right - r[i].left;
+		h = r[i].bottom - r[i].top;
+		if ( w <= 0 || h <= 0 || r[i].left < 0 || r[i].top < 0
+		  || r[i].right > (INT)wm_spec.width || r[i].bottom > (INT)wm_spec.height
+		  || total + (SZ)w * h > WM_DRAG_PX_MAX ) {
+			continue;
+		}
+		px[i] = (UW *)Kmalloc((SZ)w * h * sizeof(UW));
+		if ( px[i] == NULL ) {
+			continue;
+		}
+		if ( wm_grab_screen(px[i], w, &r[i], FALSE) < E_OK ) {
+			Kfree(px[i]);
+			px[i] = NULL;
+			continue;
+		}
+		total += (SZ)w * h;
+	}
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	drag_pict_free();
+	for ( i = 0; i < n; i++ ) {
+		wm_dpx[i] = px[i];
+		wm_dpw[i] = r[i].right - r[i].left;
+		wm_dph[i] = r[i].bottom - r[i].top;
+	}
+	tk_unl_mtx(wm_mtxid);
 
 	return E_OK;
 }
@@ -5038,6 +5283,11 @@ EXPORT INT wm_self_check( void )
 			continue;
 		}
 		if ( wm_win[i].z < 0 || wm_win[i].z >= wm_nwin ) {
+			faults++;
+		}
+
+		/* one out of sight for its group is a subordinate window, and not shown */
+		if ( wm_win[i].away && ( wm_win[i].visible || wm_win[i].parent <= 0 ) ) {
 			faults++;
 		}
 

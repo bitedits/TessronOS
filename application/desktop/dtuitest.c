@@ -35,6 +35,11 @@
  *				to eight) its start-up argument: "ok PID"
  *	  win TITLE		the window whose band says TITLE: "ok L T R B" of its outside
  *	  wins			every window shown, nearest first: "ok N" then one line each
+ *	  front TAG T1|T2|...	the windows shown whose bands say T1, T2, ... are the
+ *				nearest ones, in that order: "ok TAG: in front"
+ *	  hidden TAG T		no window shown says T: "ok TAG: hidden"; both are
+ *				looked at again for up to two seconds while the screen settles,
+ *				and the TAG lets a test expect each answer apart
  *	  wait MS		nothing for so long, and then the answer
  *	  idle			the input taken and the screen made up (a short wait)
  *	  lag MS		the pointer moved to and fro for MS ms: "ok WORST MOVES LATE",
@@ -307,6 +312,105 @@ LOCAL void all_wins( void )
 	}
 }
 
+/*
+ * The tag of a front or hidden line, and where what follows it begins:
+ * FALSE when there is no tag
+ */
+LOCAL BOOL tag_of( CONST char **p, char *tag, INT max )
+{
+	CONST char	*s = skip(*p);
+	INT		n = 0;
+
+	while ( *s != 0 && *s != ' ' && *s != '\t' && n < max - 1 ) tag[n++] = *s++;
+	tag[n] = 0;
+	*p = skip(s);
+	return (BOOL)( n > 0 );
+}
+
+LOCAL void say_tagged( CONST char *tag, CONST char *what )
+{
+	char	b[UT_LINE];
+	INT	n = 0, i;
+
+	b[n++] = 'o';  b[n++] = 'k';  b[n++] = ' ';
+	for ( i = 0; tag[i] != 0 && n < UT_LINE - 40; i++ ) b[n++] = tag[i];
+	b[n++] = ':';  b[n++] = ' ';
+	for ( i = 0; what[i] != 0 && n < UT_LINE - 2; i++ ) b[n++] = what[i];
+	b[n++] = '\n';
+	b[n] = 0;
+	say(b);
+}
+
+/* Whether the n names of 'names' (split by '|') are the first n windows of the list, in that order */
+LOCAL BOOL front_is( CONST char *names )
+{
+	INT	wids[32], n = wm_list(wids, 32), i = 0, k;
+	char	want[WM_TITLE_MAX], t[WM_TITLE_MAX];
+
+	while ( *names != 0 ) {
+		for ( k = 0; names[k] != 0 && names[k] != '|' && k < WM_TITLE_MAX - 1; k++ ) {
+			want[k] = names[k];
+		}
+		want[k] = 0;
+		names += k;
+		if ( *names == '|' ) names++;
+		if ( i >= n || wm_title(wids[i], t, sizeof(t)) < 0 || !same_title(t, want) ) {
+			return FALSE;
+		}
+		i++;
+	}
+	return (BOOL)( i > 0 );
+}
+
+LOCAL BOOL shown_named( CONST char *title )
+{
+	INT	wids[32], n = wm_list(wids, 32), i;
+	char	t[WM_TITLE_MAX];
+
+	for ( i = 0; i < n; i++ ) {
+		if ( wm_title(wids[i], t, sizeof(t)) >= 0 && same_title(t, title) ) return TRUE;
+	}
+	return FALSE;
+}
+
+LOCAL void front_check( CONST char *s )
+{
+	char	tag[32];
+	INT	tries;
+
+	if ( !tag_of(&s, tag, sizeof(tag)) || *s == 0 ) {
+		say("err front TAG T1|T2\n");
+		return;
+	}
+	for ( tries = 0; tries < 20; tries++ ) {
+		if ( front_is(s) ) {
+			say_tagged(tag, "in front");
+			return;
+		}
+		tk_dly_tsk(100);
+	}
+	say("err not in front\n");
+}
+
+LOCAL void hidden_check( CONST char *s )
+{
+	char	tag[32];
+	INT	tries;
+
+	if ( !tag_of(&s, tag, sizeof(tag)) || *s == 0 ) {
+		say("err hidden TAG T\n");
+		return;
+	}
+	for ( tries = 0; tries < 20; tries++ ) {
+		if ( !shown_named(s) ) {
+			say_tagged(tag, "hidden");
+			return;
+		}
+		tk_dly_tsk(100);
+	}
+	say("err still shown\n");
+}
+
 /* An object opened as a double press on a link to it opens it, asked of the desktop as a program asks */
 LOCAL void open_obj( CONST char *us )
 {
@@ -558,6 +662,10 @@ LOCAL void line( CONST char *s )
 		find_win(skip(s));
 	} else if ( word(&s, "wins") ) {
 		all_wins();
+	} else if ( word(&s, "front") ) {
+		front_check(s);
+	} else if ( word(&s, "hidden") ) {
+		hidden_check(s);
 	} else if ( word(&s, "wait") && num(&s, &x, FALSE) ) {
 		tk_dly_tsk(( x > 0 ) ? x : 0);
 		say("ok\n");

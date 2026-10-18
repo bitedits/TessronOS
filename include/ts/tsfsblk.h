@@ -55,6 +55,17 @@ extern "C" {
 #define TSFSBLK_ST_NOFLUSH	0x0004	/* the device cannot be told to empty its cache */
 
 /*
+ * Features. A volume that has been grown (ts_grow_vol_blk) keeps the
+ * journal and the size of a group it was made with, so its groups are
+ * not the ones layout() would choose for its size now: GROWN says so to
+ * a check. GROWING is set while a grow is being written; a kernel that
+ * does not know it does not open such a volume, and one that does
+ * finishes the grow when it opens it (grow_to is where it is going).
+ */
+#define TSFSBLK_COMPAT_GROWN		0x0001ULL
+#define TSFSBLK_INCOMPAT_GROWING	0x0001ULL
+
+/*
  * Superblock, as it is held in memory. Two copies sit in blocks 0 and 1;
  * each write goes to the one the last write did not touch, with the
  * generation one higher, and a volume is opened from the valid copy of
@@ -91,6 +102,7 @@ typedef struct {
 	UD	err_blk;		/* where the last one was */
 	UD	mount_count;
 	UD	mount_time, fsck_time, mkfs_time;
+	UD	grow_to;		/* blocks a grow cut short is going to, 0 when none */
 } T_TSFSBLK_SB;
 
 /*
@@ -106,6 +118,25 @@ IMPORT ER ts_format_blk( CONST char *devnm, CONST char *label );
 IMPORT ID ts_opn_vol_blk( CONST char *devnm );
 IMPORT ER ts_cls_vol_blk( ID vol );
 IMPORT ER ts_ref_vol_blk( ID vol, T_TSFSBLK_SB *pk_sb );
+
+/*
+ * The volume opened on a device, by the device's name: E_NOEXS when no
+ * volume is open on it.
+ */
+IMPORT ID ts_vol_blk_of( CONST char *devnm );
+
+/*
+ * The volume made larger, to `blocks` (0: as many as its device holds
+ * now), while it is open and in use. The journal and the size of a group
+ * stay as they are: the last group is made whole and groups are added
+ * after it. Transactions wait meanwhile. The superblock is written first
+ * with GROWING and last with the new size, so that a cut in the power
+ * between leaves a volume the next opening finishes growing. E_LIMIT when
+ * the blocks the last group's map grows into are in use, E_PAR when the
+ * device is not larger than the volume. The size before and after in
+ * blocks go to p_from and p_to.
+ */
+IMPORT ER ts_grow_vol_blk( ID vol, UD blocks, UD *p_from, UD *p_to );
 
 /*
  * The object the volume opens with, its top (T_TSFSBLK_SB.root_uuid),
@@ -151,6 +182,7 @@ IMPORT ER ts_write_blk( ID vol, UD blk, CONST void *buf );
  * takes in any of the volume's own bookkeeping goes block by block.
  */
 IMPORT ER ts_read_blks( ID vol, UD blk, UD n, void *buf );
+IMPORT UD ts_run_blocks( ID vol );	/* blocks in one request of the volume's device (TDN_IOMAX), 0: not said */
 IMPORT ER ts_write_blks( ID vol, UD blk, UD n, CONST void *buf );
 IMPORT ER ts_sync_blk( ID vol );
 

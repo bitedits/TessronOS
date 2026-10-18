@@ -33,10 +33,7 @@ LOCAL UW		tm_depth = 0;
 
 LOCAL UW tm_cpu( void )
 {
-	UD	m;
-
-	Asm("mrs %0, mpidr_el1" : "=r"(m));
-	return (UW)( m & 0xFFFFFF );
+	return CpuHwId();
 }
 
 EXPORT UINT tm_out_lock( void )
@@ -120,17 +117,13 @@ LOCAL UW		tm_urgent_depth = 0;
 
 Inline UD tm_now( void )
 {
-	UD	t;
-
-	Asm("isb; mrs %0, cntpct_el0" : "=r"(t) :: "memory");
-	return t;
+	return ReadSysCounterSync();
 }
 
 Inline UD tm_frq( void )
 {
-	UD	f;
+	UD	f = SysCounterFreq();
 
-	Asm("mrs %0, cntfrq_el0" : "=r"(f));
 	return ( f != 0 ) ? f : 1000000;
 }
 

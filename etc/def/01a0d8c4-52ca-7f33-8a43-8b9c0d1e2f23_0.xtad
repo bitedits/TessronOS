@@ -1,7 +1,7 @@
 <tad version="1.0" encoding="UTF-8" filename="ユーザ環境設定のデータボックス">
 <document>
 <p>ユーザ環境設定のデータボックス</p>
-<p>ユーザ環境設定の窓のパネルと、尋ねるパネルの定義。</p>
+<p>ユーザ環境設定のウインドウのパネルと、尋ねるパネルの定義。</p>
 </document>
 <databox>
 <panel num="1" rect="0,0,580,470" title="ユーザ環境設定" kind="bare">

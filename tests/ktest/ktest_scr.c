@@ -226,6 +226,7 @@ LOCAL void test_front( void )
 	KT_ASSERT(a > 0 && b > 0 && c > 0 && d > 0);
 	KT_ASSERT_ER(wm_set_parent(c, b), E_OK);
 	KT_ASSERT_ER(wm_raise(b), E_OK);
+	KT_ASSERT_ER(wm_focus(b), E_OK);	/* its group in use: c is shown */
 	KT_ASSERT_ER(wm_composite(), E_OK);
 
 	n = wm_front_group(wids, 8);

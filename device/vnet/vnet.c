@@ -9,7 +9,9 @@
 
 /*
  *	vnet.c
- *	virtio-net over virtio-mmio (QEMU virt), design 10.4.
+ *	virtio-net over virtio-mmio (QEMU virt), design 10.4, or over PCI
+ *	on the x64 PC (QEMU q35), where device/virtio/vio_pci.c answers the
+ *	same registers.
  *
  *	The card is found on the same transport as the block device. Two
  *	queues are used: queue 0 receives, queue 1 sends. Each frame is
@@ -21,13 +23,16 @@
 
 #include <sys/machine.h>
 
-#ifdef QEMU_VIRT
+#if defined(QEMU_VIRT) || defined(X64)
 
 #include "kernel.h"
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
 #include <ts/net.h>
 #include "sysman/pfalloc.h"
+#ifdef X64
+#include "../virtio/vio_pci.h"
+#endif
 
 /* ---------------------------------------------------------------- virtio-mmio */
 #define VIRTIO_MMIO_MAGIC		0x000
@@ -136,6 +141,19 @@ LOCAL BOOL	vnet_found = FALSE;
 
 /* ---------------------------------------------------------------- helpers */
 
+#ifdef X64
+LOCAL T_VIOPCI	vio;
+
+LOCAL void vnet_out( UW off, UW val )
+{
+	vio_pci_out(&vio, off, val);
+}
+
+LOCAL UW vnet_in( UW off )
+{
+	return vio_pci_in(&vio, off);
+}
+#else
 LOCAL void vnet_out( UW off, UW val )
 {
 	out_w(vnet.base + off, val);
@@ -145,16 +163,11 @@ LOCAL UW vnet_in( UW off )
 {
 	return in_w(vnet.base + off);
 }
+#endif
 
 LOCAL void dcache_flush( CONST void *p, UD len )
 {
-	UBINT	a = (UBINT)p & ~63ULL, end = (UBINT)p + len;
-
-	Asm("dsb sy" ::: "memory");
-	for ( ; a < end; a += 64 ) {
-		Asm("dc civac, %0" :: "r"(a) : "memory");
-	}
-	Asm("dsb sy" ::: "memory");
+	DCacheFlushRange(p, len);
 }
 
 LOCAL void vnet_inthdr( UINT intno, UW iar )
@@ -179,7 +192,7 @@ LOCAL void rx_post( INT i )
 
 	idx = q->avail.idx;
 	q->avail.ring[idx % VNET_QSIZE] = (UH)i;
-	Asm("dmb ishst" ::: "memory");
+	SmpWriteBarrier();
 	q->avail.idx = idx + 1;
 	dcache_flush(q, sizeof(*q));
 
@@ -234,7 +247,7 @@ EXPORT ER net_send( CONST void *frame, SZ len )
 
 	idx = q->avail.idx;
 	q->avail.ring[idx % VNET_QSIZE] = (UH)slot;
-	Asm("dmb ishst" ::: "memory");
+	SmpWriteBarrier();
 	q->avail.idx = idx + 1;
 	dcache_flush(q, sizeof(*q));
 
@@ -376,7 +389,14 @@ EXPORT INT knl_vnet_init( void )
 	PFRAME	*pf;
 	UD	features;
 	UW	status;
-	INT	slot, i;
+	INT	i;
+#ifdef X64
+	if ( vio_pci_find(VIRTIO_ID_NET, 0, &vio) < E_OK || vio.intno == 0 ) {
+		return 0;			/* the machine has no card, or it has no message to raise */
+	}
+	vnet.intno = vio.intno;
+#else
+	INT	slot;
 
 	for ( slot = 0; slot < VIRTIO_MMIO_NUM; slot++ ) {
 		vnet.base  = VIRTIO_MMIO_BASE + (UBINT)slot * VIRTIO_MMIO_STRIDE;
@@ -390,6 +410,7 @@ EXPORT INT knl_vnet_init( void )
 	if ( slot >= VIRTIO_MMIO_NUM ) {
 		return 0;			/* the machine has no card */
 	}
+#endif
 
 	/* Reset and announce */
 	vnet_out(VIRTIO_MMIO_STATUS, 0);
@@ -482,4 +503,4 @@ EXPORT INT knl_vnet_init( void )
 	return 1;
 }
 
-#endif /* QEMU_VIRT */
+#endif /* QEMU_VIRT || X64 */

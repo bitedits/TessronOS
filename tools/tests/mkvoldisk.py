@@ -23,6 +23,9 @@ partition with nothing on it. The sizes, none of them that of a disk the test ma
                   would have held
   volx00.img ... volx21.img  1MB each, blank: plugged in together, with the
                   machine's own, they are more than 26 disks
+  volg.img  96MB  blank: ktest_grow lays its own tables down on it (design 7.7)
+  volh.img  64MB  GPT:  1 TSFS "VOLH" 8MB, the rest free: the desktop's
+                  拡張 and 区画作成 (tools/tests/ui_disk_grow.steps)
 
 The TSFS volumes are made by tools/mktsfs, the FAT ones by tools/mkfat.py.
 """
@@ -165,7 +168,10 @@ def main():
     for i in range(22):
         with open(os.path.join(out, "volx%02d.img" % i), "wb") as f:
             f.truncate(MB * 512)
-    print("%s: vola.img volb.img volc.img vold.img volp.img volx00..21.img" % out)
+    with open(os.path.join(out, "volg.img"), "wb") as f:
+        f.truncate(96 * MB * 512)
+    gpt_disk(os.path.join(out, "volh.img"), 64, [("tsfs", 8 * MB, "VOLH")])
+    print("%s: vola.img volb.img volc.img vold.img volp.img volx00..21.img volg.img volh.img" % out)
 
 
 if __name__ == "__main__":

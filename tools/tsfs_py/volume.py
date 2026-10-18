@@ -16,10 +16,11 @@ import struct
 
 from .btree import BTree, TREE_GC, TREE_OBJ, TREE_ORPHAN
 from .error import TsfsError
-from .groups import Maps, head_fields, head_problems, map_crcs
+from .groups import Maps, fresh_map, head_fields, head_problems, map_crcs
 from .journal import Journal
-from .layout import (BLOCK_SIZE, LABEL_MAX, ST_CLEAN, Superblock, gen_uuid7,
-                     layout, now_tron)
+from .layout import (BLOCK_SIZE, COMPAT_GROWN, INCOMPAT_GROWING, LABEL_MAX,
+                     ST_CLEAN, Superblock, gen_uuid7, grown_count, layout,
+                     now_tron)
 from .obj import ObjectBlock
 
 
@@ -165,6 +166,49 @@ class Volume(object):
         vol.journal = Journal(vol)
         vol.journal.scan()
         return vol
+
+    def grow(self, nblk):
+        """The volume made larger in place, to nblk blocks of its medium,
+        as the kernel's ts_grow_vol_blk leaves it: the journal and the
+        size of a group kept, the last group made longer, groups added
+        after it, then every spare and both superblocks with the new
+        size and GROWN."""
+        sb = self.sb
+        if nblk <= sb.total_blocks or nblk > self.dev.nblk:
+            raise TsfsError("%d blocks: the volume has %d and its medium %d"
+                           % (nblk, sb.total_blocks, self.dev.nblk))
+        maps = self.load_maps()
+        if self.group_problems or self.map_problems:
+            raise TsfsError("a group is damaged: check the volume first")
+        n0 = sb.ag_count
+        was = sb.group(n0 - 1)
+        new = sb.copy()
+        new.total_blocks = nblk
+        new.ag_count = grown_count(sb.ag_first, sb.ag_blocks, nblk)
+        new.compat |= COMPAT_GROWN
+        new.incompat &= ~INCOMPAT_GROWING
+        new.grow_to = 0
+        now = new.group(n0 - 1)
+        old = maps.maps[n0 - 1]
+        for off in range(was.meta, now.meta):
+            if off < was.len and old[off >> 3] & (1 << (off & 7)):
+                raise TsfsError("block %d, which the last group's map grows "
+                               "into, is in use" % (was.first + off))
+        # the bits of the blocks the group had, over a map made afresh
+        m = fresh_map(now)
+        whole = was.len >> 3
+        for i in range(whole):
+            m[i] |= old[i]
+        for off in range(whole << 3, was.len):
+            if old[off >> 3] & (1 << (off & 7)):
+                m[off >> 3] |= 1 << (off & 7)
+        shapes = new.groups()
+        self.sb = new
+        self.maps = Maps(new, maps.maps[:n0 - 1] + [m]
+                         + [fresh_map(s) for s in shapes[n0:]])
+        self.maps.write(self, groups=range(n0 - 1, new.ag_count))
+        self.write_sb(both=True, spares=True)
+        self.dev.flush()
 
     # ------------------------------------------------------------ blocks
 

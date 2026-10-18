@@ -235,7 +235,7 @@ LOCAL UW rd( UD pa )
 LOCAL void wr( UD pa, UW v )
 {
 	*(volatile UW *)DEV_BASE(pa) = v;
-	Asm("dsb sy" ::: "memory");
+	DeviceBarrier();
 }
 
 /* a block's place, through its page, and its physical address */

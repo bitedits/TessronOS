@@ -1298,7 +1298,7 @@ LOCAL ER drop_answer( INT wid, CONST T_OBDRANS *an )
 	if ( an->msg[0] != 0 ) {
 		(void)wm_msg_put((CONST char *)an->msg);
 	} else if ( refuse ) {
-		(void)wm_msg_put("この窓には置けません");
+		(void)wm_msg_put("このウインドウには置けません");
 	}
 	return E_OK;
 }
@@ -1565,7 +1565,8 @@ LOCAL ER rec_bytes( INT h, INT recno, UB **p_buf, SZ *p_len )
 		if ( pt == NULL ) {
 			return E_NOEXS;
 		}
-		if ( pt->count > 0 && ( WM_PT_KIND(pt->type) == WS_PARTS || WM_PT_KIND(pt->type) == SS_PARTS ) ) {
+		if ( pt->count > 0 && ( WM_PT_KIND(pt->type) == WS_PARTS || WM_PT_KIND(pt->type) == SS_PARTS
+				    || WM_PT_KIND(pt->type) == WM_PT_POPUP ) ) {
 			b = (UB *)Kmalloc(WM_POOL_BYTES);
 			if ( b != NULL ) {
 				n = knl_pn_names(H_A(h), H_B(h), b, WM_POOL_BYTES);

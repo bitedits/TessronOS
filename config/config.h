@@ -104,12 +104,15 @@
 #define USE_TIME_US_API		(1)	/* TessronOS: microsecond API (tk_dly_tsk_u, tk_get_tim_u, ...) */
 #define USE_RTC_WRITEBACK	(1)	/* TessronOS: tk_set_tim/tk_set_utc write the RTC */
 #define CNF_OB_STORE		"/boot"	/* TessronOS: the volume of real objects attached at start (design 18.11) */
-/* TessronOS: the native system volume, attached instead when the machine has one (design 11.15) */
-#ifdef _QEMU_VIRT_
+/* TessronOS: the native system volume, attached instead when the machine has one (design 11.15).
+   A build may name another (-DCNF_OB_SYSVOL='"sda1"': the SD card's on QEMU, to time the card's path) */
+#ifdef CNF_OB_SYSVOL
+#elif defined(_QEMU_VIRT_)
 #define CNF_OB_SYSVOL		"vblka2"
 #else
 #define CNF_OB_SYSVOL		"sda1"
 #endif
+#define CNF_SYSVOL_GROW_MB	8192	/* TessronOS: the system volume's partition, the last of its disk, is grown to this at start when it is smaller and the disk has room (design 7.7) */
 #define CNF_OB_MAX_GROUPS	64	/* TessronOS: groups of one user (design 18.10) */
 #define CNF_MAX_PRC		32000	/* TessronOS: processes at a time; memory is what bounds them first */
 #define CNF_PID_MAX		32768	/* TessronOS: process numbers are 1 to CNF_PID_MAX - 1, handed out in turn */

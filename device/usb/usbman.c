@@ -660,7 +660,7 @@ LOCAL void find_rp1( void )
 		if ( (gctl & GCTL_PRTCAP_MASK) != GCTL_PRTCAP_HOST ) {
 			*(volatile UW *)(base + DWC3_GCTL)
 				= (gctl & ~GCTL_PRTCAP_MASK) | GCTL_PRTCAP_HOST;
-			Asm("dsb sy" ::: "memory");
+			DeviceBarrier();
 			tk_dly_tsk(10);
 		}
 		/*
@@ -672,7 +672,7 @@ LOCAL void find_rp1( void )
 		*(volatile UW *)(base + DWC3_GUSB2PHYCFG)
 			&= ~(UW)( USB2PHY_SUSPHY | USB2PHY_ENBLSLPM );
 		*(volatile UW *)(base + DWC3_GUSB3PIPECTL) &= ~(UW)USB3PIPE_SUSPHY;
-		Asm("dsb sy" ::: "memory");
+		DeviceBarrier();
 		tk_dly_tsk(1);
 		if ( knl_xhci_attach(base, RP1_USB_SIZE, pa[i], 0, usb_flg,
 				     &hc) >= E_OK ) {

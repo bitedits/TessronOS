@@ -34,9 +34,11 @@ from .btree import (INTERNAL, LEAF, TREE_GC, TREE_OBJ, TREE_ORPHAN,
                     TREE_NAMES, Node)
 from .error import TsfsError
 from .groups import fresh_map
-from .layout import (BLOCK_SIZE, JRNL_AREA_BLOCKS, KNOWN_INCOMPAT,
-                     KNOWN_ROCOMPAT, LABEL_MAX, MAGIC_NODE, ERR_NAMES,
-                     NIL_UUID, ST_CLEAN, ST_ERROR, Superblock, layout)
+from .layout import (AG_MAX_BLOCKS, AG_MIN_BLOCKS, BLOCK_SIZE, COMPAT_GROWN,
+                     INCOMPAT_GROWING, JRNL_AREA_BLOCKS, JRNL_MAX_BLOCKS,
+                     KNOWN_INCOMPAT, KNOWN_ROCOMPAT, LABEL_MAX, MAGIC_NODE,
+                     ERR_NAMES, NIL_UUID, ST_CLEAN, ST_ERROR, Superblock,
+                     grown_count, layout)
 from . import meta as metamod
 from .obj import ICON_MAX, OB_ICON, is_icon
 from .obj import (DATA_INLINE_MAX, F_DELETABLE, F_EDITABLE, F_GARBAGE,
@@ -187,16 +189,40 @@ class Checker(object):
         if sb.journal_blocks < JRNL_AREA_BLOCKS:
             rep.error(where, "the journal area is %d blocks, less than %d"
                       % (sb.journal_blocks, JRNL_AREA_BLOCKS))
-        try:
-            want = layout(sb.total_blocks)
-            if want != (sb.journal_blocks, sb.ag_blocks, sb.ag_count):
-                rep.warn(where, "the geometry (journal %d, %d groups of %d) is "
-                         "not what a volume of %d blocks is made with (%d, %d "
-                         "of %d)" % (sb.journal_blocks, sb.ag_count,
-                                     sb.ag_blocks, sb.total_blocks, want[0],
-                                     want[2], want[1]))
-        except TsfsError as e:
-            rep.warn(where, str(e))
+        if sb.compat & COMPAT_GROWN:
+            # grown in place: the journal and the group size are the ones
+            # it was made with, and the groups are what they make of the
+            # size it has now
+            agb = sb.ag_blocks
+            if (agb & (agb - 1) or agb < AG_MIN_BLOCKS or agb > AG_MAX_BLOCKS
+                    or sb.journal_blocks > JRNL_MAX_BLOCKS):
+                rep.error(where, "a grown volume with a journal of %d and "
+                          "groups of %d, which no volume is made with"
+                          % (sb.journal_blocks, agb))
+            elif sb.total_blocks > sb.ag_first and grown_count(
+                    sb.ag_first, agb, sb.total_blocks) != sb.ag_count:
+                rep.error(where, "%d groups of %d, where a grown volume of %d "
+                          "blocks has %d" % (sb.ag_count, agb, sb.total_blocks,
+                                             grown_count(sb.ag_first, agb,
+                                                         sb.total_blocks)))
+            else:
+                rep.note(where, "grown in place: %d groups of %d"
+                         % (sb.ag_count, agb))
+        else:
+            try:
+                want = layout(sb.total_blocks)
+                if want != (sb.journal_blocks, sb.ag_blocks, sb.ag_count):
+                    rep.warn(where, "the geometry (journal %d, %d groups of %d) "
+                             "is not what a volume of %d blocks is made with "
+                             "(%d, %d of %d)" % (sb.journal_blocks, sb.ag_count,
+                                                 sb.ag_blocks, sb.total_blocks,
+                                                 want[0], want[2], want[1]))
+            except TsfsError as e:
+                rep.warn(where, str(e))
+        if sb.incompat & INCOMPAT_GROWING:
+            rep.warn(where, "a grow to %d blocks was cut short; the kernel "
+                     "finishes it when it opens the volume, and what the last "
+                     "group says may be the new or the old" % sb.grow_to)
         if sb.ag_first + (sb.ag_count - 1) * sb.ag_blocks >= sb.total_blocks:
             rep.error(where, "the last group starts past the end")
         if sb.total_blocks < vol.dev.nblk:

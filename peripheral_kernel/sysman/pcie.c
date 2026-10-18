@@ -33,6 +33,7 @@
 #include <tm/tmonitor.h>
 #include <ts/pcie.h>
 #include "sysdepend.h"
+#include "cpu_msi.h"
 
 #if defined(PCIE_ECAM_PA) || defined(PCIE_CFG_BOARD)
 
@@ -92,7 +93,7 @@ EXPORT void ts_pcie_cfg_write( UINT bus, UINT dev, UINT fn, UINT off,
 	case 2:		*(volatile UH *)a = (UH)val;  break;
 	default:	*(volatile UW *)a = val;      break;
 	}
-	Asm("dsb sy" ::: "memory");
+	DeviceBarrier();
 #endif
 }
 
@@ -165,9 +166,19 @@ LOCAL void bar_size( T_PCIDEV *d, INT i, INT *p_next )
 			}
 			*p_next = i + 2;	/* it takes two registers */
 			d->bar_is_64[i] = 1;
+#ifdef PCIE_KEEP_FW_BARS
+			d->bar[i] = (UD)hi_orig << 32;
+#endif
 		}
 	}
 	d->bar_size[i] = size;
+#ifdef PCIE_KEEP_FW_BARS
+	/*
+	 * The firmware gave every window its address, and keeps using some
+	 * of them (the screen it set up): they stay where they are
+	 */
+	d->bar[i] |= ( d->bar_is_io[i] != 0 ) ? (UD)( orig & ~0x3U ) : (UD)( orig & ~0xFU );
+#endif
 
 	ts_pcie_cfg_write(d->bus, d->dev, d->fn, PCI_COMMAND, cmd, 2);
 }
@@ -255,6 +266,16 @@ LOCAL void func_add( UINT bus, UINT dev, UINT fn, UW id )
 			 & PCI_HDR_TYPE_MASK);
 
 	if ( d->header == PCI_HDR_BRIDGE ) {
+#ifdef PCIE_KEEP_FW_BARS
+		/* the firmware numbered the buses too: the one behind it is walked as it is */
+		UINT	sub = ts_pcie_cfg_read(bus, dev, fn, PCI_SECONDARY_BUS, 1);
+
+		pci_ndev++;
+		if ( sub > bus && sub <= 0xff ) {
+			bus_scan(sub);
+		}
+		return;
+#else
 		UINT	sub = ++bus_next;
 
 		/* the bus behind it is numbered before it is walked */
@@ -266,6 +287,7 @@ LOCAL void func_add( UINT bus, UINT dev, UINT fn, UW id )
 		ts_pcie_cfg_write(bus, dev, fn, PCI_SUBORDINATE_BUS,
 				  (UW)bus_next, 1);
 		return;
+#endif
 	}
 
 	for ( i = 0; i < PCI_MAX_BAR; i = next ) {
@@ -432,21 +454,7 @@ EXPORT UINT ts_pcie_cap_find( CONST T_PCIDEV *dev, UINT cap_id )
 
 /* ---------------------------------------------------------------- messages */
 
-#ifdef GICV2M_BASE
-
-/*
- * The frame that turns a message into an interrupt. A card writes a
- * number to one register of it and the distributor raises that number,
- * so a card needs no wire of its own and no line shared with others.
- *
- * Which numbers may be used the frame says itself, so nothing here is
- * built into the board's list of addresses beyond where the frame is.
- */
-#define V2M_MSI_TYPER		0x008
-#define V2M_MSI_SETSPI_NS	0x040
-
-#define V2M_TYPER_BASE(v)	(((v) >> 16) & 0x3ff)
-#define V2M_TYPER_NUM(v)	((v) & 0x3ff)
+#if KNL_HAS_MSI
 
 /* what a table entry of the message capability holds */
 #define MSIX_ENT_ADDR_LO	0x0
@@ -468,14 +476,14 @@ LOCAL UINT msi_end = 0;
 
 LOCAL ER msi_range( void )
 {
-	UW	typer;
+	UINT	first, num;
 
 	if ( msi_end != 0 ) {
 		return E_OK;
 	}
-	typer = *(volatile UW *)(GICV2M_BASE + V2M_MSI_TYPER);
-	msi_next = V2M_TYPER_BASE(typer);
-	msi_end  = msi_next + V2M_TYPER_NUM(typer);
+	knl_msi_span(&first, &num);
+	msi_next = first;
+	msi_end  = first + num;
 	if ( msi_next == 0 || msi_end <= msi_next || msi_end > N_INTVEC ) {
 		msi_end = 0;
 		return E_NOEXS;			/* the frame says nothing usable */
@@ -520,27 +528,18 @@ EXPORT ER ts_pcie_msi_alloc( CONST T_PCIDEV *dev, UINT *p_intno )
 
 	intno = msi_next++;
 
-	/*
-	 * A message is an edge, not a level. The frame raises the number
-	 * for an instant and lets it fall at once; a distributor that is
-	 * told the number is a level only sees it while it is high, and
-	 * by the time it looks it has fallen. Every message would be
-	 * lost, and whatever waits on them would wait out its whole time
-	 * each time instead.
-	 */
-	SetIntMode(intno, IM_EDGE);
+	/* the interrupt readied for messages (cpu_msi.h) */
+	knl_msi_prepare(intno);
 
 	/* masked while it is written, as the standard asks */
 	*(volatile UW *)(table + MSIX_ENT_CTRL) = MSIX_CTRL_MASK;
-	Asm("dsb sy" ::: "memory");
-	*(volatile UW *)(table + MSIX_ENT_ADDR_LO) =
-			(UW)(GICV2M_PA + V2M_MSI_SETSPI_NS);
-	*(volatile UW *)(table + MSIX_ENT_ADDR_HI) =
-			(UW)((UD)(GICV2M_PA + V2M_MSI_SETSPI_NS) >> 32);
-	*(volatile UW *)(table + MSIX_ENT_DATA) = (UW)intno;
-	Asm("dsb sy" ::: "memory");
+	DeviceBarrier();
+	*(volatile UW *)(table + MSIX_ENT_ADDR_LO) = (UW)knl_msi_addr(intno);
+	*(volatile UW *)(table + MSIX_ENT_ADDR_HI) = (UW)( knl_msi_addr(intno) >> 32 );
+	*(volatile UW *)(table + MSIX_ENT_DATA) = knl_msi_data(intno);
+	DeviceBarrier();
 	*(volatile UW *)(table + MSIX_ENT_CTRL) = 0;
-	Asm("dsb sy" ::: "memory");
+	DeviceBarrier();
 
 	/* and the capability turned on, with nothing held back */
 	ctrl = ts_pcie_cfg_read(dev->bus, dev->dev, dev->fn, cap + MSIX_CAP_CTRL, 2);
@@ -558,7 +557,7 @@ EXPORT ER ts_pcie_msi_alloc( CONST T_PCIDEV *dev, UINT *p_intno )
 	return E_OK;
 }
 
-#else /* GICV2M_BASE */
+#else /* KNL_HAS_MSI */
 
 /* No frame to send messages to: the functions use their lines */
 EXPORT ER ts_pcie_msi_alloc( CONST T_PCIDEV *dev, UINT *p_intno )
@@ -568,7 +567,7 @@ EXPORT ER ts_pcie_msi_alloc( CONST T_PCIDEV *dev, UINT *p_intno )
 	return E_NOEXS;
 }
 
-#endif /* GICV2M_BASE */
+#endif /* KNL_HAS_MSI */
 
 /* ---------------------------------------------------------------- start-up */
 

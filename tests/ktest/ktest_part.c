@@ -29,6 +29,8 @@
 #include <ts/disp.h>
 #include <ts/hid.h>
 #include <ts/fn.h>
+#include <ts/sysdef.h>
+#include <ts/uuid.h>
 
 LOCAL INT	wid = 0;
 LOCAL BOOL	ready = FALSE;
@@ -952,13 +954,52 @@ LOCAL void test_boxes( void )
 	KT_ASSERT_ER(wm_panel_close(pid), E_OK);
 }
 
-/* a pop-up steps through its names; a panel that warns wears its frame */
+/* A pop-up's part pressed, at a time given in ms: its list opens */
+LOCAL INT popup_press( INT pid, UD ms, INT *p_lw )
+{
+	T_WMEV	ev;
+	UINT	ans;
+
+	ev_at(&ev, HID_EV_BTN_DOWN, 40 + 60, 260 + 30);
+	ev.when = ms * 1000000ULL;
+	(void)wm_panel_event(pid, &ev, &ans);
+	return knl_pn_list(p_lw);
+}
+
+/* An input to the open list: on a row of it, at a time given in ms */
+LOCAL BOOL popup_row( UINT type, INT lp, INT row, UD ms )
+{
+	T_WMEV	ev;
+
+	ev_row(&ev, type, lp, row);
+	ev.when = ms * 1000000ULL;
+	return knl_pn_list_event(&ev);
+}
+
+LOCAL BOOL popup_key( UINT code )
+{
+	T_WMEV	ev;
+
+	ev_key(&ev, code, 0);
+	return knl_pn_list_event(&ev);
+}
+
+/*
+ * A pop-up: pressed, its list opens in a window of its own with the row
+ * of the name chosen over the part. A click leaves the list standing; a
+ * row pressed and let go on is chosen; held and let go on another row
+ * at once, that row is chosen. Up and Down move the lit row, Enter
+ * chooses it, Escape puts the list away unchanged, and so does a press
+ * off it. Closing the panel takes the list with it. A panel that warns
+ * wears its frame.
+ */
 LOCAL void test_popup_warn( void )
 {
 	T_WMPANEL	*d;
 	T_WMEV		ev;
-	UINT		ans;
-	INT		pid, at0, i, v = 0;
+	T_WMWIN		pw, lwin;
+	T_DPRECT	mr;
+	INT		pid, at0, i, v = 0, lp, lw = 0, mid;
 	UB		name[8];
 
 	if ( !ready ) KT_SKIP("no window");
@@ -970,7 +1011,7 @@ LOCAL void test_popup_warn( void )
 	d->r.left = 40;  d->r.top = 260;  d->r.right = 280;  d->r.bottom = 340;
 	d->npart = 1;
 	d->used = 0;
-	part_set(&d->part[0], PM_PARTS, 1, 10, 10, 200, 44);
+	part_set(&d->part[0], WM_PT_POPUP, 1, 10, 10, 200, 44);
 	at0 = -1;
 	for ( i = 0; i < 3; i++ ) {
 		INT	k;
@@ -982,26 +1023,128 @@ LOCAL void test_popup_warn( void )
 	}
 	d->part[0].pool = at0;
 	d->part[0].count = 3;
-	d->part[0].value = 1;
+	d->part[0].value = 2;
 
 	pid = wm_panel_open(wid, d);
 	Kfree(d);
 	KT_ASSERT(pid > 0);
 	if ( pid <= 0 ) return;
 	KT_ASSERT_ER(wm_panel_draw(pid), E_OK);
+	KT_ASSERT_EQ(knl_pn_list(NULL), 0);
+	ev_at(&ev, HID_EV_MOVE, 5, 5);
+	KT_ASSERT(!knl_pn_list_event(&ev));	/* none open: nothing taken */
 
-	ev_at(&ev, HID_EV_BTN_DOWN, 40 + 60, 260 + 30);
-	KT_ASSERT_ER(wm_panel_event(pid, &ev, &ans), E_OK);
-	ev_at(&ev, HID_EV_BTN_UP, 40 + 60, 260 + 30);
-	KT_ASSERT_ER(wm_panel_event(pid, &ev, &ans), E_OK);
+	/* pressed: the list opens, the row of hi2 over the part */
+	lp = popup_press(pid, 1000, &lw);
+	KT_ASSERT(lp > 0);
+	if ( lp <= 0 ) {
+		(void)wm_panel_close(pid);
+		return;
+	}
+	KT_ASSERT(lw > 0 && lw != wid);
+	KT_ASSERT_ER(wm_ref(wid, &pw), E_OK);
+	KT_ASSERT_ER(wm_ref(lw, &lwin), E_OK);
+	KT_ASSERT_ER(wm_panel_rect(lp, &mr), E_OK);
+	mid = pw.work.top + 260 + ( 10 + 44 ) / 2;
+	tm_printf((UB *)"  list at %d..%d, row %d, the part's middle %d\n",
+		  lwin.work.top + mr.top, lwin.work.top + mr.bottom, wm_menu_row_h(), mid);
+	KT_ASSERT(mid >= lwin.work.top + 1 + wm_menu_row_h() && mid < lwin.work.top + 1 + 2 * wm_menu_row_h() + 2);
+	KT_ASSERT(lwin.work.right - lwin.work.left >= 190 - 4);	/* as wide as the part */
+
+	/* the click's release: the list stays */
+	KT_ASSERT(popup_row(HID_EV_BTN_UP, lp, 1, 1050));
+	KT_ASSERT_EQ(knl_pn_list(NULL), lp);
+	/* the second button chooses nothing */
+	ev_row(&ev, HID_EV_BTN_DOWN, lp, 2);
+	ev.code = 1;
+	KT_ASSERT(knl_pn_list_event(&ev));
+	KT_ASSERT_EQ(knl_pn_list(NULL), lp);
+	/* hi3 pressed and let go on: chosen, the list gone */
+	KT_ASSERT(popup_row(HID_EV_MOVE, lp, 2, 3000));
+	KT_ASSERT(popup_row(HID_EV_BTN_DOWN, lp, 2, 3000));
+	KT_ASSERT(popup_row(HID_EV_BTN_UP, lp, 2, 3100));
+	KT_ASSERT_EQ(knl_pn_list(NULL), 0);
+	KT_ASSERT(wm_ref(lw, &lwin) < E_OK);
 	KT_ASSERT_ER(wm_panel_get(pid, 1, &v), E_OK);
-	KT_ASSERT_EQ(v, 2);				/* stepped to the next */
+	KT_ASSERT_EQ(v, 3);
 
-	KT_ASSERT_ER(wm_panel_draw(pid), E_OK);
+	/* held and let go on hi1 at once: chosen */
+	lp = popup_press(pid, 5000, &lw);
+	KT_ASSERT(lp > 0);
+	KT_ASSERT(popup_row(HID_EV_MOVE, lp, 0, 5040));
+	KT_ASSERT(popup_row(HID_EV_BTN_UP, lp, 0, 5080));
+	KT_ASSERT_EQ(knl_pn_list(NULL), 0);
+	KT_ASSERT_ER(wm_panel_get(pid, 1, &v), E_OK);
+	KT_ASSERT_EQ(v, 1);
+
+	/* Down and Enter: hi2 */
+	lp = popup_press(pid, 7000, &lw);
+	KT_ASSERT(lp > 0);
+	KT_ASSERT(popup_key(0x51));
+	KT_ASSERT(popup_key(0x28));
+	KT_ASSERT_EQ(knl_pn_list(NULL), 0);
+	KT_ASSERT_ER(wm_panel_get(pid, 1, &v), E_OK);
+	KT_ASSERT_EQ(v, 2);
+
+	/* Up, then Escape: unchanged */
+	lp = popup_press(pid, 9000, &lw);
+	KT_ASSERT(lp > 0);
+	KT_ASSERT(popup_key(0x52));
+	KT_ASSERT(popup_key(0x29));
+	KT_ASSERT_EQ(knl_pn_list(NULL), 0);
+	KT_ASSERT_ER(wm_panel_get(pid, 1, &v), E_OK);
+	KT_ASSERT_EQ(v, 2);
+
+	/* a press off the list puts it away unchanged, and goes no further */
+	lp = popup_press(pid, 11000, &lw);
+	KT_ASSERT(lp > 0);
+	ev_at(&ev, HID_EV_BTN_DOWN, 5, 5);
+	KT_ASSERT(knl_pn_list_event(&ev));
+	KT_ASSERT_EQ(knl_pn_list(NULL), 0);
+	KT_ASSERT_ER(wm_panel_get(pid, 1, &v), E_OK);
+	KT_ASSERT_EQ(v, 2);
+
+	/* closing the panel takes the list with it */
+	lp = popup_press(pid, 13000, &lw);
+	KT_ASSERT(lp > 0);
 	KT_ASSERT_EQ(wm_panel_self_check(), 0);
 	KT_ASSERT_ER(wm_panel_close(pid), E_OK);
+	KT_ASSERT_EQ(knl_pn_list(NULL), 0);
+	KT_ASSERT(wm_ref(lw, &lwin) < E_OK);
 }
 
+/*
+ * A pop-up written in a data box's panel: システム環境設定's フォント設定
+ * has two, 個別定義 and ファミリ, whose names the program sets.
+ */
+LOCAL void test_popup_box( void )
+{
+	T_WMPANEL	*d;
+	TS_UUID		box;
+	INT		i, n = 0;
+	ER		er;
+
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_BOX_SYSENV, &box), E_OK);
+	d = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	KT_ASSERT(d != NULL);
+	if ( d == NULL ) return;
+	er = knl_pn_load(&box, 14, d, NULL, 0);
+	if ( er == E_NOEXS ) {
+		Kfree(d);
+		KT_SKIP("no system data box");
+	}
+	KT_ASSERT_ER(er, E_OK);
+	for ( i = 0; i < d->npart; i++ ) {
+		if ( WM_PT_KIND(d->part[i].type) == WM_PT_POPUP ) {
+			KT_ASSERT(d->part[i].num == 1 || d->part[i].num == 16);
+			KT_ASSERT_EQ(d->part[i].count, 0);
+			KT_ASSERT(d->part[i].r.bottom - d->part[i].r.top <= 30);
+			n++;
+		}
+	}
+	KT_ASSERT_EQ(n, 2);
+	Kfree(d);
+}
 
 /*
  * A panel that asks something, in a window of its own in the middle of
@@ -1098,5 +1241,6 @@ EXPORT void ktest_part( void )
 	KT_RUN(test_dbox);
 	KT_RUN(test_boxes);
 	KT_RUN(test_popup_warn);
+	KT_RUN(test_popup_box);
 	KT_RUN(test_limit);
 }

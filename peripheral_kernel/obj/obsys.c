@@ -125,7 +125,7 @@ LOCAL INT hex( UB *t, INT n, INT max, UW v, INT digits )
 
 /* The system's version, R and a number, a point and three digits (make TS_VERSION=) */
 #ifndef TS_VERSION
-#define TS_VERSION	"R1.100"
+#define TS_VERSION	"R1.110"
 #endif
 
 /* ---------------------------------------------------------------- the records */

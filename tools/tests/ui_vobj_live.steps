@@ -1,0 +1,36 @@
+# Links carried as themselves (design 10.4), for tools/ui_run.py: 仮身サンプル
+# opened; with windows moved as they go (LK_LIVE 1) the link TADjsについて is
+# carried and shot half way, its picture following the hand; with outlines
+# (LK_LIVE 0) the link 原紙箱 is, its outline following. Each stays where it
+# is let go, nothing of the picture left behind.
+dclick 90 131
+wait 1500
+look 9114 1
+wait 300
+hold 410 414
+wait 300
+move 415 419
+wait 100
+move 450 380
+wait 100
+move 520 330
+wait 100
+move 560 300
+wait 400
+shot vd5_live_fig
+up
+wait 800
+shot vd5_live_after
+look 9114 0
+wait 300
+hold 375 302
+wait 300
+move 380 307
+wait 100
+move 450 330
+wait 100
+move 560 380
+wait 400
+shot vd5_outline_fig
+up
+wait 800

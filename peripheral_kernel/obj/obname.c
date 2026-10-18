@@ -36,6 +36,7 @@
 #include "kernel.h"
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
+#include <ts/gpt.h>
 #include <ts/proc.h>
 #include <ts/tsfs.h>
 #include <ts/dt.h>
@@ -3231,6 +3232,7 @@ EXPORT ER knl_ob_init( void )
 	er = E_NOEXS;
 #ifdef CNF_OB_SYSVOL
 	(void)knl_ob_chk_boot(CNF_OB_SYSVOL);	/* a repair asked for: before anything uses it */
+	knl_sysvol_grow(CNF_OB_SYSVOL);		/* the card's room taken in, the first time */
 	er = knl_obfile_attach(CNF_OB_SYSVOL, TSFS_STORE_BLK);
 	if ( er >= E_OK ) {
 		tm_printf((UB *)"ob: the system volume is %s\n", CNF_OB_SYSVOL);

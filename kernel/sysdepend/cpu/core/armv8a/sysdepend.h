@@ -140,6 +140,66 @@ IMPORT UW	knl_pt_pruned( INT *p_waiting );		/* tables taken out so far (the test
 IMPORT void	knl_icache_sync( UBINT va, UD size );	/* written instructions made fetchable */
 
 /*
+ * Every processor's instruction cache made to fetch what was written
+ * through the linear map (the program loader, after writing a
+ * program's pages)
+ */
+Inline void knl_icache_sync_all( void )
+{
+	Asm("dsb ish" ::: "memory");
+	Asm("ic ialluis" ::: "memory");
+	Asm("dsb ish; isb" ::: "memory");
+}
+
+/*
+ * The root of a process space as the MMU takes it (TTBR0_EL1): the
+ * physical address of its L0 table and its ASID in bits 63:48. The
+ * kernel keeps that value for each space and each task (ttbr0) and
+ * finds the space's ASID again in it. MMU_ASID_MAX is the largest ASID
+ * TCR_EL1.AS gives; knl_mmu_asid_top is the largest the processor has
+ * (ID_AA64MMFR0_EL1.ASIDBits: 16 bits, else 8).
+ */
+#define MMU_ASID_MAX	65535
+
+Inline UD knl_mmu_space_root( UD l0_pa, UINT asid )
+{
+	return l0_pa | ((UD)asid << 48);
+}
+
+Inline UINT knl_mmu_root_asid( UD root )
+{
+	return (UINT)( ( root >> 48 ) & MMU_ASID_MAX );
+}
+
+Inline UINT knl_mmu_asid_top( void )
+{
+	UD	mmfr0;
+
+	Asm("mrs %0, id_aa64mmfr0_el1" : "=r"(mmfr0));
+	return ( ( ( mmfr0 >> 4 ) & 0xF ) == 2 ) ? MMU_ASID_MAX : 255;
+}
+
+/*
+ * A new L0 table of a process space or of the kernel's tasks made ready:
+ * nothing to do, the kernel's half is TTBR1's
+ */
+Inline void knl_mmu_space_init_root( UD l0_pa )
+{
+	(void)l0_pa;
+}
+
+/* Every processor's TLB entries of the ASID dropped (the space's tables are gone) */
+Inline void knl_tlb_flush_asid( UINT asid )
+{
+	Asm("dsb ishst" ::: "memory");
+	Asm("tlbi aside1is, %0" :: "r"((UD)asid << 48) : "memory");
+	Asm("dsb ish; isb" ::: "memory");
+}
+
+/* The machine of the programs the loader takes (ELF e_machine: EM_AARCH64) */
+#define KNL_ELF_MACHINE	183
+
+/*
  * Task context block
  */
 typedef struct {

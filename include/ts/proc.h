@@ -140,7 +140,13 @@ IMPORT ID  knl_init_pid( void );
  */
 IMPORT ER knl_elf_load( CONST char *path, void *space, UD *p_entry, UD *p_brk );
 IMPORT ER knl_elf_load_rec( ID vol, CONST TS_UUID *uuid, INT recno, void *space,
-			    UD *p_entry, UD *p_brk );
+			    UD *p_entry, UD *p_brk, void **p_img );
+/* The shared image of a program a space maps, let go when the space is taken down (design 5.1) */
+IMPORT void knl_elf_img_put( void *img );
+/* The images of an object (uuid NULL: of the whole volume) not to be used again: it is to be written */
+IMPORT void knl_elf_forget( ID vol, CONST TS_UUID *uuid );
+/* Loads of a program from a record that mapped a shared image, and those that read the program */
+IMPORT void knl_elf_counts( UW *p_hits, UW *p_reads );
 
 IMPORT ER knl_proc_init( void );
 
@@ -240,6 +246,24 @@ typedef struct {
  * picture's FP/SIMD registers are the task's at the fault and are put
  * back by ts_flt_ret.
  */
+#if defined(__x86_64__)
+/*
+ * x86-64: the general registers but rsp in the order rax, rbx, rcx,
+ * rdx, rsi, rdi, rbp, r8-r15 (rbx and r12-r15 left 0: the entry
+ * keeps them, as a function does), rsp, rip and the arithmetic flags of
+ * rflags; far is the address met (CR2) and esr the exception's vector
+ * in bits 39:32 and its error code below; fpsr is MXCSR, fpcr the x87
+ * control and status words; vregs the FXSAVE image of x87 and
+ * xmm0-xmm15 (the upper halves of the ymm registers are not in it)
+ */
+typedef struct {
+	UD	regs[16];		/* rax-r15 but rsp; regs[15] 0 */
+	UD	sp, pc, pstate;		/* rsp, rip, the arithmetic flags */
+	UD	far, esr;		/* the address met, the vector and error code */
+	UD	fpsr, fpcr;		/* MXCSR, FCW | FSW << 16 */
+	UD	vregs[64] __attribute__((aligned(16)));	/* the FXSAVE image */
+} T_TSFLT;
+#else
 typedef struct {
 	UD	regs[31];		/* x0-x30 (x19-x28 left 0) */
 	UD	sp, pc, pstate;		/* SP_EL0, where it was, its NZCV */
@@ -247,6 +271,7 @@ typedef struct {
 	UD	fpsr, fpcr;
 	UD	vregs[64] __attribute__((aligned(16)));	/* q0-q31, the low half of each first */
 } T_TSFLT;
+#endif
 
 /* The entry: f is called with the picture; NULL takes it away */
 IMPORT ER ts_def_flt( void (*f)( T_TSFLT *flt ) );

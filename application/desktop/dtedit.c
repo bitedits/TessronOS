@@ -1324,6 +1324,9 @@ LOCAL void band_show( void )
 		r[i].left += w.work.left;  r[i].right += w.work.left;
 		r[i].top += w.work.top;    r[i].bottom += w.work.top;
 	}
+	if ( !band_shown && n > 0 && ( hold_how == HOLD_MOVE || hold_how == HOLD_DUP ) ) {
+		dt_carry_looks(r, n, hold_dx, hold_dy);
+	}
 	wm_set_drag(r, n);
 	band_shown = (BOOL)( n > 0 );
 }

@@ -62,6 +62,14 @@
 #define   V3D_INT_OUTOMEM	0x00000004U	/* binner out of tile memory */
 #define   V3D_INT_CSDDONE_71	0x00000040U	/* compute dispatch done (7.1) */
 
+/* compute shader dispatch (7.1): the queued dispatch's configuration; writing CFG0 starts it */
+#define V3D_CSD_STATUS		0x0900
+#define   V3D_CSD_STATUS_DONE_SHIFT 4		/* dispatches completed, 8 bits, wrapping */
+#define   V3D_CSD_STATUS_HAVE_CURRENT 0x00000002U
+#define   V3D_CSD_STATUS_HAVE_QUEUED 0x00000001U
+#define V3D_CSD_QUEUED_CFG0_71	0x0930	/* CFG1 to CFG6 follow a word apart */
+#define V3D_CSD_QUEUED_CFG7_71	0x094c
+
 /* [doc] control list executors: thread 0 is the binner, thread 1 the renderer */
 #define V3D_CLE_CT0CS		0x0100
 #define V3D_CLE_CT1CS		0x0104

@@ -135,6 +135,13 @@ IMPORT ER knl_jrnl_close( ID vol );
 /* Whether the log was read at open (not for a volume opened with an error recorded) */
 IMPORT BOOL knl_jrnl_ready( ID vol );
 
+/*
+ * Transactions held off while the volume is grown (on), and let begin
+ * again (off). Freezing waits for the ones running and puts everything
+ * committed in place; E_BUSY when one does not end.
+ */
+IMPORT ER knl_jrnl_freeze( ID vol, BOOL on );
+
 #ifdef __cplusplus
 }
 #endif

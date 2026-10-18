@@ -134,7 +134,25 @@
 
 #define PTE_PXN			(U64(1) << 53)
 #define PTE_UXN			(U64(1) << 54)
+/*
+ * Software bit (ignored by the walk): a page of a process's space that
+ * the space maps but does not own -- a page of a program image shared
+ * by the processes started from the same program (design 5.1). Taking
+ * the space down, or putting the page of nothing in its place, leaves
+ * it to its owner.
+ */
+#define PTE_SW_SHARED		(U64(1) << 55)
 #define PTE_ADDR_MASK		U64(0x0000FFFFFFFFF000)
+
+/*
+ * What a page entry lets a process (EL0) do: read it (AP[1]), write it
+ * (AP[2:1] = RW for all), run it (UXN clear). The common parts of the
+ * kernel ask an entry only this way.
+ */
+#define PTE_AP_MASK		(3UL << 6)
+#define PTE_USER_R(e)		( ( (e) & PTE_AP_RW_ALL ) != 0 )
+#define PTE_USER_W(e)		( ( (e) & PTE_AP_MASK ) == PTE_AP_RW_ALL )
+#define PTE_USER_X(e)		( ( (e) & PTE_UXN ) == 0 )
 
 /* Block descriptors (kernel only, EL0 never executes them). W^X: text is RO+X, everything else RW+XN */
 #define PTE_BLOCK_NORMAL	(PTE_VALID | PTE_ATTR(MAIR_IDX_NORMAL_WB) | PTE_AP_RW_EL1 | PTE_SH_INNER | PTE_AF | PTE_UXN)
@@ -162,6 +180,7 @@
 #define L2_SHIFT		21
 #define L3_SHIFT		12
 #define PT_ENTRIES		512
+#define PT_USER_ENTRIES		PT_ENTRIES	/* entries of an L0 table that belong to the process: all (TTBR0) */
 
 /* ------------------------------------------------------------------------ */
 /*

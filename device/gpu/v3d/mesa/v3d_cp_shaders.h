@@ -1027,4 +1027,26 @@ LOCAL CONST UB cp_state[65] __attribute__((aligned(4))) = {
 /* The render target's stride in 128 bits covering two rows, 64 pixel tiles of 32 bits */
 #define CP_RT_STRIDE		32
 
+/* The check of compute dispatch: workgroups, their size, how the code runs */
+#define CP_CSD_NWG		4
+#define CP_CSD_WG_SIZE		16
+#define CP_CSD_THREADS		4
+#define CP_CSD_SINGLE_SEG	0
+
+/* csd: 16 instructions */
+LOCAL CONST UD cp_code_csd[16] = {
+	0x38403186bb03f000ULL, 0x38402184b503f0c0ULL, 0x39e021867c03f104ULL,
+	0x384021857d03f080ULL, 0x380021873803f185ULL, 0x2be03186bb1c3000ULL,
+	0x0fe01206bb1c3000ULL, 0x39e0218a3803f201ULL, 0x39e022c97c2831c2ULL,
+	0x3820318c3803f009ULL, 0x38203186bb03f000ULL, 0x38003186bb03f000ULL,
+	0x3800218bbb03f00fULL, 0x38203186bb03f000ULL, 0x38003186bb03f000ULL,
+	0x38003186bb03f000ULL,
+};
+
+LOCAL CONST UW cp_unif_csd[3][2] = {
+	{ 0, 0x0000ffff },
+	{ 0, 0x0000001a },
+	{ 2, 0x00000000 },
+};
+
 #endif /* _V3D_CP_SHADERS_H_ */

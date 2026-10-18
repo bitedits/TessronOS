@@ -73,7 +73,7 @@ tessronos/
 ├── include/             tk/ sys/ tm/(上流由来) ts/(TessronOS) tsposix/ tscxx/(POSIXとC++の互換)
 ├── kernel/              中心核とモニタ層の機種依存部
 │   ├── tkernel/         μT-Kernel 3.0の本体(64bit・SMP化)
-│   └── sysdepend/       cpu/core/armv8a/(AArch64共通) rpi5/ qemu_virt/(マシンごと)
+│   └── sysdepend/       cpu/core/armv8a/(AArch64共通、アーキテクチャの層は4.8) rpi5/ qemu_virt/(マシンごと)
 ├── peripheral_kernel/   sysman/ fs/ obj/ network/ libc/
 │   └── network/         so_prc.c so_sntp.c so_conf.c(両方のスタックで共通) netbsd/(NetBSDのスタックの受け、
 │                        rumpcomp/はrumpカーネルの中に入る部品) lwip/ port/ so_api.c(NETSTACK=lwip)

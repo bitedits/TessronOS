@@ -34,7 +34,7 @@
 
 タスクのスタックは、そのCPUがスタックを離れてから返す。終了するタスクは、ロックを放した後もディスパッチャのための例外フレームを積むまで自分のスタックの上で動き、その間はCPUがタスクのコンテキストを持っている(TCBの`runprc`が0でない)。`tk_del_tsk`は、休止状態のタスクでも`runprc`が0になるまで待ってから削除する。自分を削除するタスク(`tk_exd_tsk`)のスタックとTCBは、ディスパッチャが自分のスタックに移り、コンテキストを手放してから返す(`knl_reap_task`)。先に返すと、そのメモリを受け取った別のタスクのスタックや別のデータが、終わりかけのタスクの積むフレームで書き換えられる。プロセスの終了では、`tk_ext_tsk`で休止状態になったばかりのタスクを別のタスクがすぐに削除するので、この順序が要る。
 
-`tests/ktest/ktest_smp.c`の`test_wait_result`、`test_del_ended`、`test_exd_stack`がこれを確かめる。そのままでは食い違う時間が命令数個分しかないので、試験の版(`KTEST=1`)だけにある待ちの時間(`knl_kt_unlock_spin`、`knl_kt_release_spin`、`knl_kt_exit_spin`、`smp.c`)で、ロックを放した直後、待ちを解除してから結果を書くまで、終了するタスクがロックを放してからディスパッチャに入るまでを長くして、毎回食い違いが起きるようにする。普段は0で、何もしない。
+`tests/ktest/ktest_smp.c`の`test_wait_result`、`test_del_ended`、`test_exd_stack`がこれを確かめる。そのままでは食い違う時間が命令数個分しかないので、試験用のビルド(`KTEST=1`)だけにある待ちの時間(`knl_kt_unlock_spin`、`knl_kt_release_spin`、`knl_kt_exit_spin`、`smp.c`)で、ロックを放した直後、待ちを解除してから結果を書くまで、終了するタスクがロックを放してからディスパッチャに入るまでを長くして、毎回食い違いが起きるようにする。普段は0で、何もしない。
 
 2つめ以降のCPUは、起動の途中でPSCIの`CPU_ON`で起動する。`config.h`の`USE_SMP`を0にすると1つのCPUだけで動く。
 
@@ -222,3 +222,36 @@ Raspberry Pi 5、CM5、Raspberry Pi 4系では、PMのブロックのハード�
 ### 4.7.6 走っていないタスクのスタックの監視
 
 `make STKWATCH=1`でビルドすると、ディスパッチャが、走っていないタスクのスタックの書き換えを見つける。CPUがタスクのコンテキストを手放す直前(`dispatch.S`、ほかのCPUがそのタスクを取る前)に、例外フレームのx29からフレームポインタをたどり、カーネルのコードを指す戻りアドレスを最大12個、場所と値をTCBに控える(`knl_stk_snap`)。CPUがそのタスクを取るときに読み直し(`knl_dispatch_pick`)、違っていれば、走っていない間に誰かがそのスタックに書いたことになる。そのタスクが戻って例外を起こす前に、`!STKWATCH!`で始まる行に、場所、元の値と今の値、どのCPUが何マイクロ秒前に手放したか、その前後の16ワード、待ちの結果をその近くに書くことになっているタスク、各CPUが走らせているタスクを出し、すべてのCPUを止める。デバッガで調べられるよう、マシンはそのまま残る。EL0のフレームと、カーネルのコードを指さないワードは見ない。TCBが1つあたり約200バイト大きくなるので、普段のビルドには入れない。
+
+## 4.8 アーキテクチャの層
+
+CPUのアーキテクチャに依存するものは、コア依存の置き場(`kernel/sysdepend/cpu/core/armv8a/`、`include/sys/sysdepend/cpu/core/armv8a/`、`include/tk/sysdepend/cpu/core/armv8a/`、`lib/libtk/sysdepend/cpu/core/armv8a/`)に置く。ドライバ、`sysman`、プロセス、ELFのローダ、PCIeなどの共通部は、AArch64の命令やレジスタを直接書かず、次の関数とマクロを使う。どれもインライン関数かマクロなので、AArch64では以前と同じ命令になる。別のアーキテクチャを足すときは、同じ名前で中身の違うヘッダを置き場ごとに足す。
+
+| 置き場 | 名前 | AArch64での中身 |
+| --- | --- | --- |
+| `include/tk/sysdepend/cpu/core/armv8a/syslib.h`(ドライバから使う) | `DeviceBarrier` | `dsb sy`。デバイスに渡すメモリを書いた後、デバイスに知らせる前と、効かせたいレジスタを書いた後 |
+| 同上 | `SmpMemBarrier`、`SmpWriteBarrier` | `dmb ish`、`dmb ishst`。プロセッサの間の読み書きの順序(virtioのリングの書込みとインデックス) |
+| 同上 | `DCacheFlushRange(p, len)` | `dsb sy`、64バイトごとの`dc civac`、`dsb sy`。コヒーレントでないバスマスタとの間でキャッシュを書き戻して無効にする |
+| 同上 | `CpuRelax` | `yield`。ほかのプロセッサを待つループの中 |
+| 同上 | `ReadSysCounter`、`ReadSysCounterSync`、`SysCounterFreq`、`CpuHwId` | `CNTPCT_EL0`(`isb`の有無)、`CNTFRQ_EL0`、`MPIDR_EL1`のアフィニティ |
+| `include/sys/sysdepend/cpu/core/armv8a/sysdef.h` | `PTE_USER_R`、`PTE_USER_W`、`PTE_USER_X` | ページのエントリがEL0に読み、書き、実行を許すか(`AP`と`UXN`) |
+| `kernel/sysdepend/cpu/core/armv8a/sysdepend.h` | `knl_icache_sync_all` | `dsb ish`、`ic ialluis`、`dsb ish`、`isb`。ローダがプログラムのページを書いた後 |
+| 同上 | `knl_mmu_space_root`、`knl_mmu_root_asid`、`knl_mmu_asid_top`、`knl_tlb_flush_asid`、`MMU_ASID_MAX` | `TTBR0_EL1`の値(L0の表の物理アドレスとビット63〜48のASID)の組立てと分解、`ID_AA64MMFR0_EL1`のASIDの幅、`tlbi aside1is` |
+| 同上 | `KNL_ELF_MACHINE` | ローダが受け付けるELFの`e_machine`(`EM_AARCH64`、183) |
+| `kernel/sysdepend/cpu/core/armv8a/sys_timer.h` | `knl_timer_ipi_request`、`knl_end_of_timer_ipi` | PRC1にタイマの設定し直しを頼むSGI、その割込みのEOI(GICの`GICC_EOIR`) |
+| `kernel/sysdepend/cpu/core/armv8a/cpu_msi.h` | `KNL_HAS_MSI`、`knl_msi_span`、`knl_msi_prepare`、`knl_msi_addr`、`knl_msi_data` | GICv2mのフレームが受け付ける割込み番号の範囲、エッジでの受付け、MSI-Xのエントリに書くアドレス(`MSI_SETSPI_NS`)とデータ(割込み番号) |
+| `kernel/sysdepend/cpu/core/armv8a/cpu_ufault.h` | `knl_ufault_unfixable`、`knl_ufault_is_exec`、`knl_ufault_is_data`、`knl_ufault_is_write` | プロセスのフォールトの`ESR`から、プロセスのメモリで直せない種類か、命令の取出しか、データの読み書きか、書込みか |
+| 同上 | `knl_uflt_from_frame`、`knl_uflt_from_call`、`knl_uflt_to_frame`、`knl_uflt_save_fp`、`knl_uflt_load_fp`、`knl_uframe_sp`、`knl_uframe_arg`、`knl_uframe_call`、`UFLT_PC_MASK`、`UFLT_SP_MASK` | 例外フレームと`T_TSFLT`の間の写し(x0〜x18、x29、x30、SP、PC、NZCV)、q0〜q31とFPSR、FPCRの保存と復元、プログラムの入口へ向けるフレームの書換え |
+| `lib/libpthread/pth_cpu.h`(利用者のプログラム) | `pth_tp_get`、`pth_tp_set`、`pth_relax`、`pth_tls_tp_off`、`pth_tls_data_off`、`pth_tls_bytes`、`PTH_TCB_OWNER`、`PTH_TCB_EXIT` | `TPIDR_EL0`の読み書き、`yield`、TLSの変種I(スレッドポインタが16バイトの制御ブロックを指し、TLSのブロックはその後ろ)の配置 |
+
+`lib/libpthread/pth_cpu.h`だけは、利用者のプログラムがカーネルの`TARGET`で作られないので、コンパイラの定義するマクロ(`__aarch64__`)で`lib/libpthread/sysdepend/armv8a/`のヘッダを選ぶ。
+
+makefileは`TARGET`からアーキテクチャ`ARCH`(今は3つのTARGETとも`aarch64`)を決め、そこからコア依存の置き場の名前`ARCH_CORE`(`armv8a`)を決める。`toolchain.mk`はコンパイラの名前の頭とQEMUを、`common.mk`はインクルードパスのコア依存の置き場と命令セットの基準を、`sources.mk`はコア依存のソースの一覧(`SRCS_CORE_armv8a`)を、これで選ぶ(12.2)。
+
+AArch64のまま共通部に残っているものは次のとおりである。
+
+- `include/ts/proc.h`の`T_PRCFLT`と`T_TSFLT`はプロセスに見えるAPIで、AArch64のレジスタの並びのままにしてある。
+- 共通部の変数や項目の名前の`ttbr0`(`CTXB.ttbr0`、`T_SPACE.ttbr0`、`knl_sync_cores`の引数など)は、プロセスの空間の根を表す値の名前として残している。中身は`knl_mmu_space_root`が作る。
+- `outer_kernel/wm/compose_simd.c`はNEONで書いた合成のループで、AArch64でしか翻訳できない。`peripheral_kernel/fs/crc32c.c`は`__aarch64__`のときだけ`crc32c`の命令を使い、ほかではソフトウェアで計算する。
+- `device/gpu/`以下と`lib/libgl/gl_drm.c`は、ほかの作業と並行しているためまだ置き換えていない(キャッシュの直書きなど)。
+- `tests/ktest/`の試験は、AArch64のレジスタを直接見るもの(`ktest_el0.c`、`ktest_pan.c`、`ktest_smp.c`、`ktest_lockup.c`など)がそのまま残る。

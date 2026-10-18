@@ -49,13 +49,52 @@ IMPORT UD knl_rump_pages( void );
 #define GP_TMO		60000		/* ms */
 #define GL_TMO		600000		/* ms: softpipe under TCG */
 
+IMPORT BOOL knl_pt_reclaim( void );
+
+/*
+ * The free pages, the network stack's own counted as free (its pools grow
+ * now and then for nothing the test did), once the page tables taken out
+ * of spaces before are given back (knl_pt_reclaim gives them back only
+ * when every other processor has been seen past them)
+ */
 LOCAL UD pages_free( void )
 {
+	INT	i;
 #if TS_NETSTACK_NETBSD
-	return knl_pf_free_count(-1) + knl_rump_pages();
+	UD	r, f;
+#endif
+
+	for ( i = 0; i < 50 && knl_pt_reclaim(); i++ ) tk_dly_tsk(20);
+#if TS_NETSTACK_NETBSD
+	do {
+		r = knl_rump_pages();
+		f = knl_pf_free_count(-1);
+	} while ( knl_rump_pages() != r );
+	return f + r;
 #else
 	return knl_pf_free_count(-1);
 #endif
+}
+
+/*
+ * The free pages once what an ended process held is all back: the reaper
+ * gives back its space after ts_wai_prc has answered, and the page tables
+ * taken out of a space are given back only when every other processor
+ * has been seen past them (knl_pt_reclaim). Waited for up to 5 s until
+ * the count is 'before' again; the count then, and how long it took.
+ */
+LOCAL UD pages_settled( UD before )
+{
+	UD	now = 0;
+	INT	t;
+
+	for ( t = 0; t < 50; t++ ) {
+		now = pages_free();
+		if ( now == before ) break;
+		tk_dly_tsk(100);
+	}
+	tm_printf((UB*)"  free pages %d -> %d, after %d ms\n", (INT)before, (INT)now, t * 100);
+	return now;
 }
 
 LOCAL BOOL present( CONST char *path )
@@ -112,7 +151,7 @@ LOCAL void gl_gp_bo( void )
 	KT_ASSERT_EQ(code, 0);
 	KT_ASSERT_EQ(knl_gpu_ctx_count(&bos), 0);
 	KT_ASSERT_EQ(bos, 0);
-	KT_ASSERT_EQ(pages_free(), before);
+	KT_ASSERT_EQ(pages_settled(before), before);
 }
 
 /*
@@ -297,8 +336,7 @@ LOCAL void gl_gp_hold( void )
 	KT_ASSERT_EQ(code, 0);
 	KT_ASSERT_EQ(knl_gpu_ctx_count(&bos), 0);
 	KT_ASSERT_EQ(bos, 0);
-	tm_printf((UB*)"  free pages %d -> %d\n", (INT)before, (INT)pages_free());
-	KT_ASSERT_EQ(pages_free(), before);
+	KT_ASSERT_EQ(pages_settled(before), before);
 }
 
 /* ---------------------------------------------------------------- OpenGL ES */
@@ -338,8 +376,7 @@ LOCAL void gl_tri( void )
 	if ( !have_gl ) KT_SKIP("no " GL_PROG);
 	before = pages_free();
 	gl_mode("tri");
-	tm_printf((UB*)"  free pages %d -> %d\n", (INT)before, (INT)pages_free());
-	KT_ASSERT_EQ(pages_free(), before);
+	KT_ASSERT_EQ(pages_settled(before), before);
 }
 
 /* A window of its own: the program reads its pixels back */

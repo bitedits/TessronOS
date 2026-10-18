@@ -356,7 +356,7 @@ LOCAL UW rd32( UBINT base, UINT off )
 LOCAL void wr32( UBINT base, UINT off, UW v )
 {
 	*(volatile UW *)(base + off) = v;
-	Asm("dsb sy" ::: "memory");
+	DeviceBarrier();
 }
 
 /*
@@ -368,14 +368,14 @@ LOCAL void wr64( UBINT base, UINT off, UD v )
 {
 	*(volatile UW *)(base + off) = (UW)v;
 	*(volatile UW *)(base + off + 4) = (UW)(v >> 32);
-	Asm("dsb sy" ::: "memory");
+	DeviceBarrier();
 }
 
 LOCAL void doorbell( XHCI *x, INT slot, UW v )
 {
 	USB_MB();
 	*(volatile UW *)(x->db + (UBINT)slot * 4) = v;
-	Asm("dsb sy" ::: "memory");
+	DeviceBarrier();
 }
 
 /* Wait for some bits of a register to take a value, a millisecond a look */

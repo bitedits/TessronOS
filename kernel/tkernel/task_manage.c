@@ -268,7 +268,7 @@ SYSCALL ER tk_del_tsk( ID tskid )
 		if ( !busy ) {
 			break;
 		}
-		Asm("yield");
+		CpuRelax();
 	}
 
 	return ercd;

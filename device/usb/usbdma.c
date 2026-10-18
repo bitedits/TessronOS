@@ -81,13 +81,7 @@ LOCAL DMAPAGE	dma_page[USB_DMA_MAXPAGES];
 
 LOCAL void dcache_clean_inval( UBINT a, UBINT len )
 {
-	UBINT	end = a + len;
-
-	Asm("dsb sy" ::: "memory");
-	for ( a &= ~63ULL; a < end; a += 64 ) {
-		Asm("dc civac, %0" :: "r"(a) : "memory");
-	}
-	Asm("dsb sy" ::: "memory");
+	DCacheFlushRange((CONST void *)a, len);
 }
 #endif
 

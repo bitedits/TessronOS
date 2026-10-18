@@ -1,0 +1,122 @@
+/*
+ *----------------------------------------------------------------------
+ *    TessronOS
+ *
+ *    Copyright (C) 2026 satromi
+ *    This software is distributed under the T-License 2.2.
+ *----------------------------------------------------------------------
+ */
+
+/*
+ *	cpu_status.h
+ *	CPU status (x86-64 core)
+ */
+
+#ifndef _SYSDEPEND_CPU_CORE_STATUS_
+#define _SYSDEPEND_CPU_CORE_STATUS_
+
+#include <tk/syslib.h>
+#include <sys/sysdef.h>
+#include "sysdepend.h"
+
+/*
+ * Critical section
+ *	Interrupts are masked with RFLAGS.IF. A dispatch request raised inside
+ *	the section is executed at its end.
+ *
+ *	Whether to dispatch is decided before the kernel lock is let go. A
+ *	task that the section put into a wait then always goes through the
+ *	dispatcher, which takes the lock again before it lets the task run
+ *	on (knl_dispatch_pick): a processor that ends the wait meanwhile has
+ *	by then written all it gives the task -- the wait's result, a
+ *	message, a block. Decided after letting go, the task could find
+ *	itself made ready again by that processor half way through, run on
+ *	without the dispatcher and read its result before it was written
+ *	(E_TMOUT from a wait without a limit), while the result went into
+ *	its stack afterwards, over whatever the stack held by then
+ *	(design 4.3).
+ */
+#if USE_KTEST
+IMPORT volatile UW	knl_kt_unlock_spin;
+IMPORT volatile UW	knl_kt_release_spin;
+IMPORT volatile UW	knl_kt_exit_spin;
+#define KT_SPIN(n)	{ UW _k_ = (n); while ( _k_ != 0 ) { _k_--; Asm("pause"); } }
+#else
+#define KT_SPIN(n)
+#endif
+
+#define BEGIN_CRITICAL_SECTION	{ UINT _intsts_ = knl_lock_kernel();
+#define END_CRITICAL_SECTION	{ BOOL _dsp_ = ( !isDI(_intsts_)	\
+				  && knl_ctxtsk != knl_schedtsk		\
+				  && !knl_isTaskIndependent()		\
+				  && !knl_dispatch_disabled );		\
+				knl_unlock_kernel_keep();		\
+				KT_SPIN(knl_kt_unlock_spin)		\
+				if ( _dsp_ ) {				\
+					knl_dispatch();			\
+				}					\
+				enaint(_intsts_); } }
+
+#define BEGIN_DISABLE_INTERRUPT	{ UINT _intsts_ = disint();
+#define END_DISABLE_INTERRUPT	enaint(_intsts_); }
+
+#define ENABLE_INTERRUPT	{ enaint(0); }
+#define DISABLE_INTERRUPT	{ disint(); }
+#define ENABLE_INTERRUPT_UPTO(level)	{ enaint(0); }
+
+/*
+ * Task independent part (interrupt handler) nesting
+ */
+#define knl_taskindp	(knl_pcpu()->taskindp)	/* per processor */
+
+Inline BOOL knl_isTaskIndependent( void )
+{
+	return ( knl_taskindp > 0 )? TRUE: FALSE;
+}
+Inline void knl_EnterTaskIndependent( void )
+{
+	knl_taskindp++;
+}
+Inline void knl_LeaveTaskIndependent( void )
+{
+	knl_taskindp--;
+}
+#define ENTER_TASK_INDEPENDENT	{ knl_EnterTaskIndependent(); }
+#define LEAVE_TASK_INDEPENDENT	{ knl_LeaveTaskIndependent(); }
+
+/*
+ * Execution state queries
+ */
+#define in_indp()	( knl_isTaskIndependent() || knl_ctxtsk == NULL )
+
+Inline BOOL knl_int_masked( void )
+{
+	UD	fl;
+	Asm("pushfq; popq %0" : "=r"(fl));
+	return ( fl & RFL_IF ) == 0;
+}
+
+#define in_ddsp()	( knl_dispatch_disabled		\
+			|| in_indp() 			\
+			|| knl_int_masked() )
+
+#define in_loc()	( knl_int_masked()		\
+			|| in_indp() )
+
+#define in_qtsk()	( knl_ctxtsk->sysmode > knl_ctxtsk->isysmode )
+
+/*
+ * Dispatcher invocation (a software interrupt into vector.S: the task's
+ * frame is the one an interrupt makes)
+ */
+Inline void knl_force_dispatch( void )
+{
+	Asm("int %0" :: "i"(SVC_FORCE_DISPATCH) : "memory");
+}
+
+Inline void knl_dispatch( void )
+{
+	Asm("int %0" :: "i"(SVC_DISPATCH) : "memory");
+}
+
+#endif /* _SYSDEPEND_CPU_CORE_STATUS_ */

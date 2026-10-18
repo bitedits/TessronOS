@@ -82,6 +82,101 @@ IMPORT void MemoryBarrier( void );
 IMPORT void ReadBarrier( void );
 IMPORT void WriteBarrier( void );
 
+/*
+ * Barriers and cache maintenance for drivers and the common parts of
+ * the kernel, inline (docs/tessronos/04-kernel.md 4.8). What a driver
+ * needs of the processor around a device is said with these, so that
+ * another architecture gives its own meaning to the same names.
+ *
+ *	DeviceBarrier	every earlier access to memory and to a device's
+ *			registers is complete before any later one (DSB SY):
+ *			before telling a device of what was written for it,
+ *			and after writing a register that must take effect
+ *	SmpMemBarrier	among the processors, earlier loads and stores
+ *			before later ones (DMB ISH)
+ *	SmpWriteBarrier	among the processors, earlier stores before
+ *			later ones (DMB ISHST)
+ *	CpuRelax	a moment's pause in a loop that spins (YIELD)
+ *	DCacheFlushRange what the processor wrote of [p, p+len) out to
+ *			memory, and no line of it left in the cache, so
+ *			that a bus master that is not coherent with the
+ *			cache sees what was written and the processor then
+ *			sees what the master wrote (DC CIVAC by line)
+ */
+#define DCACHE_LINE	64		/* the smallest data cache line of the processors */
+
+Inline void DeviceBarrier( void )
+{
+	__asm__ volatile ( "dsb sy" ::: "memory" );
+}
+
+Inline void SmpMemBarrier( void )
+{
+	__asm__ volatile ( "dmb ish" ::: "memory" );
+}
+
+Inline void SmpWriteBarrier( void )
+{
+	__asm__ volatile ( "dmb ishst" ::: "memory" );
+}
+
+Inline void CpuRelax( void )
+{
+	__asm__ volatile ( "yield" );
+}
+
+Inline void DCacheFlushRange( CONST void *p, UBINT len )
+{
+	UBINT	a = (UBINT)p & ~(UBINT)( DCACHE_LINE - 1 ), end = (UBINT)p + len;
+
+	__asm__ volatile ( "dsb sy" ::: "memory" );
+	for ( ; a < end; a += DCACHE_LINE ) {
+		__asm__ volatile ( "dc civac, %0" :: "r"(a) : "memory" );
+	}
+	__asm__ volatile ( "dsb sy" ::: "memory" );
+}
+
+/*
+ * The system counter (CNTPCT_EL0), which runs at the same rate on every
+ * processor and never goes back: ReadSysCounterSync keeps the read
+ * behind the instructions before it (ISB), ReadSysCounter does not.
+ * SysCounterFreq is its rate in Hz (CNTFRQ_EL0), 0 when the firmware
+ * left it unset. CpuHwId is the processor's own number as the hardware
+ * names it (the affinity fields of MPIDR_EL1), known before the kernel
+ * has numbered the processors.
+ */
+Inline UD ReadSysCounter( void )
+{
+	UD	c;
+
+	__asm__ volatile ( "mrs %0, cntpct_el0" : "=r"(c) );
+	return c;
+}
+
+Inline UD ReadSysCounterSync( void )
+{
+	UD	c;
+
+	__asm__ volatile ( "isb; mrs %0, cntpct_el0" : "=r"(c) :: "memory" );
+	return c;
+}
+
+Inline UD SysCounterFreq( void )
+{
+	UD	f;
+
+	__asm__ volatile ( "mrs %0, cntfrq_el0" : "=r"(f) );
+	return f;
+}
+
+Inline UW CpuHwId( void )
+{
+	UD	m;
+
+	__asm__ volatile ( "mrs %0, mpidr_el1" : "=r"(m) );
+	return (UW)( m & 0xFFFFFF );
+}
+
 
 /*
  * I/O port access

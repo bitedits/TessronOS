@@ -65,6 +65,14 @@ typedef struct {
 	UD	pad;
 } T_EXCFRAME;
 
+/*
+ * The system call's function code, its arguments (0 the first) and the
+ * register its value goes back in, as the SVC gateway reads the frame
+ */
+#define KNL_SVC_FNCD(f)		( (f)->x[8] )
+#define KNL_SVC_ARG(f, n)	( (f)->x[n] )
+#define KNL_SVC_RET(f)		( (f)->x[0] )
+
 #define SSF_EXC_SIZE		(26 * 8)	/* size of the exception entry frame (208) */
 #define SSF_CALLEE_SIZE		(10 * 8)	/* size of the callee-saved area (80) */
 

@@ -711,6 +711,8 @@ EXPORT void df_pattern_edit( DTWIN *d, INT pat )
 		pe_wid = 0;
 		return;
 	}
+	/* the figure's, in front of it: the figure stays the window in use and its panels stay up */
+	(void)wm_set_parent(pe_wid, d->wid);
 	wm_raise(pe_wid);
 	pe_draw(d);
 	wm_update();

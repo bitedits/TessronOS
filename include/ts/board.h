@@ -43,6 +43,9 @@ extern "C" {
 #define BOARD_RPI4B		5	/* Raspberry Pi 4 Model B */
 #define BOARD_RPI400		6	/* Raspberry Pi 400 */
 #define BOARD_CM4		7	/* Compute Module 4: eMMC on the module, or (Lite) the carrier's SD slot */
+#define BOARD_PC		8	/* an x64 PC with UEFI firmware, of no kind the kernel knows */
+#define BOARD_QEMU_Q35		9	/* QEMU q35 with OVMF */
+#define BOARD_SURFACE_GO2	10	/* Microsoft Surface Go 2 (model 1927) */
 
 /* What the SD host controller of the board has on it */
 #define BOARD_SD_CD		0	/* a card slot with its detect switch on always-on pin 5 */

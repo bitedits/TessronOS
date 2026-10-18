@@ -400,6 +400,78 @@ class TestFormat(Base):
         self.assertEqual(r.returncode, 0, r.stdout)
 
 
+class TestGrow(Base):
+    """A volume grown in place (design 7.7): the groups are not what
+    layout() makes of its size, and the check takes them as they are."""
+
+    def grown(self, blocks):
+        path = self.built()
+        with open(path, "r+b") as f:
+            f.truncate(blocks * BLOCK_SIZE)
+        dev = BlockImage(path, writable=True)
+        vol = Volume.open(dev)
+        vol.grow(blocks)
+        dev.close()
+        return path
+
+    def test_grown_checks_whole(self):
+        from tsfs_py.layout import COMPAT_GROWN, grown_count
+        path = self.grown(12288)
+        vol = self.reopen(path)
+        sb = vol.sb
+        self.assertEqual(sb.total_blocks, 12288)
+        self.assertEqual((sb.journal_blocks, sb.ag_blocks), (515, 1024))
+        self.assertEqual(sb.ag_count, grown_count(sb.ag_first, 1024, 12288))
+        self.assertNotEqual(layout(12288), (515, 1024, sb.ag_count))
+        self.assertTrue(sb.compat & COMPAT_GROWN)
+        self.assertEqual(len(vol.objects()), 4)
+        c, rep = self.check(vol)
+        self.assertEqual(rep.errors, [])
+        self.assertEqual(rep.warnings, [])
+        r = tool("fsck.tsfs", path)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_grown_takes_new_blocks(self):
+        path = self.grown(8192)
+        dev = BlockImage(path, writable=True)
+        self.addCleanup(dev.close)
+        vol = Volume.open(dev)
+        free = vol.load_maps().total_free()
+        self.assertGreater(free, 4096)
+        runs = []
+        while not runs or runs[-1][0] < 4096:
+            runs.append(vol.alloc_ext(1024))
+        for start, count in runs:
+            vol.free_ext(start, count)
+        self.assertEqual(vol.load_maps().total_free(), free)
+
+    def test_geometry_not_grown(self):
+        """The same groups without GROWN: not what layout() makes, a warning."""
+        path = self.grown(12288)
+        dev = BlockImage(path, writable=True)
+        vol = Volume.open(dev)
+        vol.sb.compat = 0
+        vol.write_sb(both=True)
+        dev.close()
+        c, rep = self.check(self.reopen(path))
+        self.assertFound(rep.warnings, "not what a volume of 12288 blocks")
+
+    def test_grow_cut_short(self):
+        from tsfs_py.layout import INCOMPAT_GROWING
+        path = self.built()
+        dev = BlockImage(path, writable=True)
+        vol = Volume.open(dev)
+        vol.sb.incompat |= INCOMPAT_GROWING
+        vol.sb.grow_to = 8192
+        vol.write_sb()
+        dev.close()
+        vol = self.reopen(path)
+        self.assertEqual(vol.sb.grow_to, 8192)
+        c, rep = self.check(vol)
+        self.assertFound(rep.warnings, "a grow to 8192 blocks was cut short")
+        self.assertEqual(rep.errors, [])
+
+
 class TestBTree(Base):
 
     def test_build_walk_lookup(self):

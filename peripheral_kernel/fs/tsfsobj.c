@@ -723,8 +723,34 @@ LOCAL ER xt_shrink( OBJ *o, XT *x, INT *p_n, UD keep, BOOL later )
 
 /* ---------------------------------------------------------------- data parts */
 
-/* Whole blocks of a data part go to and from the device this many at a time */
+/*
+ * Whole blocks of a data part go to and from the device this many at a
+ * time, unless the device says how much it takes best (TDN_IOMAX; the SD
+ * card's 1280KB, design 7.3), up to RUN_IO_CAP. The buffer they go
+ * through starts on a 64-byte line, so that a controller that moves the
+ * data itself takes it without a copy through its own bounce buffer.
+ */
 #define RUN_IO_BLOCKS	32
+#define RUN_IO_CAP	1024		/* 4MB */
+#define RUN_IO_ALIGN	64
+
+LOCAL UD run_io_max( OBJ *o )
+{
+	UD	n = ts_run_blocks(o->vol);
+
+	if ( n == 0 ) return RUN_IO_BLOCKS;
+	if ( n < 2 ) return 2;
+	return ( n > RUN_IO_CAP ) ? RUN_IO_CAP : n;
+}
+
+/* A buffer of 'room' bytes on a 64-byte line; *p_raw is what Kfree takes */
+LOCAL UB *run_io_buf( SZ room, void **p_raw )
+{
+	UB	*raw = (UB *)Kmalloc(room + RUN_IO_ALIGN);
+
+	*p_raw = raw;
+	return ( raw == NULL ) ? NULL : (UB *)( ( (UBINT)raw + RUN_IO_ALIGN - 1 ) & ~(UBINT)( RUN_IO_ALIGN - 1 ) );
+}
 
 LOCAL XT *xt_room( void )
 {
@@ -732,11 +758,11 @@ LOCAL XT *xt_room( void )
 }
 
 /* The room for the blocks of one request: as many as `len` bytes can fill */
-LOCAL SZ run_io_room( SZ len )
+LOCAL SZ run_io_room( SZ len, UD max )
 {
 	UD	n = (UD)len / TSFSBLK_BLOCK_SIZE;
 
-	if ( n > RUN_IO_BLOCKS ) n = RUN_IO_BLOCKS;
+	if ( n > max ) n = max;
 	return (SZ)( ( ( n >= 2 ) ? n : 1 ) * TSFSBLK_BLOCK_SIZE );
 }
 
@@ -744,13 +770,13 @@ LOCAL SZ run_io_room( SZ len )
  * How many whole blocks from `at` can go in one request: the part of the
  * run left, of the bytes asked for, and of the room there is for them.
  */
-LOCAL UD run_io_n( UD at, SZ left, UD run )
+LOCAL UD run_io_n( UD at, SZ left, UD run, UD max )
 {
 	UD	n = (UD)left / TSFSBLK_BLOCK_SIZE;
 
 	if ( at % TSFSBLK_BLOCK_SIZE != 0 ) return 0;
 	if ( n > run ) n = run;
-	if ( n > RUN_IO_BLOCKS ) n = RUN_IO_BLOCKS;
+	if ( n > max ) n = max;
 	return ( n >= 2 ) ? n : 0;
 }
 
@@ -758,6 +784,8 @@ LOCAL ER dseg_read( OBJ *o, CONST UB *pl, UD off, UB *dst, SZ len, SZ *p_asize )
 {
 	UD	size = rd64(pl + PL_BYTES), l, p, run;
 	UB	*buf;
+	void	*raw = NULL;
+	UD	rmax;
 	XT	*x;
 	INT	n = 0;
 	SZ	done = 0, k;
@@ -774,10 +802,11 @@ LOCAL ER dseg_read( OBJ *o, CONST UB *pl, UD off, UB *dst, SZ len, SZ *p_asize )
 		return E_OK;
 	}
 	x = xt_room();
-	buf = (UB *)Kmalloc(run_io_room(len));
+	rmax = run_io_max(o);
+	buf = run_io_buf(run_io_room(len, rmax), &raw);
 	if ( x == NULL || buf == NULL ) {
 		if ( x != NULL ) Kfree(x);
-		if ( buf != NULL ) Kfree(buf);
+		if ( raw != NULL ) Kfree(raw);
 		return E_NOMEM;
 	}
 	er = xt_load(o, pl, x, &n);
@@ -790,7 +819,7 @@ LOCAL ER dseg_read( OBJ *o, CONST UB *pl, UD off, UB *dst, SZ len, SZ *p_asize )
 			er = E_OBJ;
 			break;
 		}
-		nb = run_io_n(off + (UD)done, len - done, run);
+		nb = run_io_n(off + (UD)done, len - done, run, rmax);
 		if ( nb > 0 ) {
 			er = ts_read_blks(o->vol, p, nb, buf);
 			if ( er < E_OK ) break;
@@ -805,7 +834,7 @@ LOCAL ER dseg_read( OBJ *o, CONST UB *pl, UD off, UB *dst, SZ len, SZ *p_asize )
 		knl_memcpy(dst + done, buf + ( off + (UD)done ) % TSFSBLK_BLOCK_SIZE, (INT)k);
 		done += k;
 	}
-	Kfree(buf);
+	Kfree(raw);
 	Kfree(x);
 	if ( er >= E_OK ) *p_asize = done;
 	return er;
@@ -855,6 +884,8 @@ LOCAL ER dseg_write( OBJ *o, UB *pl, UD off, CONST UB *src, SZ len )
 {
 	UD	size = rd64(pl + PL_BYTES), end = off + (UD)len, l, p, need;
 	UB	*buf;
+	void	*raw = NULL;
+	UD	rmax;
 	XT	*x;
 	INT	n = 0, noff;
 	SZ	done = 0, k;
@@ -900,10 +931,11 @@ LOCAL ER dseg_write( OBJ *o, UB *pl, UD off, CONST UB *src, SZ len )
 	}
 
 	x = xt_room();
-	buf = (UB *)Kmalloc(run_io_room(len));
+	rmax = run_io_max(o);
+	buf = run_io_buf(run_io_room(len, rmax), &raw);
 	if ( x == NULL || buf == NULL ) {
 		if ( x != NULL ) Kfree(x);
-		if ( buf != NULL ) Kfree(buf);
+		if ( raw != NULL ) Kfree(raw);
 		return E_NOMEM;
 	}
 	er = xt_load(o, pl, x, &n);
@@ -925,7 +957,7 @@ LOCAL ER dseg_write( OBJ *o, UB *pl, UD off, CONST UB *src, SZ len )
 			er = E_OBJ;
 			break;
 		}
-		nb = run_io_n(at, len - done, run);
+		nb = run_io_n(at, len - done, run, rmax);
 		if ( nb > 0 ) {
 			knl_memcpy(buf, src + done, (INT)( nb * TSFSBLK_BLOCK_SIZE ));
 			er = ts_write_blks(o->vol, p, nb, buf);
@@ -942,7 +974,7 @@ LOCAL ER dseg_write( OBJ *o, UB *pl, UD off, CONST UB *src, SZ len )
 		er = ts_write_blk(o->vol, p, buf);
 		done += k;
 	}
-	Kfree(buf);
+	Kfree(raw);
 	Kfree(x);
 	if ( er >= E_OK && end > size ) {
 		wr64(pl + PL_BYTES, end);

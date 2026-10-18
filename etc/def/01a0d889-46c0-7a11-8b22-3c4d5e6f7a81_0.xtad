@@ -1,7 +1,7 @@
 <tad version="1.0" encoding="UTF-8" filename="予定表のメニュー">
 <document>
 <p>予定表のメニュー</p>
-<p>予定表の窓のメニュー。閉じる、保存、表示、編集と、仮身操作から実行までの共通の項目。メニューの定義。</p>
+<p>予定表のウインドウのメニュー。閉じる、保存、表示、編集と、仮身操作から実行までの共通の項目。メニューの定義。</p>
 </document>
 <menu>
 <include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2002-7fd1-9a10-c1d2e3f40a11"/></include>

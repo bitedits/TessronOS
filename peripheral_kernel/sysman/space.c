@@ -115,17 +115,14 @@ EXPORT void knl_space_init( void )
 	UD	text_size, data_size;
 
 	knl_sysprc_l0_pa = alloc_table();
+	knl_mmu_space_init_root(null_pa);
+	knl_mmu_space_init_root(knl_sysprc_l0_pa);
 	sink_pa = alloc_table();
-	knl_ttbr0_null   = null_pa | ((UD)ASID_NULL << 48);
-	knl_sysprc_ttbr0 = knl_sysprc_l0_pa | ((UD)ASID_SYSPRC << 48);
+	knl_ttbr0_null   = knl_mmu_space_root(null_pa, ASID_NULL);
+	knl_sysprc_ttbr0 = knl_mmu_space_root(knl_sysprc_l0_pa, ASID_SYSPRC);
 
 	asid_used[0] = (1U << ASID_NULL) | (1U << ASID_SYSPRC);
-	{
-		UD	mmfr0;
-
-		Asm("mrs %0, id_aa64mmfr0_el1" : "=r"(mmfr0));
-		asid_top = ( ( ( mmfr0 >> 4 ) & 0xF ) == 2 ) ? ASID_MAX : 255;
-	}
+	asid_top = knl_mmu_asid_top();
 
 	knl_sysprc_space.l0_pa    = knl_sysprc_l0_pa;
 	knl_sysprc_space.ttbr0    = knl_sysprc_ttbr0;
@@ -158,8 +155,9 @@ EXPORT ER knl_space_create( T_SPACE *sp )
 		asid_free((UINT)asid);
 		return E_NOMEM;
 	}
+	knl_mmu_space_init_root(sp->l0_pa);
 	sp->asid     = (UINT)asid;
-	sp->ttbr0    = sp->l0_pa | ((UD)asid << 48);
+	sp->ttbr0    = knl_mmu_space_root(sp->l0_pa, (UINT)asid);
 	sp->stk_next = USER_STACK_TOP;
 
 	return E_OK;
@@ -179,7 +177,7 @@ LOCAL void free_level( UD table_pa, INT level, BOOL keep )
 	UD	*t = (UD *)PA2VA(table_pa);
 	INT	i;
 
-	for ( i = 0; i < PT_ENTRIES; i++ ) {
+	for ( i = 0; i < ( level == 0 ? PT_USER_ENTRIES : PT_ENTRIES ); i++ ) {
 		UD	e = t[i];
 		UD	pa;
 		BOOL	k = keep || ( level == 0 && i >= SHM_L0_FIRST && i < SHM_L0_END );
@@ -188,11 +186,13 @@ LOCAL void free_level( UD table_pa, INT level, BOOL keep )
 		pa = e & PTE_ADDR_MASK;
 
 		/* bits [1:0] are 0b11 for a table at levels 0..2 and for a
-		   page at level 3, so the level tells the two apart */
+		   page at level 3, so the level tells the two apart (on x86-64
+		   they are present and writable, which every table entry of a
+		   process space is, and a space has no large pages) */
 		if ( level < 3 && (e & 3) == 3 ) {
 			free_level(pa, level + 1, k);
-		} else if ( !k && pa != sink_pa ) {
-			knl_free_pages(knl_pa_to_pf(pa), 0);	/* a mapped page */
+		} else if ( !k && pa != sink_pa && ( e & PTE_SW_SHARED ) == 0 ) {
+			knl_free_pages(knl_pa_to_pf(pa), 0);	/* a mapped page: one shared is its owner's */
 		}
 		t[i] = 0;
 	}
@@ -229,9 +229,7 @@ EXPORT void knl_space_delete( T_SPACE *sp )
 	}
 	stk_forget(sp->l0_pa);
 	free_level(sp->l0_pa, 0, FALSE);
-	Asm("dsb ishst" ::: "memory");
-	Asm("tlbi aside1is, %0" :: "r"((UD)sp->asid << 48) : "memory");
-	Asm("dsb ish; isb" ::: "memory");
+	knl_tlb_flush_asid(sp->asid);
 
 	asid_free(sp->asid);
 	sp->l0_pa = 0;
@@ -244,7 +242,8 @@ EXPORT void knl_space_delete( T_SPACE *sp )
  * written (knl_prc_kfault; called from the exception handler with
  * interrupts disabled). A page of the space's own that it replaces is
  * freed: nothing else maps it, and the process does not run again. A
- * page of the shared window belongs to whoever shared it.
+ * page of the shared window belongs to whoever shared it, and a page of
+ * a program image shared by processes (PTE_SW_SHARED) to the image.
  */
 EXPORT ER knl_space_sink( T_SPACE *sp, UBINT va )
 {
@@ -254,12 +253,13 @@ EXPORT ER knl_space_sink( T_SPACE *sp, UBINT va )
 		return E_NOMEM;
 	}
 	va &= PAGE_MASK;
-	old = knl_pt_lookup(sp->l0_pa, va);
+	old = knl_pt_entry(sp->l0_pa, va);
 	if ( knl_pt_map(sp->l0_pa, va, sink_pa, PAGE_SIZE, PTE_PAGE_UDATA) != E_OK ) {
 		return E_NOMEM;
 	}
-	if ( old != ~(UD)0 && old != sink_pa && !( va >= SHM_WINDOW_BASE && va < SHM_WINDOW_END ) ) {
-		knl_free_pages(knl_pa_to_pf(old), 0);
+	if ( old != 0 && ( old & PTE_SW_SHARED ) == 0 && ( old & PTE_ADDR_MASK ) != sink_pa
+	  && !( va >= SHM_WINDOW_BASE && va < SHM_WINDOW_END ) ) {
+		knl_free_pages(knl_pa_to_pf(old & PTE_ADDR_MASK), 0);
 	}
 	return E_OK;
 }

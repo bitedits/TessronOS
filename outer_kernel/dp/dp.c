@@ -1042,17 +1042,108 @@ EXPORT ER dp_put_mono( INT gid, INT x, INT y, CONST UB *bits, INT pitch,
 }
 
 /*
+ * Mixing in light, not in colour values.
+ *
+ * A value on the screen is not the light it gives: the light goes about
+ * as the value to the power 2.2 (the sRGB curve). Mixing the values
+ * themselves in proportion to how much of the pixel a letter covers
+ * makes half a pixel of black on white far darker than half the light,
+ * and half a pixel of white on black far dimmer -- the same letter comes
+ * out heavy in one colour and thin in the other. So each of the three
+ * values is turned into light by a table (dp_lin), the two lights mixed
+ * in the share covered, and the result turned back into a value.
+ *
+ * The curve the mixing goes by is picked by how light the letter's own
+ * colour is: the sRGB curve itself for black, a straighter one the
+ * lighter the colour, a straight line (the values mixed as they are) for
+ * white. Light letters on a dark ground look bolder than dark letters on
+ * a light ground of the same shape, because a bright stroke spreads in
+ * the eye; mixing them by a straighter curve takes back that spread, so
+ * that a letter weighs the same whichever way round its colours are.
+ *
+ * Nothing pushes the shares themselves up or down (no contrast added):
+ * the letters are made a little heavier in their outlines instead
+ * (fn.c, the darkening), which keeps their edges as smooth as the
+ * coverage says.
+ *
+ * Back from light to value: dp_inv gives, for each sixteenth of the light
+ * scale, the value nearest its lower end, and dp_mid, the light halfway
+ * between a value and the next, moves it on to the nearest. Both are
+ * made from dp_lin the first time a curve is used.
+ */
+#include "dp_gamma.h"
+
+LOCAL UB	dp_inv[DP_GAMMA_N][4096];
+LOCAL UW	dp_mid[DP_GAMMA_N][256];
+LOCAL BOOL	dp_gm_made[DP_GAMMA_N];
+
+LOCAL void gamma_make( INT k )
+{
+	INT	v, b;
+
+	for ( v = 0; v < 255; v++ ) {
+		dp_mid[k][v] = ( (UW)dp_lin[k][v] + (UW)dp_lin[k][v + 1] + 1 ) / 2;
+	}
+	dp_mid[k][255] = 0x10000U;		/* past every light */
+	v = 0;
+	for ( b = 0; b < 4096; b++ ) {
+		while ( v < 255 && (UW)( b << 4 ) >= dp_mid[k][v] ) {
+			v++;
+		}
+		dp_inv[k][b] = (UB)v;
+	}
+	dp_gm_made[k] = TRUE;
+}
+
+/* The curve a colour's letters are mixed by: 0 straight .. DP_GAMMA_N - 1 sRGB */
+LOCAL INT gamma_of( UW colour )
+{
+	UW	y = ( 54U * ( ( colour >> 16 ) & 0xFF ) + 183U * ( ( colour >> 8 ) & 0xFF )
+		      + 19U * ( colour & 0xFF ) ) >> 8;
+
+	return (INT)( ( ( 255U - y ) * (UW)( DP_GAMMA_N - 1 ) + 127U ) / 255U );
+}
+
+/* A light back to the nearest value */
+Inline UW unlight( CONST UB *inv, CONST UW *mid, UW l )
+{
+	UW	v = inv[l >> 4];
+
+	while ( l >= mid[v] ) {
+		v++;
+	}
+	return v;
+}
+
+/* One value of what is there and the letter's light, mixed in share a of 255 */
+Inline UW mix1( CONST UH *lin, CONST UB *inv, CONST UW *mid, UW d, INT lc, INT a )
+{
+	INT	ld = (INT)lin[d];
+
+	if ( ld == lc ) {
+		return d;
+	}
+	return unlight(inv, mid, (UW)( ld + ( ( lc - ld ) * a + ( ( lc > ld ) ? 127 : -127 ) ) / 255 ));
+}
+
+/*
  * A bitmap of how much of each pixel a shape covers (0 none .. 255 all),
  * put down in one colour: each pixel is the colour and what was there,
- * mixed in that share. Letters drawn with their edges smoothed come this
- * way. The pixel's top byte is kept as it was.
+ * mixed in that share as light (above). Letters drawn with their edges
+ * smoothed come this way. The pixel's top byte is kept as it was.
  */
 LOCAL void gray_run( DPENV *e, CONST UB *cov, INT sx, INT x, INT x1, INT y,
-		     UW colour, T_DPRECT *touched )
+		     UW colour, INT k, T_DPRECT *touched )
 {
-	UW	*p;
-	INT	x0 = x;
-	UW	cr = ( colour >> 16 ) & 0xFF, cg = ( colour >> 8 ) & 0xFF, cb = colour & 0xFF;
+	UW		*p;
+	INT		x0 = x;
+	CONST UH	*lin = dp_lin[k];
+	CONST UB	*inv = dp_inv[k];
+	CONST UW	*mid = dp_mid[k];
+	INT		lr = lin[( colour >> 16 ) & 0xFF];
+	INT		lg = lin[( colour >> 8 ) & 0xFF];
+	INT		lb = lin[colour & 0xFF];
+	UW		last_d = 0, last_a = 0, last_out = 0;
 
 	if ( x1 <= x ) {
 		return;
@@ -1067,10 +1158,17 @@ LOCAL void gray_run( DPENV *e, CONST UB *cov, INT sx, INT x, INT x1, INT y,
 			*p = ( d & 0xFF000000U ) | ( colour & 0x00FFFFFFU );
 			continue;
 		}
-		r = ( cr * a + ( ( d >> 16 ) & 0xFF ) * ( 255 - a ) + 127 ) / 255;
-		g = ( cg * a + ( ( d >> 8 ) & 0xFF ) * ( 255 - a ) + 127 ) / 255;
-		b = ( cb * a + ( d & 0xFF ) * ( 255 - a ) + 127 ) / 255;
-		*p = ( d & 0xFF000000U ) | ( r << 16 ) | ( g << 8 ) | b;
+		if ( d == last_d && a == last_a ) {
+			*p = last_out;		/* the same mix as the pixel before */
+			continue;
+		}
+		r = mix1(lin, inv, mid, ( d >> 16 ) & 0xFF, lr, (INT)a);
+		g = mix1(lin, inv, mid, ( d >> 8 ) & 0xFF, lg, (INT)a);
+		b = mix1(lin, inv, mid, d & 0xFF, lb, (INT)a);
+		last_d = d;
+		last_a = a;
+		last_out = ( d & 0xFF000000U ) | ( r << 16 ) | ( g << 8 ) | b;
+		*p = last_out;
 	}
 	dp_count.pixels += (UD)(x1 - x0);
 	if ( x0 < touched->left )      touched->left = x0;
@@ -1084,7 +1182,7 @@ EXPORT ER dp_put_gray( INT gid, INT x, INT y, CONST UB *cov, INT pitch,
 {
 	DPENV		*e;
 	T_DPRECT	clip, touched;
-	INT		row, ox, oy;
+	INT		row, ox, oy, k = gamma_of(colour);
 
 	if ( cov == NULL || w <= 0 || h <= 0 || pitch < w ) {
 		return E_PAR;
@@ -1117,6 +1215,9 @@ EXPORT ER dp_put_gray( INT gid, INT x, INT y, CONST UB *cov, INT pitch,
 		tk_unl_mtx(dp_mtxid);
 		return E_OK;
 	}
+	if ( !dp_gm_made[k] ) {
+		gamma_make(k);
+	}
 	touched.left = x + ox + w;  touched.right = x + ox;
 	touched.top = y + oy + h;   touched.bottom = y + oy;
 
@@ -1140,10 +1241,10 @@ EXPORT ER dp_put_gray( INT gid, INT x, INT y, CONST UB *cov, INT pitch,
 
 				if ( a < a0 ) a = a0;
 				if ( b > a1 ) b = a1;
-				gray_run(e, line, sx, a, b, sy, colour, &touched);
+				gray_run(e, line, sx, a, b, sy, colour, k, &touched);
 			}
 		} else {
-			gray_run(e, line, sx, a0, a1, sy, colour, &touched);
+			gray_run(e, line, sx, a0, a1, sy, colour, k, &touched);
 		}
 	}
 	dp_count.calls++;

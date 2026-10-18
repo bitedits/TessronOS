@@ -21,6 +21,12 @@
 
 #include <ts/svc.h>
 
+/*
+ * The stub of one call. Another architecture's file (lib/libts/x86_64/
+ * svc_stub.S) defines its own SVCSTUB and SVCSTUB_ARCH and includes this
+ * one for the list.
+ */
+#ifndef SVCSTUB_ARCH
 	.text
 	.balign	4
 
@@ -34,6 +40,7 @@
 	ret
 	.size	\name, . - \name
 	.endm
+#endif
 
 	/* processes and time */
 	SVCSTUB	ts_ext_prc,	TSN_TS_EXT_PRC
